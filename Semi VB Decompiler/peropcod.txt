@@ -1,0 +1,1405 @@
+########################################################################
+#
+#   QB Master Peropcod.Txt:
+#
+#	This file is machine read by tool OpTabler.
+#	The format of this file is:
+#	    - "#" in column 1 causes the line to be a comment.
+#	    - blank lines are ignored.
+#	    - "@" in column 1 followed immediately by 1-6 characters
+#	      begins a new class of opcodes. These classes are used to
+#	      produce a number of opcode .inc & .h files, so that the
+#	      number of EQU/#define directives for opcodes is minimized
+#	      in each source file.  the special class name "__END_COMMON"
+#	      is reserved to indicate the end of the block of the common
+#	      block.  all new opcodes should be added after this indicator.
+#	    - each logical line describes 1 opcode and is terminated by ';'
+#	    - fields within a line are separated by '|'s or any number of
+#	      newlines
+#	    - OpTabler will report if the wrong number of fields were
+#	      found on a line.
+#	    - the field definitions within a line are:
+#		1. opcode name
+#		2. level of opcode support if a product doesn't appear
+#		   in this column, the opcode is fully supported, if it's
+#		   prefixed by a "*" it is not supported or listable,
+#		   otherwise its listable but not supported.
+#		3. scan dispatch label
+#		4. rule table index
+#		5. executor address map for this opcode
+#		6. opcode attribute count (in bytes)
+#		7. opcode's LIST rule dispatch
+#		8. offset into reserved word table for opcode (for LIST)
+#
+########################################################################
+
+#
+#	NOTE: Parser assumes opXXImp..opXXSD match ET_IMP..ET_SD
+#
+#	Start of contiguous block assumed by parser
+#
+
+
+########################################################################
+#	Start of Minimal set of opcodes
+########################################################################
+@MIN
+
+#
+# prsmain.asm assumes next 2 opcodes are contiguous
+#
+
+opBol             |                       | Ss_Bol            | 0
+                    exBol0                | OPA_fSsRude+OPA_fTxtFind
+                    LrBol                 | 0;
+opBolSp           |                       | Ss_BolEmit        | 0
+                    exBolSp               | 2+OPA_fSsRude+OPA_fTxtFind
+		    LrBolSp		  | 0;
+
+#
+# end of contiguous block assumed by prsmain.asm
+#
+
+#
+# prsmain.asm assumes next 2 opcodes are contiguous
+#
+
+opBolInclude      |                       | Ss_BolEmit        | 0
+                    exBolInclude          | 2+OPA_fSsRude+OPA_fTxtFind
+                    LrBolInclude          | 0;
+opBolIncludeSp    |                       | Ss_BolEmit        | 0
+                    exBolIncludeSp        | 4+OPA_fSsRude+OPA_fTxtFind
+		    LrBolIncludeSp	  | 0;
+
+#
+# end of contiguous block assumed by prsmain.asm
+#
+
+opBolLab          |                       | Ss_BolLabDef      | 0
+                    exBolLab              | 4+OPA_fSsRude+OPA_fTxtFind
+                    LrBolLab              | 0;
+opBolLabSp        |                       | Ss_BolLabDef      | 0
+                    exBolLabSp            | 6+OPA_fSsRude+OPA_fTxtFind
+                    LrBolLabSp            | 0;
+opBos             |                       | Ss_Bos            | 0
+                    exBos                 | OPA_fSsRude+OPA_fTxtFind
+                    LrBos                 | 0;
+opBosSp           |                       | Ss_Bos            | 0
+                    exBosSp               | 2+OPA_fSsRude+OPA_fTxtFind
+                    LrBosSp               | 0;
+opEot             |                       | Ss_Eot            | 0
+                    exEot                 | OPA_fSsRude+OPA_fTxtFind
+                    LrEot                 | 0;
+opEndProg	  |			  | Ss_Bos	      | 0
+                    exEndProg             | OPA_fTxtFind
+                    LrEndProg             | 0;
+opReParse         |                       | Ss_NotDefined     | 0
+                    ExNotDefined          | OPA_CntMask+OPA_fTxtFind
+                    LrReParse             | 0;
+
+
+########################################################################
+#	Start of ID related opcodes
+########################################################################
+
+@ID
+
+opIdLd            |                       | ss_IdLd           | LOWUND
+                    mpLdExpOpExe          | 2+OPA_fSsRude
+                    LrIdLd                | 0;
+opIdSt            |                       | Ss_IdSt           | LOWUND
+                    mpStExpOpExe          | 2+OPA_fSsRude+OPA_fExecute
+                    LrIdSt                | 0;
+opVtRf            |                       | Ss_VtRf           | LOWUND
+                    mpVtRfOpExe           | 2+OPA_fSsRude
+                    LrVtRf                | 0;
+opAIdLd           |                       | Ss_AIdLd          | LOWUND
+                    mpALdExpOpExe         | 4+OPA_fSsRude
+                    LrAIdLd               | 0;
+opAIdSt           |                       | Ss_AIdSt          | LOWUND
+                    mpAStExpOpExe         | 4+OPA_fSsRude+OPA_fExecute
+                    LrAIdSt               | 0;
+opAVtRf           |                       | Ss_AVtRf          | LOWUND
+                    mpAVtRfOpExe          | 4+OPA_fSsRude
+                    LrAVtRf               | 0;
+opOffLd           |                       | Ss_OffLd          | LOWUND
+                    mpOffLdExpOpExe       | 2+OPA_fSsRude
+                    LrOffLd               | 0;
+opOffSt           |                       | Ss_OffSt          | LOWUND
+                    mpOffStExpOpExe       | 2+OPA_fSsRude+OPA_fExecute
+		    LrOffSt		  | 0;
+
+# opcodes needed for arrays in records currently not supported in any products
+
+opOffALd	  | *qb 		   | Ss_OffLd	       | LOWUND
+                    mpOffLdExpOpExe       | 4+OPA_fSsRude
+                    LrOffALd              | 0;
+opOffASt	  | *qb 		   | Ss_OffSt	       | LOWUND
+                    mpOffStExpOpExe       | 4+OPA_fSsRude+OPA_fExecute
+                    LrOffASt              | 0;
+#
+# end of contiguous block assumed by parser
+#
+
+opAsType          |                       | Ss_AsType         | 0
+                    exAsType              | 4+OPA_fSsRude+OPA_fTxtFind
+                    LrAsType              | ORW_As;
+opAsTypeExp       |                       | Ss_AsType         | 0
+                    exAsTypeExp           | 4+OPA_fSsRude+OPA_fTxtFind
+                    LrAsTypeExp           | ORW_As;
+opNoType	  |     		  | Ss_0_0	      | 0
+                    exNoType              | 0+OPA_fTxtFind
+                    LrNoType              | 0;
+opDimOptionBase   |                       | Ss_Lit            | ET_I2+HIGH ST_LIT
+                    exDimOptionBase       | 0
+                    LrDimOptionBase       | 0;
+opElemRef         |                       | Ss_ElemRef        | 0
+                    exElemRef             | 2+OPA_fTxtFind
+                    LrElemRef             | 0;
+opShared	  |     		  | Ss_Shared	      | 0
+                    exShared              | OPA_fSsRude+OPA_fTxtFind
+                    LrShared              | ORW_Shared;
+opStDefType       |                       | Ss_StDefType      | 0
+                    exStDefType           | 6+OPA_fSsRude+OPA_fTxtFind
+		    LrStDefType 	  | 0;
+opStReDimTo	  |			  | Ss_ReDim	      | 0
+		    exStReDimTo 	  | OPA_fTxtFind+OPA_fExecute
+		    LrStReDimTo 	  | ORW_ReDim;
+opStEndType       |                       | Ss_StEndType      | 0
+                    exStEndType           | 2+OPA_fSsRude + OPA_fTxtFind
+                    LrStEndType           | ORW_Type;
+opStShared	  |     		  | Ss_StShared       | 0
+                    exStShared            | 2+OPA_fSsRude+OPA_fTxtFind
+                    LrStShared            | ORW_Shared;
+opStStatic	  |     		  | Ss_StStatic       | 0
+                    exStStatic            | 2+OPA_fSsRude+OPA_fTxtFind
+                    LrStStatic            | ORW_Static;
+opStType          |                       | Ss_StType         | 0
+                    exStType              | 4+OPA_fSsRude + OPA_fTxtFind
+                    LrStType              | ORW_Type;
+op_Static	  |     		  | Ss_Static	      | 0
+                    ex_Static             | OPA_CntMask+OPA_fTxtFind
+                    Lr_Static             | 0;
+op_Dynamic	  |     		  | Ss_Dynamic	      | 0
+                    ex_Dynamic            | OPA_CntMask+OPA_fTxtFind
+                    Lr_Dynamic            | 0;
+opStConst         |                       | Ss_StConst        | 0
+                    exStConst             | OPA_fSsRude+OPA_fTxtFind
+                    LrStConst             | ORW_CONST;
+
+
+########################################################################
+#	Start of Control-related opcodes
+########################################################################
+
+@CONTRL
+
+opBreakPoint	  |			  | Ss_Bos	      | 0
+                    exBreakPoint          | OPA_fTxtFind
+                    LrNoList              | 0;
+opByVal 	  |			  | Ss_ByVal_Seg      | ByValMarker
+                    exByVal               | 0
+                    LrRwExp1              | ORW_Byval;
+opEndSingleDef	  |     		  | Ss_EndSingleDef   | 0
+                    ExEndSingleDef        | 4+OPA_fSsRude+OPA_fTxtFind
+		    LrEndSingleDef	  | 0;
+
+#
+# NOTE:
+# For scan purposes, opEv<On|Off|Stop> do not take arguments.
+#  Therefore, each opEvxxx event handler is considered to not emit an argument.
+#  This is not actually the case.  It is handled this way for speed since:
+#	1.  the argument counts are always one
+#	2.  the argument type is always I2
+#	3.  the parser ensures that no syntax can intervene
+#
+
+opEvCom 	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exEvCom               | OPA_fExecute
+                    LrFunc1Arg            | ORW_Com;
+opEvGosub	  |     		  | Ss_MrsLabelRef    | SSR_1LabMain0Arg
+                    exEvGosub             | 2+OPA_fTxtFind+OPA_fExecute
+                    LrEvGosub             | ORW_Gosub;
+opEvKey 	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exEvKey               | OPA_fExecute
+                    LrFunc1Arg            | ORW_Key;
+opEvOff 	  |     		  | Ss_0_0	      | 0
+                    exEvOff               | OPA_fTxtFind+OPA_fExecute
+                    LrEvOff               | ORW_Off;
+opEvOn		  |     		  | Ss_0_0	      | 0
+                    exEvOn                | OPA_fTxtFind+OPA_fExecute
+                    LrEvOn                | ORW_On;
+opEvStop	  |     		  | Ss_0_0	      | 0
+                    exEvStop              | OPA_fTxtFind+OPA_fExecute
+                    LrEvStop              | ORW_Stop;
+opEvPen 	  |     		  | Ss_0_0	      | 0
+                    exEvPen               | OPA_fExecute
+                    LrRw                  | ORW_Pen;
+opEvPlay0	  |     		  | Ss_0_0	      | 0
+                    exEvPlay0             | OPA_fExecute
+                    LrRw                  | ORW_Play;
+opEvPlay1	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exEvPlay1             | OPA_fExecute
+                    LrFunc1Arg            | ORW_Play;
+opEvSignal	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exEvSignal            | OPA_fExecute
+                    LrFunc1Arg            | ORW_Signal;
+opEvStrig	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exEvStrig             | OPA_fExecute
+                    LrFunc1Arg            | ORW_Strig;
+opEvTimer0	  |     		  | Ss_0_0	      | 0
+                    exEvTimer0            | OPA_fExecute
+                    LrRw                  | ORW_Timer;
+opEvTimer1	  |     		  | Ss_4ET_ET	      | SSR_I4_None
+                    exEvTimer1            | OPA_fExecute
+                    LrFunc1Arg            | ORW_Timer;
+opLab             |                       | Ss_LabDef         | 0
+                    exLab                 | 4+OPA_fTxtFind
+                    LrLab                 | 0;
+opLabSp           |                       | Ss_LabDef         | 0
+                    exLabSp               | 6+OPA_fTxtFind
+                    LrLabSp               | 0;
+opSeg		  |     		  | Ss_ByVal_Seg      | SegMarker
+                    exSeg                 | 0
+                    LrRwExp1              | ORW_Seg;
+opStCall          |                       | Ss_StCall         | 0
+                    exStCall              | 4+OPA_fTxtFind+OPA_fExecute
+                    LrStCall              | ORW_Call;
+opStCallLess      |                       | Ss_StCallLess     | 0
+                    exStCallLess          | 4+OPA_fTxtFind+OPA_fExecute
+                    LrStCallLess          | 0;
+opStCallS	  |     		  | Ss_StCallS	      | 0
+                    exStCallS             | 4+OPA_fTxtFind+OPA_fExecute
+                    LrStCallS             | ORW_CallS;
+opStCaseElse      |                       | Ss_CaseElse       | 0
+                    mStCaseElse           | OPA_fExecute
+                    LrStCaseElse          | ORW_Case;
+opStCase          |                       | Ss_Case           | 0
+                    mStCase               | OPA_fExecute
+                    LrStCase              | ORW_Case;
+opStCaseTo        |                       | Ss_CaseTo         | 0
+                    mStCaseTo             | OPA_fExecute
+                    LrStCaseTo            | ORW_To;
+
+#
+# start of contiguous block assumed by NtCaseRelation() in parser
+#
+
+opStCaseEq        |                       | Ss_Case           | 0
+                    mStCaseEq             | 0+OPA_fExecute
+                    LrStCaseRel           | '=';
+opStCaseLt        |                       | Ss_Case           | 0
+                    mStCaseLt             | 0+OPA_fExecute
+                    LrStCaseRel           | '<';
+opStCaseGt        |                       | Ss_Case           | 0
+                    mStCaseGt             | 0+OPA_fExecute
+                    LrStCaseRel           | '>';
+opStCaseLe        |                       | Ss_Case           | 0
+                    mStCaseLe             | 0+OPA_fExecute
+                    LrStCaseRel           | "=<";
+opStCaseGe        |                       | Ss_Case           | 0
+                    mStCaseGe             | 0+OPA_fExecute
+                    LrStCaseRel           | "=>";
+opStCaseNe        |                       | Ss_Case           | 0
+                    mStCaseNe             | 0+OPA_fExecute
+		    LrStCaseRel 	  | "><";
+
+#
+# end of contiguous block assumed by NtCaseRelation() in parser
+#
+
+opStChain	  |     		  | Ss_4ET_ET	      | SSR_SD_None
+                    exStChain             | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Chain;
+opStDeclare       |                       | Ss_StDeclare      | 0
+                    exStDeclare           | OPA_CntMask+OPA_fSsRude+OPA_fTxtFind
+                    LrStDeclare           | ORW_Declare;
+opStDefFn	  |     		  | Ss_StDefFn	      | 0
+                    exStDefFn             | OPA_CntMask+OPA_fSsRude+OPA_fTxtFind+OPA_fExecute
+                    LrStDefFn             | ORW_Def;
+opStDo            |                       | Ss_Do             | 0
+                    ExStDo                | 0+OPA_fExecute
+                    LrRw                  | ORW_Do;
+opStDoUntil       |                       | Ss_DoLoop         | low STYP_DoUntil
+                    mStDoUntilOpExe       | 2+OPA_fExecute
+                    LrStDoUntil           | ORW_Until;
+opStDoWhile       |                       | Ss_DoLoop         | low STYP_DoWhile
+                    mStDoWhileOpExe       | 2+OPA_fExecute
+                    LrStDoWhile           | ORW_While;
+
+#
+# start of contiguous block assumed by NtIfStmt() in parser
+#
+
+opStElse          |                       | Ss_Else           | 0
+                    exStElse              | 2+OPA_fTxtFind
+                    LrStElse              | ORW_Else;
+opStElseLab       |                       | Ss_LabelRef       | SSR_1Lab0Arg
+                    exStElseLab           | 2+OPA_fTxtFind
+                    LrStElseLab           | ORW_Else;
+opStElseLabDirect |                       | Ss_LabelRef       | SSR_1Lab0Arg
+                    exStElseLabDirect     | 2
+		    LrStElseLabDirect	  | ORW_Else;
+
+#
+# end of contiguous block assumed by NtIfStmt() in parser
+#
+
+opStElseNop       |                       | Ss_ElseNop        | 0
+                    exStElseNop           | 0
+                    LrStElseNop           | ORW_Else;
+opStElseIf        |                       | Ss_ElseIf         | 0
+                    mStElseIfOpExe        | 2
+                    LrStElseIf            | ORW_ElseIf;
+opStEnd           |                       | Ss_0_0            | 0
+                    exStEnd               | 0
+                    LrRw                  | ORW_End;
+opStEndDef	  |     		  | Ss_StEndDef       | 0
+                    ExStEndDef            | 4+OPA_fSsRude+OPA_fTxtFind
+                    LrStEndDef            | ORW_Def;
+opStEndIfBlock    |                       | Ss_EndIf          | 0
+                    exStEndIfBlock        | 0
+                    LrStEndIfBlock        | ORW_If;
+opStEndProc       |                       | Ss_StEndProc      | 0
+                    ExStEndProc           | OPA_fTxtFind
+                    LrStEndProc           | ORW_End;
+opStEndSelect     |                       | Ss_EndSelect      | 0
+                    mStEndSelect          | 0
+                    LrStEndSelect         | ORW_Select;
+opStExitDo        |                       | Ss_Exit           | high STYP_Do
+                    ExStExitDo            | 2
+                    LrStExitDo            | ORW_Do;
+opStExitFor       |                       | Ss_Exit           | high STYP_For
+                    exStExitFor           | 2
+                    LrStExitFor           | ORW_For;
+opStExitProc      |                       | Ss_StExitProc     | 0
+                    ExStExitProc          | 2
+                    LrStExitProc          | ORW_Exit;
+opStFor           |                       | Ss_For            | 0
+                    mStForOpExe           | 4+OPA_fSsRude+OPA_fTxtFind+OPA_fExecute
+                    LrStFor               | ORW_For;
+opStForStep       |                       | Ss_For            | low STYP_Step
+                    mStForStepOpExe       | 4+OPA_fSsRude+OPA_fTxtFind+OPA_fExecute
+                    LrStForStep           | ORW_For;
+opStFunction      |                       | Ss_StFunction     | 0
+                    exStFunction          | OPA_CntMask+OPA_fSsRude+OPA_fTxtFind
+                    LrStFunction          | ORW_FUNCTION;
+opStGosub         |                       | Ss_LabelRef       | SSR_1Lab0Arg
+                    exStGosub             | 2+OPA_fTxtFind+OPA_fExecute
+                    LrStGosub             | ORW_Gosub;
+opStGosubDirect   |                       | Ss_LabelRef       | SSR_1Lab0Arg
+                    exStGosubDirect       | 2+OPA_fTxtFind
+                    LrStGosubDirect       | ORW_Gosub;
+opStGoto          |                       | Ss_LabelRef       | SSR_1Lab0Arg
+                    exStGoto              | 2+OPA_fTxtFind+OPA_fExecute
+                    LrStGoto              | ORW_Goto;
+opStGotoDirect    |                       | Ss_LabelRef       | SSR_1Lab0Arg
+                    exStGotoDirect        | 2+OPA_fTxtFind
+                    LrStGotoDirect        | ORW_Goto;
+
+#
+# start of contiguous block assumed by NtIfStmt() in parser
+#
+
+opStIf            |                       | Ss_If             | 0
+                    mStIfOpExe            | 2+OPA_fTxtFind+OPA_fExecute
+                    LrStIf                | ORW_If;
+opStIfLab         |                       | Ss_IfLab          | SSR_1Lab0Arg
+                    mStIfLabOpExe         | 2+OPA_fTxtFind+OPA_fExecute
+                    LrStIfLab             | ORW_If;
+opStIfLabDirect   |                       | Ss_IfLab          | SSR_1Lab0Arg
+                    mStIfLabDirectOpExe   | 2+OPA_fTxtFind
+                    LrStIfLabDirect       | ORW_If;
+opStIfGotoLab     |                       | Ss_IfLab          | SSR_1Lab0Arg
+                    mStIfGotoLabOpExe     | 2+OPA_fTxtFind+OPA_fExecute
+		    LrStIfGotoLab	  | ORW_If;
+
+#
+# end of contiguous block assumed by NtIfStmt() in parser
+#
+
+opStIfBlock       |                       | Ss_IfBlock        | 0
+                    mStIfBlockOpExe       | 2+OPA_fExecute
+                    LrStIfBlock           | ORW_If;
+opStLoop          |                       | Ss_Loop           | 0
+                    ExStLoop              | 2+OPA_fExecute
+                    LrStLoop              | ORW_Loop;
+opStLoopUntil     |                       | Ss_LoopWhile      | low STYP_DoUntil
+                    mStLoopUntilOpExe     | 2+OPA_fExecute
+                    LrStLoopUntil         | ORW_Until;
+opStLoopWhile     |                       | Ss_LoopWhile      | low STYP_DoWhile
+                    mStLoopWhileOpExe     | 2+OPA_fExecute
+                    LrStLoopWhile         | ORW_While;
+opStNext          |                       | Ss_Next           | 0
+                    mStNextOpExe          | 4+OPA_fSsRude
+                    LrStNext              | ORW_Next;
+opStNextId        |                       | Ss_NextId         | 0
+                    mStNextIdOpExe        | 4+OPA_fSsRude
+                    LrStNextId            | ORW_Next;
+
+opStOnError       |                       | Ss_MrsLabelRef    | SSR_1LabMain0Arg
+                    exStOnError           | 2+OPA_fTxtFind+OPA_fExecute
+                    LrStOnError           | ORW_Error;
+
+opStOnGosub       |                       | Ss_nLabelRef      | SSR_nLab1Arg
+                    exStOnGosub           | OPA_CntMask+OPA_fTxtFind+OPA_fExecute
+                    LrStOnGosub           | ORW_Gosub;
+opStOnGoto        |                       | Ss_nLabelRef      | SSR_nLab1Arg
+                    exStOnGoto            | OPA_CntMask+OPA_fTxtFind+OPA_fExecute
+                    LrStOnGoto            | ORW_Goto;
+
+#
+# start of prscg.c assumed contiguous block
+#
+
+opStRestore0      |                       | Ss_0_0            | 0
+                    exStRestore0          | 0+OPA_fExecute
+                    LrRw                  | ORW_Restore;
+opStRestore1      |                       | Ss_MrsLabelRef    | SSR_1LabMain0Arg
+                    exStRestore1          | 2+OPA_fTxtFind+OPA_fExecute
+                    LrStRestore1          | ORW_Restore;
+
+opStResume0       |                       | Ss_NotInProc      | 0
+                    exStResume0           | OPA_fTxtFind+OPA_fExecute
+                    LrRw                  | ORW_Resume;
+opStResume        |                       | Ss_MrsMrsLabRef   | SSR_1LabMain0Arg
+                    exStResume            | 2+OPA_fTxtFind+OPA_fExecute
+                    LrStResume            | ORW_Resume;
+opStResumeNext    |                       | Ss_NotInProc      | 0
+                    exStResumeNext        | OPA_fTxtFind+OPA_fExecute
+                    LrStResumeNext        | ORW_Resume;
+
+opStReturn0       |                       | Ss_0_0            | 0
+                    exStReturn0           | 0+OPA_fExecute
+                    LrRw                  | ORW_Return;
+opStReturn1	  |     		  | Ss_MrsMrsLabRef   | SSR_1LabMain0Arg
+                    exStReturn1           | 2+OPA_fTxtFind+OPA_fExecute
+                    LrStReturn1           | ORW_Return;
+#
+# end of prscg.c assumed contiguous block
+#
+
+opStRunFile       |                       | Ss_4ET_ET         | SSR_SD_None
+                    exStRunFile           | 0+OPA_fExecute
+		    LrRwExp1		  | ORW_Run;
+
+#
+# Note: the following label is always an oName.
+#
+
+opStRunLabel	  |     		  | Ss_MrsLabelRef    | SSR_1LabMain0Arg
+                    exStRunLabel          | 2+ OPA_fTxtFind+OPA_fExecute
+                    LrStRunLabel          | ORW_Run;
+opStRunMain	  |     		  | Ss_0_0	      | 0
+                    exStRunMain           | OPA_fTxtFind+OPA_fExecute
+                    LrRw                  | ORW_Run;
+opStSelectCase    |                       | Ss_Select         | 0
+                    mStSelect             | 2+OPA_fExecute
+                    LrStSelectCase        | ORW_Select;
+opStStop          |                       | Ss_0_0            | 0
+                    exStStop              | 0+OPA_fExecute
+                    LrRw                  | ORW_Stop;
+opStSub           |                       | Ss_StSub          | 0
+                    exStSub               | OPA_CntMask+OPA_fSsRude+OPA_fTxtFind
+                    LrStSub               | ORW_SUB;
+opStWait2	  |     		  | Ss_4ET_ET	      | SSR_I4I2_None
+                    exStWait2             | 0+OPA_fExecute
+                    LrRwExp2              | ORW_Wait;
+opStWait3	  |     		  | Ss_4ET_ET	      | SSR_I42I2_None
+                    exStWait3             | 0+OPA_fExecute
+                    LrRwExp3              | ORW_Wait;
+opStWend          |                       | Ss_Wend           | 0
+                    ExStWend              | 2
+                    LrStWend              | ORW_Wend;
+opStWhile         |                       | Ss_While          | 0
+                    mStWhileOpExe         | 2+OPA_fExecute
+                    LrStWhile             | ORW_While;
+opWatchExp        |                       | Ss_1FnPExe        | SSR_1Any_None
+		    mptyppexWatchExp	  | OPA_fTxtFind
+                    LrWatchExp            | 0;
+opWatchStop       |                       | Ss_4ET_ET         | SSR_I4_None
+                    exWatchStop           | OPA_fTxtFind
+                    LrWatchStop           | 0;
+
+
+########################################################################
+#	Start of general statement-related opcodes
+########################################################################
+
+@STMT
+
+opChanOut	  |			  | Ss_4ET_ET	      | SSR_I2_None
+                    exChanOut             | OPA_fExecute
+                    LrChanOut             | 0;
+opCircleAspect	  |     		  | Ss_4ET_ET	      | SSR_R4_None
+                    exCircleAspect        | OPA_fExecute
+                    LrCircleAspect        | 0;
+opCircleEnd	  |     		  | Ss_4ET_ET	      | SSR_R4_None
+                    exCircleEnd           | OPA_fExecute
+                    LrCircleEnd           | 0;
+opCircleStart	  |     		  | Ss_4ET_ET	      | SSR_R4_None
+                    exCircleStart         | OPA_fExecute
+                    LrCircleStart         | ORW_Circle;
+opCoord 	  |     		  | Ss_2FnSamePExe    | SSR_2I2R4_None
+		    mptyppexCoord	  | OPA_fExecute
+                    LrCoord               | 0;
+opCoordStep	  |     		  | Ss_2FnSamePExe    | SSR_2I2R4_None
+		    mptyppexCoordStep	  | OPA_fExecute
+                    LrCoordStep           | 0;
+opCoordSecond	  |     		  | Ss_2FnSamePExe    | SSR_2I2R4_None
+		    mptyppexCoordSecond   | OPA_fExecute
+                    LrCoordSecond         | 0;
+opCoordStepSecond |     		  | Ss_2FnSamePExe    | SSR_2I2R4_None
+		    mptyppexCoordStepSecond | OPA_fExecute
+                    LrCoordStepSecond     | 0;
+opFieldInit	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exFieldInit           | OPA_fExecute
+                    LrFieldInit           | ORW_Field;
+opFieldItem	  |     		  | Ss_FieldItem      | SSR_I2SD_None
+                    exFieldItem           | OPA_fExecute
+                    LrFieldItem           | ORW_AS;
+opInputChan       |                       | Ss_4ET_ET         | SSR_I2_None
+                    exInputChan           | OPA_fExecute
+                    LrInputChan           | 0;
+opInputEos        |                       | Ss_0_0            | 0
+                    exInputEos            | OPA_fExecute
+                    LrNoList              | ORW_Input;
+opInputPrompt     |                       | Ss_InputPrompt    | 0
+                    exInputPrompt         | OPA_fExecute+OPA_CntMask
+                    LrInputPrompt         | ORW_Input;
+opLbs             |                       | Ss_0_0            | 0
+                    exLbs                 | 0
+                    LrUnaryChar           | '#';
+opNoList0         |                       | Ss_NoList0        | 0
+                    ExNoList1             | 0
+                    LrNoList              | 0;
+opNoList1         |                       | Ss_NoList1        | 0
+                    ExNoList1             | 2+OPA_fTxtFind
+                    LrNoList1             | 0;
+opNoList2         |                       | Ss_NoList2        | 0
+                    ExNotDefined          | 4
+                    LrNoList2             | 0;
+opNoList3         |                       | Ss_NoList3        | 0
+                    ExNotDefined          | 6
+                    LrNoList3             | 0;
+opPrintSpc        |                       | Ss_4ET_ET         | SSR_I2_None
+                    exPrintSpc            | OPA_fExecute
+                    LrPrintSpc            | ORW_Spc;
+opPrintTab        |                       | Ss_4ET_ET         | SSR_I2_None
+                    exPrintTab            | OPA_fExecute
+                    LrPrintTab            | ORW_Tab;
+opPrintComma      |                       | Ss_0_0            | 0
+                    exPrintComma          | OPA_fExecute
+                    LrPrintComma          | ',';
+opPrintSemi       |                       | Ss_0_0            | 0
+                    exPrintSemi           | OPA_fExecute
+                    LrPrintSemi           | 59;
+opPrintEos        |                       | Ss_0_0            | 0
+                    exPrintEos            | OPA_fExecute
+                    LrPrintEos            | 0;
+opPrintItemComma  |                       | Ss_1FnPExe        | SSR_1Any_None
+		    mptyppexPrintItemComma | OPA_fExecute
+                    LrPrintItemComma      | ',';
+opPrintItemSemi   |                       | Ss_1FnPExe        | SSR_1Any_None
+		    mptyppexPrintItemSemi | OPA_fExecute
+                    LrPrintItemSemi       | 59;
+opPrintItemEos    |                       | Ss_1FnPExe        | SSR_1Any_None
+		    mptyppexPrintItemEos  | OPA_fExecute
+                    LrPrintItemEos        | 0;
+opQuoteRem        |                       | Ss_0_0            | 0
+                    exQuoteRem            | OPA_CntMask+OPA_fTxtFind
+                    LrQuoteRem            | 0;
+opNop             |                       | Ss_0_0            | 0
+                    exNop                 | 0
+                    LrNoList              | 0;
+op_Include	  |     		  | Ss_0_0	      | 0
+                    ex_Include            | OPA_CntMask+OPA_fTxtFind
+                    Lr_Include            | 0;
+
+#
+# beginning of statement executors
+#
+
+opStBeep	  |			  | Ss_0_0	      | 0
+		    exStBeep0		  | 0+OPA_fExecute
+                    LrRw                  | ORW_Beep;
+opStBLoad1	  |     		  | Ss_4ET_ET	      | SSR_SD_None
+		    exStBLoad1		  | 0+OPA_fExecute
+		    LrRwExp1		  | ORW_BLoad;
+opStBLoad2	  |     		  | Ss_4ET_ET	      | SSR_SDI4_None
+		    exStBLoad2		  | 0+OPA_fExecute
+		    LrRwExp2		  | ORW_BLoad;
+opStBSave	  |     		  | Ss_4ET_ET	      | SSR_SD2I4_None
+		    exStBSave		  | 0+OPA_fExecute
+		    LrRwExp3		  | ORW_BSave;
+opStChDir	  |			  | Ss_4ET_ET	      | SSR_SD_None
+		    exStChDir		  | 0+OPA_fExecute
+		    LrRwExp1		  | ORW_ChDir;
+opStCircle	  |     		  | Ss_4ET_ET	      | SSR_R4_None
+                    exStCircle            | 0+OPA_fExecute
+                    LrStCircle            | ORW_Circle;
+opStCircleColor   |     		  | Ss_4ET_ET	      | SSR_R4I2_None
+                    exStCircleColor       | 0+OPA_fExecute
+                    LrStCircleColor       | ORW_Circle;
+opStClear	  |     		  | Ss_StCnt	      | ET_I4
+                    exStClear             | 2+OPA_fExecute
+                    LrStClear             | ORW_Clear;
+opStClose	  |			  | Ss_StCnt	      | ET_I2
+                    exStClose             | 2+OPA_fExecute
+                    LrStClose             | ORW_Close;
+opStCls 	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exStCls               | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Cls;
+opStColor	  |     		  | Ss_StCnt	      | ET_I2
+                    exStColor             | 2+OPA_fExecute
+                    LrStColor             | ORW_Color;
+opStCommon	  |     		  | Ss_StCommon       | 0
+                    exStCommon            | 4+OPA_fSsRude+OPA_fTxtFind
+                    LrStCommon            | ORW_Common;
+opStData          |                       | Ss_StData         | 0
+                    exStData              | OPA_CntMask+OPA_fTxtFind
+                    LrStData              | ORW_Data;
+opStDate_         |                       | Ss_4ET_ET         | SSR_SD_None
+                    exStDate_             | 0+OPA_fExecute
+                    LrStDate_             | ORW_Date_;
+opStDefSeg0	  |     		  | Ss_0_0	      | 0
+                    exStDefSeg0           | 0+OPA_fExecute
+                    LrStDefSeg0           | ORW_DEF;
+opStDefSeg1	  |     		  | Ss_4ET_ET	      | SSR_I4_None
+                    exStDefSeg1           | 0+OPA_fExecute
+                    LrStDefSeg1           | ORW_DEF;
+opStDraw	  |     		  | Ss_4ET_ET	      | SSR_SD_None
+                    exStDraw              | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Draw;
+opStEnviron       |                       | Ss_4ET_ET         | SSR_SD_None
+                    exStEnviron           | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Environ;
+opStErase         |                       | Ss_Erase          | 0
+                    exStErase             | 2+OPA_fExecute
+                    LrStErase             | ORW_Erase;
+opStError         |                       | Ss_4ET_ET         | SSR_I2_None
+                    exStError             | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Error;
+opStFiles0	  |     		  | Ss_0_0	      | 0
+                    exStFiles0            | 0+OPA_fExecute
+                    LrRw                  | ORW_Files;
+opStFiles1	  |     		  | Ss_4ET_ET	      | SSR_SD_None
+                    exStFiles1            | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Files;
+opStGet1          |                       | Ss_4ET_ET         | SSR_I2_None
+                    exStGet1              | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Get;
+opStGet2          |                       | Ss_4ET_ET         | SSR_I2I4_None
+                    exStGet2              | 0+OPA_fExecute
+                    LrRwExp2              | ORW_Get;
+opStGetRec2       |                       | Ss_FPutGet2       | 0
+                    exStGetRec2           | 2+OPA_fExecute
+                    LrStGetRec2           | ORW_Get;
+opStGetRec3       |                       | Ss_FPutGet3       | 0
+                    exStGetRec3           | 2+OPA_fExecute
+                    LrStGetRec3           | ORW_Get;
+opStGraphicsGet   |     		  | Ss_GPutGet	      | 0
+                    exStGraphicsGet       | 0+OPA_fExecute
+                    LrStGraphicsGet       | ORW_Get;
+opStGraphicsPut   |     		  | Ss_GPutGet	      | 0
+                    exStGraphicsPut       | 2+OPA_fExecute
+                    LrStGraphicsPut       | ORW_Put;
+opStInput         |                       | Ss_Input          | 0
+                    mStInputOpExe         | 0+OPA_fExecute
+                    LrStInput             | ORW_Input;
+opStIoctl	  |     		  | Ss_4ET_ET	      | SSR_I2SD_None
+                    exStIoctl             | 0+OPA_fExecute
+                    LrRwExp2              | ORW_Ioctl;
+opStKey 	  |     		  | Ss_0_0	      | 0
+                    exStKey               | 2+OPA_fExecute
+                    LrStKey               | ORW_Key;
+opStKeyMap	  |     		  | Ss_4ET_ET	      | SSR_I2SD_None
+                    exStKeyMap            | 0+OPA_fExecute
+                    LrRwExp2              | ORW_Key;
+opStKill          |                       | Ss_4ET_ET         | SSR_SD_None
+                    exStKill              | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Kill;
+
+#
+# start of contiguous block assumed by parser
+#
+
+opStLine	  |     		  | Ss_0_0	      | 0
+                    exStLine              | 2+OPA_fExecute
+                    LrStLine              | ORW_Line;
+opStLineColor	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exStLineColor         | 2+OPA_fExecute
+                    LrStLineColor         | ORW_Line;
+opStLineStyle	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exStLineStyle         | 2+OPA_fExecute
+                    LrStLineStyle         | ORW_Line;
+opStLineStyleColor|     		  | Ss_4ET_ET	      | SSR_2I2_None
+                    exStLineStyleColor    | 2+OPA_fExecute
+                    LrStLineStyleColor    | ORW_Line;
+#
+# end of contiguous block assumed by parser
+#
+
+opStLet           |                       | Ss_0_0            | 0
+                    exStLet               | 0+OPA_fExecute
+                    LrRwSpc               | ORW_Let;
+opStLineInput     |                       | Ss_LineInput      | 0
+                    exStLineInput         | 2+OPA_fExecute
+                    LrStLineInput         | ORW_Input;
+opStLocate	  |     		  | Ss_StCnt	      | ET_I2
+                    exStLocate            | 2+OPA_fExecute
+                    LrStLocate            | ORW_Locate;
+opStLock          |                       | Ss_StLock         | 0
+                    exStLock              | 2+OPA_fExecute
+                    LrStLock              | ORW_Lock;
+opStLPrint	  |     		  | Ss_0_0	      | 0
+		    exStLPrint		  | 0+OPA_fExecute
+		    LrStLPrint		  | ORW_LPrint;
+opStLSet	  |			  | Ss_LSet	      | 0
+		    mStLSetOpExe	  | 0+OPA_fExecute
+		    LrStLSet		  | ORW_LSet;
+opStMid_2         |                       | Ss_LRSetMid       | 1
+                    mStMid_2OpExe         | 0+OPA_fExecute
+                    LrStMid_2             | ORW_Mid_;
+opStMid_3         |                       | Ss_LRSetMid       | 2
+                    mStMid_3OpExe         | 0+OPA_fExecute
+                    LrStMid_3             | ORW_Mid_;
+opStMkDir	  |			  | Ss_4ET_ET	      | SSR_SD_None
+		    exStMkDir		  | 0+OPA_fExecute
+		    LrRwExp1		  | ORW_MkDir;
+opStName          |                       | Ss_4ET_ET         | SSR_2SD_None
+                    exStName              | 0+OPA_fExecute
+                    LrStName              | ORW_Name;
+opStOpen2         |                       | Ss_4ET_ET         | SSR_SDI2_None
+                    exStOpen2             | 2+OPA_fExecute
+                    LrStOpen2             | ORW_Open;
+opStOpen3         |                       | Ss_4ET_ET         | SSR_SD2I2_None
+                    exStOpen3             | 2+OPA_fExecute
+                    LrStOpen3             | ORW_Open;
+opStOpenOld3      |                       | Ss_4ET_ET         | SSR_SDI2SD_None
+                    exStOpenOld3          | 0+OPA_fExecute
+                    LrStOpenOld3          | ORW_Open;
+opStOpenOld4      |                       | Ss_4ET_ET         | SSR_SDI2SDI2_None
+                    exStOpenOld4          | 0+OPA_fExecute
+                    LrStOpenOld4          | ORW_Open;
+opStOptionBase0   |                       | Ss_OptionBase0    | 0
+                    exStOptionBase0       | 0
+                    LrStOptionBase0       | '0';
+opStOptionBase1   |                       | Ss_OptionBase1    | 0
+                    exStOptionBase1       | 0
+                    LrStOptionBase1       | '1';
+opStOut           |                       | Ss_4ET_ET         | SSR_I4I2_None
+                    exStOut               | 0+OPA_fExecute
+                    LrRwExp2              | ORW_Out;
+opStPaint2	  |     		  | Ss_PaintWidth     | SSR_1I2SD_None
+		    mptyppexStPaint	  | 0+OPA_fExecute
+                    LrStPaint2            | ORW_Paint;
+opStPaint3	  |     		  | Ss_4ET_ET	      | SSR_SDI2SD_None
+                    exStPaint3            | 0+OPA_fExecute
+                    LrStPaint3            | ORW_Paint;
+opStPalette0	  |     		  | Ss_0_0	      | 0
+                    exStPalette0          | 0+OPA_fExecute
+                    LrRw                  | ORW_Palette;
+opStPalette2	  |     		  | Ss_4ET_ET	      | SSR_I2I4_None
+                    exStPalette2          | 0+OPA_fExecute
+                    LrRwExp2              | ORW_Palette;
+opStPaletteUsing  |     		  | Ss_PaletteUsing   | 0
+                    exStPaletteUsing      | 0+OPA_fExecute
+                    LrStPaletteUsing      | ORW_Palette;
+opStPCopy	  |     		  | Ss_4ET_ET	      | SSR_2I2_None
+                    exStPCopy             | 0+OPA_fExecute
+                    LrRwExp2              | ORW_PCopy;
+opStPlay	  |     		  | Ss_4ET_ET	      | SSR_SD_None
+                    exStPlay              | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Play;
+opStPoke          |                       | Ss_4ET_ET         | SSR_I4I2_None
+                    exStPoke              | 0+OPA_fExecute
+                    LrRwExp2              | ORW_Poke;
+opStPreset	  |     		  | Ss_0_0	      | 0
+                    exStPreset            | 0+OPA_fExecute
+                    LrStPreset            | ORW_Preset;
+opStPresetColor   |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exStPresetColor       | 0+OPA_fExecute
+                    LrStPresetColor       | ORW_Preset;
+opStPset	  |     		  | Ss_0_0	      | 0
+                    exStPset              | 0+OPA_fExecute
+                    LrStPset              | ORW_Pset;
+opStPsetColor	  |     		  | Ss_4ET_ET	      | SSR_I2_None
+                    exStPsetColor         | 0+OPA_fExecute
+                    LrStPsetColor         | ORW_Pset;
+opStPut1          |                       | Ss_4ET_ET         | SSR_I2_None
+                    exStPut1              | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Put;
+opStPut2          |                       | Ss_4ET_ET         | SSR_I2I4_None
+                    exStPut2              | 0+OPA_fExecute
+                    LrRwExp2              | ORW_Put;
+opStPutRec2       |                       | Ss_FPutGet2       | 0
+                    exStPutRec2           | 2+OPA_fExecute
+                    LrStPutRec2           | ORW_Put;
+opStPutRec3       |                       | Ss_FPutGet3       | 0
+                    exStPutRec3           | 2+OPA_fExecute
+                    LrStPutRec3           | ORW_Put;
+opStRandomize0    |                       | Ss_0_0            | 0
+                    exStRandomize0        | 0+OPA_fExecute
+                    LrRw                  | ORW_Randomize;
+opStRandomize1    |                       | Ss_4ET_ET         | SSR_R8_None
+                    exStRandomize1        | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Randomize;
+opStRead          |                       | Ss_Input          | 0
+                    mStReadOpExe          | 0+OPA_fExecute
+                    LrStRead              | ORW_Read;
+opStRem           |                       | Ss_0_0            | 0
+                    exStRem               | OPA_CntMask+OPA_fTxtFind
+                    LrStRem               | ORW_Rem;
+opStReset         |                       | Ss_0_0            | 0
+                    exStReset             | 0+OPA_fExecute
+                    LrRw                  | ORW_Reset;
+opStRmDir	  |			  | Ss_4ET_ET	      | SSR_SD_None
+		    exStRmDir		  | 0+OPA_fExecute
+		    LrRwExp1		  | ORW_RmDir;
+opStRSet	  |			  | Ss_LRSetMid       | 0
+		    mStRSetOpExe	  | 0+OPA_fExecute
+		    LrStRSet		  | ORW_RSet;
+opStScreen	  |     		  | Ss_StCnt	      | ET_I2
+                    exStScreen            | 2+OPA_fExecute
+                    LrStScreen            | ORW_Screen;
+opStSeek          |                       | Ss_4ET_ET         | SSR_I2I4_None
+                    exStSeek              | OPA_fExecute
+                    LrRwExp2              | ORW_Seek;
+opStShell0	  |    			  | Ss_0_0	      | 0
+                    exStShell0            | 0+OPA_fExecute
+                    LrRw                  | ORW_Shell;
+opStShell1	  |    			  | Ss_4ET_ET	      | SSR_SD_None
+                    exStShell1            | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Shell;
+
+opStSleep0        |                       | Ss_0_0            | 0
+                    exStSleep0            | 0+OPA_fExecute
+                    LrRw                  | ORW_Sleep;
+
+opStSound	  |     		  | Ss_4ET_ET	      | SSR_I2R4_None
+                    exStSound             | 0+OPA_fExecute
+                    LrRwExp2              | ORW_Sound;
+opStSwap	  |     		  | Ss_Swap	      | 0
+                    mStSwapOpExe          | 2+OPA_fExecute
+                    LrStSwap              | ORW_Swap;
+opStSystem        |                       | Ss_0_0            | 0
+                    exStSystem            | 0+OPA_fExecute
+                    LrRw                  | ORW_System;
+opStTime_         |                       | Ss_4ET_ET         | SSR_SD_None
+                    exStTime_             | 0+OPA_fExecute
+                    LrStTime_             | ORW_Time_;
+opStTroff	  |     		  | Ss_0_0	      | 0
+                    exStTroff             | OPA_fExecute
+                    LrRw                  | ORW_Troff;
+opStTron	  |     		  | Ss_0_0	      | 0
+                    exStTron              | OPA_fExecute
+                    LrRw                  | ORW_Tron;
+opStUnLock        |                       | Ss_StLock         | 0
+                    exStUnLock            | 2+OPA_fExecute
+                    LrStUnLock            | ORW_UnLock;
+opStView	  |     		  | Ss_StView	      | ET_I2
+                    exStView              | 0+OPA_fExecute
+                    LrStView              | ORW_View;
+opStView0	  |     		  | Ss_0_0	      | 0
+                    exStView0             | 0+OPA_fExecute
+                    LrRw                  | ORW_View;
+opStViewPrint0	  |     		  | Ss_0_0	      | 0
+                    exStViewPrint0        | 0+OPA_fExecute
+                    LrStViewPrint0        | ORW_View;
+opStViewPrint2	  |     		  | Ss_4ET_ET	      | SSR_2I2_None
+                    exStViewPrint2        | 0+OPA_fExecute
+                    LrStViewPrint2        | ORW_View;
+opStViewScreen	  |     		  | Ss_StView	      | ET_I2
+                    exStViewScreen        | 0+OPA_fExecute
+		    LrStViewScreen	  | ORW_View;
+
+opStWidth2        |                       | Ss_PaintWidth     | SSR_1I2SD_None
+		    mptyppexStWidth2	  | 0+OPA_fExecute
+                    LrStWidth2            | ORW_Width;
+
+opStWidthLPrint   |     		  | Ss_4ET_ET	      | SSR_I2_None
+		    exStWidthLPrint	  | 0+OPA_fExecute
+		    LrStWidthLPrint	  | ORW_Width;
+opStWidthFile	  |			  | Ss_4ET_ET	      | SSR_2I2_None
+		    exStWidthFile	  | 0+OPA_fExecute
+		    LrStWidthFile	  | ORW_Width;
+opStWindow	  |     		  | Ss_4ET_ET	      | SSR_4R4_None
+                    exStWindow            | 0+OPA_fExecute
+                    LrStWindow            | ORW_Window;
+opStWindow0	  |     		  | Ss_0_0	      | 0
+                    exStWindow0           | 0+OPA_fExecute
+                    LrRw                  | ORW_Window;
+opStWindowScreen  |     		  | Ss_4ET_ET	      | SSR_4R4_None
+                    exStWindowScreen      | 0+OPA_fExecute
+                    LrStWindowScreen      | ORW_Window;
+opStWrite         |                       | Ss_0_0            | 0
+                    exStWrite             | 0+OPA_fExecute
+                    LrStWrite             | ORW_Write;
+
+opUsing           |                       | Ss_4ET_ET         | SSR_SD_None
+                    exUsing               | 0
+                    LrUsing               | ORW_Using;
+
+
+########################################################################
+#	Start of opcodes related to Intrinsic functions
+########################################################################
+
+@INTRSC
+
+opAdd             |                       | Ss_2FnSamePExe    | SSR_2Any_Same
+                    mAddOpExe             | 0
+                    LrBinaryOp            | '+';
+opAnd             |                       | Ss_2FnSamePExe    | SSR_2I2I4_Same
+                    mAndOpExe             | 0
+                    LrBinaryRw            | ORW_And;
+opDiv		  |			  | Ss_2FnSamePExe    | SSR_Div
+                    mDivOpExe             | 0
+                    LrBinaryOp            | '/';
+opEQ              |                       | Ss_2FnSamePExe    | SSR_2Any_I2
+                    mEQOpExe              | 0
+                    LrBinaryOp            | '=';
+opEqv             |                       | Ss_2FnSamePExe    | SSR_2I2I4_Same
+                    mEqvOpExe             | 0
+                    LrBinaryRw            | ORW_Eqv;
+
+#
+# beginning of functions
+#
+
+opFnAbs           |                       | Ss_1FnPExe        | SSR_1NotSd_Same
+                    mFnAbsOpExe           | 0
+                    LrFunc1Arg            | ORW_Abs;
+opFnAsc           |                       | Ss_4ET_ET         | SSR_SD_I2
+                    exFnAsc               | 0
+                    LrFunc1Arg            | ORW_Asc;
+
+opFnAtn 	  |			  | Ss_1FnPExeR8      | 0
+		    exFnAtn		  | 0
+		    LrFunc1Arg		  | ORW_Atn;
+
+opCoerce	  |			  | Ss_Coerce	      | 0
+		    mptyppexCoerce	  | 0
+		    LrCoerce		  | 0;
+opFnChr_          |                       | Ss_4ET_ET         | SSR_I2_SD
+                    exFnChr_              | OPA_fHeapMove
+                    LrFunc1Arg            | ORW_Chr_;
+opFnCommand_      |                       | Ss_0FnETExe       | ET_SD
+                    exFnCommand_          | 0
+                    LrRw                  | ORW_Command_;
+
+opFnCos 	  |			  | Ss_1FnPExeR8      | 0
+		    exFnCos		  | 0
+                    LrFunc1Arg            | ORW_Cos;
+
+opFnCsrlin	  |     		  | Ss_0FnETExe       | ET_I2
+                    exFnCsrlin            | 0
+                    LrRw                  | ORW_Csrlin;
+opFnCvd 	  |     		  | Ss_4ET_ET	      | SSR_SD_R8
+                    exFnCvd               | 0
+                    LrFunc1Arg            | ORW_Cvd;
+opFnCvdmbf	  |     		  | Ss_4ET_ET	      | SSR_SD_R8
+                    exFnCvdmbf            | 0
+                    LrFunc1Arg            | ORW_Cvdmbf;
+opFnCvi 	  |     		  | Ss_4ET_ET	      | SSR_SD_I2
+                    exFnCvi               | 0
+                    LrFunc1Arg            | ORW_Cvi;
+opFnCvl 	  |     		  | Ss_4ET_ET	      | SSR_SD_I4
+                    exFnCvl               | 0
+                    LrFunc1Arg            | ORW_Cvl;
+opFnCvs 	  |     		  | Ss_4ET_ET	      | SSR_SD_R4
+                    exFnCvs               | 0
+                    LrFunc1Arg            | ORW_Cvs;
+opFnCvsmbf	  |     		  | Ss_4ET_ET	      | SSR_SD_R4
+                    exFnCvsmbf            | 0
+                    LrFunc1Arg            | ORW_Cvsmbf;
+opFnDate_         |                       | Ss_0FnETExe       | ET_SD
+                    exFnDate_             | 0
+                    LrRw                  | ORW_Date_;
+opFnEnviron_      |                       | Ss_1FnPExe        | SSR_1I2SD_SD
+		    mptyppexFnEnviron_	  | 0
+                    LrFunc1Arg            | ORW_Environ_;
+opFnEof           |                       | Ss_4ET_ET         | SSR_I2_I2
+                    exFnEof               | 0
+                    LrFunc1Arg            | ORW_Eof;
+opFnErdev         |                       | Ss_0FnETExe       | ET_I2
+                    exFnErdev             | 0
+                    LrRw                  | ORW_Erdev;
+opFnErdev_        |                       | Ss_0FnETExe       | ET_SD
+                    exFnErdev_            | 0
+                    LrRw                  | ORW_Erdev_;
+opFnErl           |                       | Ss_0FnETExe       | ET_I4
+                    exFnErl               | 0
+                    LrRw                  | ORW_Erl;
+opFnErr           |                       | Ss_0FnETExe       | ET_I2
+                    exFnErr               | 0
+                    LrRw                  | ORW_Err;
+
+opFnExp 	  |			  | Ss_1FnPExeR8      | 0
+		    exFnExp		  | 0
+		    LrFunc1Arg		  | ORW_Exp;
+
+opFnFileAttr	  |			  | Ss_4ET_ET	      | SSR_I2I2_I4
+		    exFnFileAttr	  | 0
+		    LrFunc2Args 	  | ORW_FileAttr;
+opFnFix           |                       | Ss_1FnPExe        | SSR_1NotSd_Same
+                    mFnFixOpExe           | 0
+		    LrFunc1Arg		  | ORW_Fix;
+
+opFnFre           |                       | Ss_1FnPExe        | SSR_1I2SD_I4
+		    mptyppexFnFre	  | 0
+		    LrFunc1Arg		  | ORW_Fre;
+
+opFnFreeFile	  |			  | Ss_0FnETExe       | ET_I2
+		    exFnFreeFile	  | 0
+		    LrRw		  | ORW_FreeFile;
+opFnHex_          |                       | Ss_1FnPExe        | SSR_1I2I4_SD
+		    mptyppexFnHex_	  | 0
+                    LrFunc1Arg            | ORW_Hex_;
+opFnInkey_	  |     		  | Ss_0FnETExe       | ET_SD
+                    exFnInkey_            | 0
+                    LrRw                  | ORW_Inkey_;
+opFnInp           |                       | Ss_4ET_ET         | SSR_I4_I2
+                    exFnInp               | 0
+                    LrFunc1Arg            | ORW_Inp;
+opFnInput_1       |                       | Ss_4ET_ET         | SSR_I2_SD
+                    exFnInput_1           | 0
+                    LrFunc1Arg            | ORW_Input_;
+opFnInput_2       |                       | Ss_4ET_ET         | SSR_I2I2_SD
+                    exFnInput_2           | 0
+                    LrFunc2Args           | ORW_Input_;
+
+opFnInstr2        |                       | Ss_4ET_ET         | SSR_SDSD_I2
+                    exFnInstr2            | 0
+                    LrFunc2Args           | ORW_Instr;
+opFnInstr3        |                       | Ss_4ET_ET         | SSR_I2SDSD_I2
+                    exFnInstr3            | 0
+                    LrFunc3Args           | ORW_Instr;
+
+opFnInt           |                       | Ss_1FnPExe        | SSR_1NotSD_Same
+                    mFnIntOpExe           | 0
+                    LrFunc1Arg            | ORW_Int;
+opFnIoctl_	  |     		  | Ss_4ET_ET	      | SSR_I2_SD
+                    exFnIoctl_            | OPA_fHeapMove
+                    LrFunc1Arg            | ORW_Ioctl_;
+opFnLBound1	  |			  | Ss_LUBound1       | 0
+		    exFnLBound1 	  | 0
+		    LrFunc1Arg		  | ORW_LBound;
+opFnLBound2	  |			  | Ss_LUBound2       | 0
+		    exFnLBound2 	  | 0
+		    LrFunc2Args 	  | ORW_LBound;
+opFnLCase_	  |			  | Ss_4ET_ET	      | SSR_SD_SD
+		    exFnLCase_		  | OPA_fHeapMove
+		    LrFunc1Arg		  | ORW_LCase_;
+
+opFnLTrim_	  |			  | Ss_4ET_ET	      | SSR_SD_SD
+		    exFnLTrim_		  | OPA_fHeapMove
+		    LrFunc1Arg		  | ORW_LTrim_;
+opFnLeft_         |                       | Ss_4ET_ET         | SSR_SDI2_SD
+                    exFnLeft_             | OPA_fHeapMove
+		    LrFunc2Args 	  | ORW_Left_;
+
+opFnLen           |                       | Ss_FnLen          | 0
+                    exFnLen               | 2
+                    LrFnLen               | ORW_Len;
+opFnLoc           |                       | Ss_4ET_ET         | SSR_I2_I4
+                    exFnLoc               | 0
+                    LrFunc1Arg            | ORW_Loc;
+opFnLof           |                       | Ss_4ET_ET         | SSR_I2_I4
+                    exFnLof               | 0
+		    LrFunc1Arg		  | ORW_Lof;
+
+opFnLog 	  |			  | Ss_1FnPExeR8      | 0
+		    exFnLog		  | 0
+		    LrFunc1Arg		  | ORW_Log;
+
+opFnLPos	  |     		  | Ss_4ET_ET	      | SSR_I2_I2
+		    exFnLPos		  | 0
+		    LrFunc1Arg		  | ORW_LPos;
+
+opFnMid_2         |                       | Ss_4ET_ET         | SSR_SDI2_SD
+                    exFnMid_2             | 0
+                    LrFunc2Args           | ORW_Mid_;
+opFnMid_3         |                       | Ss_4ET_ET         | SSR_SD2I2_SD
+                    exFnMid_3             | 0
+		    LrFunc3Args 	  | ORW_Mid_;
+
+opFnMkd_	  |     		  | Ss_4ET_ET	      | SSR_R8_SD
+                    exFnMkd_              | OPA_fHeapMove
+                    LrFunc1Arg            | ORW_Mkd_;
+opFnMkdmbf_	  |     		  | Ss_4ET_ET	      | SSR_R8_SD
+                    exFnMkdMbf_           | OPA_fHeapMove
+                    LrFunc1Arg            | ORW_Mkdmbf_;
+opFnMki_	  |     		  | Ss_4ET_ET	      | SSR_I2_SD
+                    exFnMki_              | OPA_fHeapMove
+                    LrFunc1Arg            | ORW_Mki_;
+opFnMkl_	  |     		  | Ss_4ET_ET	      | SSR_I4_SD
+                    exFnMkl_              | OPA_fHeapMove
+                    LrFunc1Arg            | ORW_Mkl_;
+opFnMks_	  |     		  | Ss_4ET_ET	      | SSR_R4_SD
+                    exFnMks_              | OPA_fHeapMove
+                    LrFunc1Arg            | ORW_Mks_;
+opFnMksmbf_	  |     		  | Ss_4ET_ET	      | SSR_R4_SD
+                    exFnMksmbf_           | OPA_fHeapMove
+                    LrFunc1Arg            | ORW_Mksmbf_;
+opFnOct_          |                       | Ss_1FnPExe        | SSR_1I2I4_SD
+		    mptyppexFnOct_	  | 0
+                    LrFunc1Arg            | ORW_Oct_;
+opFnPeek          |                       | Ss_4ET_ET         | SSR_I4_I2
+                    exFnPeek              | 0
+                    LrFunc1Arg            | ORW_Peek;
+opFnPen 	  |     		  | Ss_4ET_ET	      | SSR_I2_I2
+                    exFnPen               | 0
+                    LrFunc1Arg            | ORW_Pen;
+opFnPlay	  |     		  | Ss_4ET_ET	      | SSR_I2_I2
+                    exFnPlay              | 0
+                    LrFunc1Arg            | ORW_Play;
+opFnPmap	  |     		  | Ss_4ET_ET	      | SSR_R4I2_R4
+                    exFnPmap              | 0
+                    LrFunc2Args           | ORW_Pmap;
+opFnPoint1	  |     		  | Ss_4ET_ET	      | SSR_I2_R4
+                    exFnPoint1            | 0
+                    LrFunc1Arg            | ORW_Point;
+opFnPoint2	  |     		  | Ss_2FnSamePExe    | SSR_2I2R4_I2
+		    mptyppexFnPoint2	  | 0
+                    LrFunc2Args           | ORW_Point;
+opFnPos 	  |     		  | Ss_4ET_ET	      | SSR_I2_I2
+                    exFnPos               | 0
+                    LrFunc1Arg            | ORW_Pos;
+
+opFnRight_	  |			  | Ss_4ET_ET	      | SSR_SDI2_SD
+                    exFnRight_            | OPA_fHeapMove
+		    LrFunc2Args 	  | ORW_Right_;
+opFnRnd           |                       | Ss_0FnETExe       | ET_R4
+                    exFnRnd               | 0
+		    LrRw		  | ORW_Rnd;
+
+opFnRnd1          |                       | Ss_4ET_ET         | SSR_R4_R4
+                    exFnRnd1              | 0
+		    LrFunc1Arg		  | ORW_Rnd;
+
+opFnRTrim_	  |			  | Ss_4ET_ET	      | SSR_SD_SD
+		    exFnRTrim_		  | OPA_fHeapMove
+		    LrFunc1Arg		  | ORW_RTrim_;
+
+opFnSAdd	  |     		  | Ss_SAdd	      | 0
+		    exFnSAdd		  | 0
+		    LrFunc1Arg		  | ORW_SAdd;
+opFnScreen2	  |     		  | Ss_4ET_ET	      | SSR_I2I2_I2
+                    exFnScreen2           | 0
+                    LrFunc2Args           | ORW_Screen;
+opFnScreen3	  |     		  | Ss_4ET_ET	      | SSR_3I2_I2
+                    exFnScreen3           | 0
+                    LrFunc3Args           | ORW_Screen;
+opFnSeek          |                       | Ss_4ET_ET         | SSR_I2_I4
+                    exFnSeek              | 0
+                    LrFunc1Arg            | ORW_Seek;
+opFnSetMem	  |     		  | Ss_4ET_ET	      | SSR_I4_I4
+		    exFnSetMem		  | OPA_fHeapMove
+		    LrFunc1Arg		  | ORW_SetMem;
+opFnSgn           |                       | Ss_1FnPExe        | SSR_1NotSD_I2
+                    mFnSgnOpExe           | 0
+                    LrFunc1Arg            | ORW_Sgn;
+opFnShell	  |			  | Ss_4ET_ET	      | SSR_SD_I2
+		    exFnShell		  | 0
+                    LrFunc1Arg            | ORW_Shell;
+
+opFnSin 	  |			  | Ss_1FnPExeR8      | 0
+		    exFnSin		  | 0
+		    LrFunc1Arg		  | ORW_Sin;
+
+opFnSpace_        |                       | Ss_4ET_ET         | SSR_I2_SD
+                    exFnSpace_            | OPA_fHeapMove
+		    LrFunc1Arg		  | ORW_Space_;
+
+opFnSqr 	  |			  | Ss_1FnPExeR8      | 0
+		    exFnSqr		  | 0
+                    LrFunc1Arg            | ORW_Sqr;
+
+opFnStick	  |     		  | Ss_4ET_ET	      | SSR_I2_I2
+                    exFnStick             | 0
+                    LrFunc1Arg            | ORW_Stick;
+opFnStr_          |                       | Ss_1FnPExe        | SSR_1NotSD_SD
+		    mptyppexFnStr_	  | 0
+                    LrFunc1Arg            | ORW_Str_;
+opFnStrig	  |     		  | Ss_4ET_ET	      | SSR_I2_I2
+                    exFnStrig             | 0
+                    LrFunc1Arg            | ORW_Strig;
+opFnString_	  |			  | Ss_FnString       | SSR_1I2SD_SD
+                    ExNotDefined          | OPA_fHeapMove
+                    LrFunc2Args           | ORW_String_;
+opFnTan 	  |			  | Ss_1FnPExeR8      | 0
+		    exFnTan		  | 0
+                    LrFunc1Arg            | ORW_Tan;
+
+opFnTime_         |                       | Ss_0FnETExe       | ET_SD
+                    exFnTime_             | 0
+		    LrRw		  | ORW_Time_;
+
+opFnTimer         |                       | Ss_0FnETExe       | ET_R4
+                    exFnTimer             | 0
+		    LrRw		  | ORW_Timer;
+
+opFnUBound1	  |			  | Ss_LUBound1       | 0
+		    exFnUBound1 	  | 0
+		    LrFunc1Arg		  | ORW_UBound;
+opFnUBound2	  |			  | Ss_LUBound2       | 0
+		    exFnUBound2 	  | 0
+		    LrFunc2Args 	  | ORW_UBound;
+
+opFnUCase_	  |			  | Ss_4ET_ET	      | SSR_SD_SD
+		    exFnUCase_		  | OPA_fHeapMove
+		    LrFunc1Arg		  | ORW_UCase_;
+
+opFnVal           |                       | Ss_4ET_ET         | SSR_SD_R8
+                    exFnVal               | 0
+                    LrFunc1Arg            | ORW_Val;
+opFnVarPtr	  |     		  | Ss_VarPtr	      | 0
+		    exFnVarPtr		  | 0
+		    LrFunc1Arg		  | ORW_VarPtr;
+opFnVarPtr_	  |     		  | Ss_VarPtr$	      | 0
+		    exFnVarPtr_ 	  | 2+OPA_fHeapMove
+		    LrFnVarPtr_ 	  | ORW_VarPtr_;
+opFnVarSeg	  |     		  | Ss_VarPtr	      | 0
+		    exFnVarSeg		  | 0
+		    LrFunc1Arg		  | ORW_VarSeg;
+opGE              |                       | Ss_2FnSamePExe    | SSR_2Any_I2
+                    mGEOpExe              | 0
+                    LrBinaryOp            | "=>";
+opGT              |                       | Ss_2FnSamePExe    | SSR_2Any_I2
+                    mGTOpExe              | 0
+                    LrBinaryOp            | '>';
+opIDv             |                       | Ss_2FnSamePExe    | SSR_2I2I4_Same
+                    mIDvOpExe             | 0
+                    LrBinaryOp            | 05CH;
+opImp             |                       | Ss_2FnSamePExe    | SSR_2I2I4_Same
+                    mImpOpExe             | 0
+                    LrBinaryRw            | ORW_Imp;
+opLE              |                       | Ss_2FnSamePExe    | SSR_2Any_I2
+                    mLEOpExe              | 0
+                    LrBinaryOp            | "=<";
+opLT              |                       | Ss_2FnSamePExe    | SSR_2Any_I2
+                    mLTOpExe              | 0
+                    LrBinaryOp            | '<';
+opLitI2 	  |			  | Ss_LitI2	      | ET_I2+HIGH ST_Lit
+		    exLitDI2		  | 0
+		    LrLitI2		  | LIT_I2;
+opLitDI2          |                       | Ss_Lit            | ET_I2+HIGH ST_LitX
+                    exLitDI2              | 2
+                    LrLitNum              | 200H + LIT_I2;
+opLitDI4          |                       | Ss_Lit            | ET_I4+HIGH ST_LitX
+                    exLitDI4              | 4
+                    LrLitNum              | 400H + LIT_I4;
+opLitHI2          |                       | Ss_Lit            | ET_I2+HIGH ST_LitX
+                    exLitHI2              | 2
+                    LrLitNum              | 200H + LIT_H2;
+opLitHI4          |                       | Ss_Lit            | ET_I4+HIGH ST_LitX
+                    exLitHI4              | 4
+                    LrLitNum              | 400H + LIT_H4;
+opLitOI2          |                       | Ss_Lit            | ET_I2+HIGH ST_LitX
+                    exLitOI2              | 2
+                    LrLitNum              | 200H + LIT_O2;
+opLitOI4          |                       | Ss_Lit            | ET_I4+HIGH ST_LitX
+                    exLitOI4              | 4
+                    LrLitNum              | 400H + LIT_O4;
+opLitR4 	  |     		  | Ss_Lit	      | ET_R4+HIGH ST_LitX
+                    exLitR4               | 4
+                    LrLitNum              | 400H + LIT_R4;
+opLitR8           |                       | Ss_Lit            | ET_R8+HIGH ST_LitX
+                    exLitR8               | 8
+                    LrLitNum              | 800H + LIT_R8;
+opLitSD           |                       | Ss_Lit            | ET_SD
+                    exLitSD               | OPA_fHeapMove+OPA_CntMask
+                    LrLitSD               | 0;
+opLParen          |                       | Ss_LParen         | 0
+                    exLParen              | 0
+                    LrLParen              | 0;
+
+opMod             |                       | Ss_2FnSamePExe    | SSR_2I2I4_Same
+                    mModOpExe             | 0
+                    LrBinaryRw            | ORW_Mod;
+opMul             |                       | Ss_2FnSamePExe    | SSR_2NotSD_Same
+                    mMulOpExe             | 0
+                    LrBinaryOp            | '*';
+opNE              |                       | Ss_2FnSamePExe    | SSR_2Any_I2
+                    mNEOpExe              | 0
+                    LrBinaryOp            | "><";
+opNull            |                       | Ss_Lit            | ET_I2+HIGH ST_LitX
+                    ExNull                | 0
+                    LrNull                | 0;
+opUndef           |                       | Ss_Lit            | ET_I2+HIGH ST_LitX
+                    ExUndef               | 0
+                    LrUndef               | 0;
+opNot             |                       | Ss_1FnPExe        | SSR_1I2I4_Same
+                    mNotOpExe             | 0
+                    LrRwExp1              | ORW_Not;
+opOr              |                       | Ss_2FnSamePExe    | SSR_2I2I4_Same
+                    mOrOpExe              | 0
+                    LrBinaryRw            | ORW_Or;
+opPwr             |                       | Ss_2FnSamePExe    | SSR_2R4R8_Same
+                    mPwrOpExe             | 0
+                    LrBinaryOp            | '^';
+opSub             |                       | Ss_2FnSamePExe    | SSR_2NotSD_Same
+                    mSubOpExe             | 0
+                    LrBinaryOp            | '-';
+opUMi             |                       | Ss_UMi            | 0
+                    mUMiOpExe             | 0
+                    LrUnaryChar           | '-';
+opXor             |                       | Ss_2FnSamePExe    | SSR_2I2I4_Same
+                    mXorOpExe             | 0
+                    LrBinaryRw            | ORW_Xor;
+
+@AFTQB4
+
+# The next two opcodes were added for QB4b (BC6's QB), so for binary load
+# compatibility they need to immediately follow the QB4 opcodes.
+
+opEvUEvent	  |			  | Ss_0_0	      | 0
+                    exEvUEvent            | OPA_fExecute
+                    LrRw                  | ORW_UEvent;
+opStSleep1        |                       | Ss_4ET_ET         | SSR_I4_None
+                    exStSleep1            | 0+OPA_fExecute
+                    LrRwExp1              | ORW_Sleep;
+
+# End of QB4b specific opcodes.
+
+opAsTypeFixed     |                       | Ss_AsType         | 0
+                    exAsTypeFixed         | 6+OPA_fSsRude+OPA_fTxtFind
+                    LrAsTypeFixed         | ORW_As;
+opStDim           |                       | Ss_StDim          | 0
+                    exStDim               | 2+OPA_fSsRude+OPA_fTxtFind
+                    LrStoClassDecl        | ORW_Dim;
+opAElemRef	  |           *qb     	   | Ss_ElemRef        | 0
+                    exElemRef             | 4+OPA_fTxtFind
+		    LrAElemRef		  | 0;
+
+
+opFnFormat_	  | *qb           	   | Ss_Format	       | 0
+		    mptyppexFnFormat_	  | 0
+		    LrFuncHighArgs	  | ORW_Format_;
+
+
+opFnError_	  | *qb           	   | Ss_0FnETExe       | ET_SD
+                    exFnError_ 	          | 0
+                    LrRw                  | ORW_Error_;
+opFnError_1	  | *qb           	   | Ss_4ET_ET	       | SSR_I2_SD
+                    exFnError_1           | 0
+                    LrFunc1Arg            | ORW_Error_;
+
+#
+# End of common block of opcodes
+#
+@__END_COMMON
+
+
+########################################################################
+#
+#  To maintain binary compatability with QB4 all new opcodes must be added
+#  at the end of the sequence of opcodes.
+#
+########################################################################
+
+opStInclude       | *qb                   | Ss_0_0            | 0
+                    exStInclude           | OPA_CntMask+OPA_fTxtFind
+                    LrStInclude           | ORW_Include;
