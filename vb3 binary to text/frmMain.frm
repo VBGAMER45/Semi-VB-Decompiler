@@ -720,3 +720,4 @@ Private Function plGetIconIndex( _
     plGetIconIndex = ilsIcons.ListImages.Item(sKey).Index - 1
 End Function
 
+

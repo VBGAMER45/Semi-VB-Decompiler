@@ -1251,3 +1251,4 @@ Private Sub AddAOC(tAOC As ASM_OPCODE, FOC As Integer, OpLen As Byte, _
     tAOC.sEnd = EStr
     
 End Sub
+

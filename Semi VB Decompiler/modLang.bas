@@ -29,3 +29,4 @@ Private Type LangType
 End Type
 
 Global Lang As LangType
+

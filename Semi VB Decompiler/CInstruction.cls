@@ -19,3 +19,4 @@ Public dump As String
 Public offset As String
 Public command As String
 Public instLen As Long
+

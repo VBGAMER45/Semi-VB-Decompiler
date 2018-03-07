@@ -37,3 +37,4 @@ Private Sub Form_Load()
     VB3DecompilerOcx1.FileName = App.Path & "\vb2.exe"
     VB3DecompilerOcx1.DecompileFile
 End Sub
+

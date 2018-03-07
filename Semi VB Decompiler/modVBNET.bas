@@ -2754,3 +2754,4 @@ Private Function IsDotNetInstalled() As Boolean
         IsDotNetInstalled = True
     End If
 End Function
+

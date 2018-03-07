@@ -42,3 +42,4 @@ Function RegQueryStringValue(ByVal hKey As Long, ByVal strPath, ByVal strValueNa
     End If
     RegCloseKey (hSubKey)
 End Function
+

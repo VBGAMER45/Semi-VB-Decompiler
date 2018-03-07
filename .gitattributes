@@ -1,0 +1,10 @@
+*.frm eol=crlf
+*.bas eol=crlf
+*.cls eol=crlf
+*.ctl eol=crlf
+*.vbp eol=crlf
+*.txt eol=crlf
+*.ini eol=crlf
+*.iss eol=crlf
+*.wri eol=crlf
+

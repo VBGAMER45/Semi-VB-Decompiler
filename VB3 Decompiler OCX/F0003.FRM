@@ -156,3 +156,4 @@ Dim l001A As String
   control7 = gc031A & gc031E & l001A
     Height = Height - (ScaleHeight - control4.Top)
 End Sub
+

@@ -175,3 +175,5 @@ Private Sub txtRVA_Change()
     lblFileRva.Caption = "File Offset: " & GetPtrFromRVA2(txtRVA.Text)
     
 End Sub
+
+

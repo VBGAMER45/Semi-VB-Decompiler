@@ -184,3 +184,4 @@ Private Sub push(ary, value) 'this modifies parent ary object
     Exit Sub
 init:     ReDim ary(0): ary(0) = value
 End Sub
+

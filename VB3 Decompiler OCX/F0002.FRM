@@ -147,3 +147,4 @@ Private Sub Form_Resize()
     control3.Visible = True
   End If
 End Sub
+

@@ -1,0 +1,329 @@
+
+
+hash,hexSize,path
+28E5D0BABCD97679B8D2FF8C01FEBC3B,    12EA,Semi-VB-Decompiler\Readme.md
+F60D4E13E6816247A5778351B231F8CB,      7F,Semi-VB-Decompiler\.gitattributes
+B5826471520D4B8FE626052BFF881BAC,    1D15,Semi-VB-Decompiler\Semi VB API Loader\frmMain.frm
+D1747E28917A2511F870557645FD0CF5,     104,Semi-VB-Decompiler\Semi VB API Loader\frmMain.frx
+8C990D52C0972CF51F47D9EF3DDB2A57,    5000,Semi-VB-Decompiler\Semi VB API Loader\prjApiLoader.exe
+B1493A66763B6CE3E8D6D257E115AFB1,     32E,Semi-VB-Decompiler\Semi VB API Loader\prjApiLoader.vbp
+876A203AC0281D30AEF3A866A8A36346,      33,Semi-VB-Decompiler\Semi VB API Loader\prjApiLoader.vbw
+DADE4CCA54B9D4CF45F22A4E398BC02F,   CA57B,Semi-VB-Decompiler\Semi VB API Loader\winapi.dat
+DADE4CCA54B9D4CF45F22A4E398BC02F,   CA57B,Semi-VB-Decompiler\Semi VB API Loader\data\winapi.dat
+4E7FF5AB29221E312675B9592294C784,    7000,Semi-VB-Decompiler\Semi VB Decompiler\ApiLoader.exe
+D250485C7E35C24126C31E92653150F4,    13F1,Semi-VB-Decompiler\Semi VB Decompiler\CAssembler.cls
+E6FAB2BBC1416D763ECE1EB0F10DFDCC,    16D4,Semi-VB-Decompiler\Semi VB Decompiler\CDisassembler.cls
+DF79A441137C1EF7DC362CDCE1145DE0,     21C,Semi-VB-Decompiler\Semi VB Decompiler\CInstruction.cls
+72225EBE3937802EBD612E8DB2E42075,    23B4,Semi-VB-Decompiler\Semi VB Decompiler\DecompilerInstall.iit
+E6C331AEA522BA1EA6862D48C79A298E,    32D5,Semi-VB-Decompiler\Semi VB Decompiler\MSVBVM50.EXP
+54FF42A0EC330C0746A6415891F7E5FB,    B106,Semi-VB-Decompiler\Semi VB Decompiler\ModernLeft.bmp
+3CDC28052FA1F5CFB70DF3803D5ADFDF,    1192,Semi-VB-Decompiler\Semi VB Decompiler\ModernTop.bmp
+06EE7BB3C681B9FA8AF4280A154EE133,   3BAC0,Semi-VB-Decompiler\Semi VB Decompiler\Msflxgrd.ocx
+EE4E78D7AB62B04E127E66FF4610577F,    5000,Semi-VB-Decompiler\Semi VB Decompiler\Project1.dll
+C5F08A42A38AA80DE2AA94FD1EDD0F80,     420,Semi-VB-Decompiler\Semi VB Decompiler\Project1.exp
+3070E922B4D2BE37F41752BC5F2317DB,     A38,Semi-VB-Decompiler\Semi VB Decompiler\Project1.lib
+F83C1A14CBFD1FF312EC367EE44F6A06,  1B8000,Semi-VB-Decompiler\Semi VB Decompiler\PropertyIDIV2_stage.DLL
+63834CA54569ABE28A0C4EB719171134,    22FE,Semi-VB-Decompiler\Semi VB Decompiler\ReadMe.txt
+3239E9543C249E10EB30CB00319EC06E,  2DE9CB,Semi-VB-Decompiler\Semi VB Decompiler\SemiVBDecompilerInstall.exe
+E94EF8491B8467F99DB5AD12D2781080,     B8E,Semi-VB-Decompiler\Semi VB Decompiler\VBDecompiler.vbp
+0CC62CDF98573B0CCED72D36F2954C35,     4E6,Semi-VB-Decompiler\Semi VB Decompiler\VBDecompiler.vbw
+AEA9AED420895D6F040CCC32739D187E,   12000,Semi-VB-Decompiler\Semi VB Decompiler\VBObfuscator.exe
+609498720B57C44CC873115BE23248B2,    4600,Semi-VB-Decompiler\Semi VB Decompiler\XTimePlan.ocx
+2912FF082EEE2C80543B6E155DA0EFEC,   174C9,Semi-VB-Decompiler\Semi VB Decompiler\backupmodPCode.bas
+4219192ACF00A39F10F6E76439290580,   1E000,Semi-VB-Decompiler\Semi VB Decompiler\cPopMenu6.ocx
+9BBE4C6F3E35EF5F74CBBDE18AD76BB9,     493,Semi-VB-Decompiler\Semi VB Decompiler\clsConsole.cls
+984B2D57A378342A49BE8AEF05D3C196,    1932,Semi-VB-Decompiler\Semi VB Decompiler\clsFile.cls
+A2D5E69FD070758E81C6E93121EE8652,    36B8,Semi-VB-Decompiler\Semi VB Decompiler\clsMemoryMap.cls
+F1EA953194A4B4A4DBB1FD90A6C4B025,    8729,Semi-VB-Decompiler\Semi VB Decompiler\clsTypeLibInfo.cls
+954EDABB236FC04AD551B14F635AEA7B,    8000,Semi-VB-Decompiler\Semi VB Decompiler\dmProject1.dll
+149291D1D071A5852864A72F0A234FED,    34A9,Semi-VB-Decompiler\Semi VB Decompiler\frmAbout.frm
+54A9372CAB7B076CBE513B6405BD840C,    2EDE,Semi-VB-Decompiler\Semi VB Decompiler\frmAbout.frx
+1A4D2B2B466CCE55A4FD44AC970ADDD8,    15DE,Semi-VB-Decompiler\Semi VB Decompiler\frmAddressToFileOffset.frm
+E1518E3B22195EFC02D8F955D224ADE9,    1B28,Semi-VB-Decompiler\Semi VB Decompiler\frmAdvDecompile.frm
+86AB98A3FD1FF381DEFDA148E2FB5064,     E92,Semi-VB-Decompiler\Semi VB Decompiler\frmCheckUpdate.frm
+A7BF118F7852F8D8BA738FC24B6818B1,    27A2,Semi-VB-Decompiler\Semi VB Decompiler\frmCheckUpdate.frx
+66BCC48C5663DD7ABF24234D4FB3617F,   3D354,Semi-VB-Decompiler\Semi VB Decompiler\frmMain.frm
+A01AF2DE15A99395F2CB6938086100F9,   16C28,Semi-VB-Decompiler\Semi VB Decompiler\frmMain.frx
+05464E8C10B071A86657444948D2FDAF,      66,Semi-VB-Decompiler\Semi VB Decompiler\frmMain.log
+6F8E6A2DDCC1FC0FA8B7B376673B857C,    274E,Semi-VB-Decompiler\Semi VB Decompiler\frmNativeDecompile.frm
+B5C005F1BFFAE11C34D2AD16686A3B60,    3945,Semi-VB-Decompiler\Semi VB Decompiler\frmOptions.frm
+C568A7BD42CA3787D81AB42C9265D7B2,     10E,Semi-VB-Decompiler\Semi VB Decompiler\frmOptions.frx
+3C8B29924A7BFE0C8BCF44F60C4FD0E6,    21D2,Semi-VB-Decompiler\Semi VB Decompiler\frmPcode.frm
+8F9AA1CE1D7314A0CA7EB9C90037F89C,    25BB,Semi-VB-Decompiler\Semi VB Decompiler\frmStartUp.frm
+233F5C79486F2DAFF144F6D6C98B470C,     237,Semi-VB-Decompiler\Semi VB Decompiler\mdlTools.bas
+DAC2007F05D0D4270FA1CB7757154864,    1818,Semi-VB-Decompiler\Semi VB Decompiler\modAntiDecompiler.bas
+B896B175E440F558D85FFE0E41F77BC2,   10CA4,Semi-VB-Decompiler\Semi VB Decompiler\modAsm.bas
+E18E5825FE5DB19FC90F9D668B9BEB4E,    484F,Semi-VB-Decompiler\Semi VB Decompiler\modBits.bas
+8E97163E4123B3C3EA36F8873AF7B25A,    4739,Semi-VB-Decompiler\Semi VB Decompiler\modCOM.bas
+F177DEE32745A6C267E7BC07AE3099BD,   12813,Semi-VB-Decompiler\Semi VB Decompiler\modControls.bas
+9A1D667FE8860ED7851D6E58E6C1CBC4,    1C8E,Semi-VB-Decompiler\Semi VB Decompiler\modDebugExe.bas
+07A0AC1D38C716F27D7509282A6E4089,    1C82,Semi-VB-Decompiler\Semi VB Decompiler\modFrx.bas
+665B4ABD00AA0531ED1708D4CD07A50C,   1A031,Semi-VB-Decompiler\Semi VB Decompiler\modGlobals.bas
+322BFEDAA704A776837F33A7B78DC709,      3B,Semi-VB-Decompiler\Semi VB Decompiler\modHelperText.bas
+D4DAC8B29E1400EB11CE3F9EEABEBD3C,     3A3,Semi-VB-Decompiler\Semi VB Decompiler\modLang.bas
+1883FBC064FE20336DD1B7104CB2B838,      AE,Semi-VB-Decompiler\Semi VB Decompiler\modMain.bas
+4E9ECCC0CCB12DB567D660192399E74C,     CFD,Semi-VB-Decompiler\Semi VB Decompiler\modNative.bas
+FF2F8E314ABE754BBA7483098F1E467B,    113C,Semi-VB-Decompiler\Semi VB Decompiler\modNeFormat.bas
+4AC9FBF207D90A2CC500D5986F163631,    C7E8,Semi-VB-Decompiler\Semi VB Decompiler\modOutput.bas
+FC3F847A71157E9B894408C14114DE21,   1C149,Semi-VB-Decompiler\Semi VB Decompiler\modPCode.bas
+93ABB844367DB10346FEC196A85FB04A,    144C,Semi-VB-Decompiler\Semi VB Decompiler\modPCodeToVB.bas
+57FB1AA8005E92A967E7E0BCE6A35317,    931D,Semi-VB-Decompiler\Semi VB Decompiler\modPeSkeleton.bas
+153C4B6F062935426740E9AFD1303B26,     845,Semi-VB-Decompiler\Semi VB Decompiler\modRegistry.bas
+4ECCB457FE507795B70672F03EDD6BAB,     A45,Semi-VB-Decompiler\Semi VB Decompiler\modTypeLB.bas
+07C3A6DAF9F0B72EE74C7692B738F996,      34,Semi-VB-Decompiler\Semi VB Decompiler\modVB1.bas
+8403A8473338877A89A39F65A2DCB835,      34,Semi-VB-Decompiler\Semi VB Decompiler\modVB3.bas
+DFE7C2327469267E0E9132C642F95BAF,    161B,Semi-VB-Decompiler\Semi VB Decompiler\modVB4.bas
+70FF830F9FA790AC2F001CDBBE7675F3,      34,Semi-VB-Decompiler\Semi VB Decompiler\modVB5.bas
+1FF456711BA1BDD498EB74DCBD617DAF,   19EC9,Semi-VB-Decompiler\Semi VB Decompiler\modVBNET.bas
+E5CFD80DB9C84B66331B0423A09B90F0,    13DF,Semi-VB-Decompiler\Semi VB Decompiler\modWindowSpy.bas
+18FE4365118D0099AD884E015182FD92,   1F000,Semi-VB-Decompiler\Semi VB Decompiler\olly.dll
+CFD590E96496871920ADDC7CAE646860,    BBBD,Semi-VB-Decompiler\Semi VB Decompiler\opcode.def
+45DC2278ACD283031801E26AF14B7CA4,    7315,Semi-VB-Decompiler\Semi VB Decompiler\opcodes.txt
+F215FB67A587C98EBD2E0F3899C25652,   74000,Semi-VB-Decompiler\Semi VB Decompiler\pePropertySheet.ocx
+F1CFFEF9C7DFB951AEA82B6801772024,   112D8,Semi-VB-Decompiler\Semi VB Decompiler\peropcod.txt
+67ED3DD87B5BD633528EAC59B8C6767E,       4,Semi-VB-Decompiler\Semi VB Decompiler\temp.dat
+84AB8C6162FCB931B4AD1A7100D0DF0F,     292,Semi-VB-Decompiler\Semi VB Decompiler\userForm.ctl
+6F4E70C0C0F9D64FD48E77790FD1A1BD,   C9D5D,Semi-VB-Decompiler\Semi VB Decompiler\winapi.dat
+4E7FF5AB29221E312675B9592294C784,    7000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\ApiLoader.exe
+90A39346E9B67F132EF133725C487FF6,   20710,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\MSINET.OCX
+661BF037C143117522CBA55840965FFE,  152510,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\MSVBVM60.DLL
+714CF24FC19A20AE0DC701B48DED2CF6,  1044C0,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\Mscomctl.ocx
+06EE7BB3C681B9FA8AF4280A154EE133,   3BAC0,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\Msflxgrd.ocx
+6801F45DFAC0743D3A0D73B121E261DA,   2A910,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\RICHED32.DLL
+EB4A8F35A70A887FE32F43A3AA7D4E9A,   31CC8,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\RICHTX32.OCX
+94C5B60FF2054FB549E5E2B08C923820,    22FE,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\ReadMe.txt
+DC7A3BC0FC185CD68848DC6F7D7B026B,    A000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\SSubTmr6.dll
+EE1FEBFDA02DF2870EC1D799F619793A,  106000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\SemiVBDecompiler.exe
+F0194E07CE833C0EB108BDB7D3B5304A,     2DA,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\SemiVBDecompiler.exe.manifest
+89C5AF2F4202DFC9AE4E98A26A1342B6,    6000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\SemiVBDecompilerHelper.dll
+908938D3BA2D870EE9FC6238A4C6AF95,   332C8,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\Tabctl32.ocx
+C1CE4F6E76557A4A92B2CE0604A5E753,   1A000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\TypeLibraryExplorer.exe
+85BD1B351115F396FBD929AF1AC62B24,   12000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\VBObfuscator.exe
+87AF6A03A3DF4208C63A518CDA4EE59E,    E2A4,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\WinSubHook2.tlb
+4219192ACF00A39F10F6E76439290580,   1E000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\cPopMenu6.ocx
+D76F0EAB36F83A31D411AEAF70DA7396,   22400,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\comdlg32.ocx
+7057607385419CD31F68C93D829D55CC,   8B000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\oleaut32.dll
+B01AE32E9BE9EA03643BCF5BC590BA41,   1A000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\olepro32.dll
+18FE4365118D0099AD884E015182FD92,   1F000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\olly.dll
+F215FB67A587C98EBD2E0F3899C25652,   74000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\pePropertySheet.ocx
+5950211FCC06A876F838D1996A77022A,   2F000,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\prjVBBinaryToText.exe
+C91C669DD681B6F00A87EEE264FCADE0,     232,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\readmebinarytotext.txt
+0857394E30DE11CA0CD9497E310D6469,    4600,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\stdole2.tlb
+445CA9EEA4C2D703A113F23104B67236,   24400,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\tlbinf32.dll
+00153914DB499A6B54DDC9189151C946,   2DEF9,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\data\VB32.OLB
+376F14DCD409160260FDF98B20FB12DC,   4825A,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\data\VB6.OLB
+4553B30993D512E8E512E50482D9B9A5,    1CB0,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\data\vb4api.txt
+64EC8881C5ADBEFEB5CE990896F77ABC,    513F,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\data\vb5api.txt
+C578D2FAF4A97D34A822E70A28C3D1CA,    586E,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\data\vb6api.txt
+6ADF56FE2A80DDB4389031DB98A79BBD,   CABE5,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\data\winapi.dat
+086819C0D7446CCD5F4124023EB9E01B,     2C5,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\lang\Dutch.ini
+1A0ED5CB765B30B4E4B15657FCB13A28,     236,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\lang\English.ini
+83BB6551DAFE2DA333D4DF8DB7453AFE,     2B8,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\lang\French.ini
+C556CC97CF2DF170207CEDE733D0EB65,     2A4,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\lang\German.ini
+696C60CC5F9D979758ACFEB2B475B079,     276,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\lang\Italian.ini
+A6E6F869AE69173E0D50590379A5E57D,     2AC,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\lang\Portuguese.ini
+A2C16F78F70B1DB0FF0AFF61EBB888D7,     2CB,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\lang\Spanish.ini
+4B45B1FC18C6A25F3CCCDC1A0B66DF1C,      73,Semi-VB-Decompiler\Semi VB Decompiler\Install Folder\lang\lang.ini
+366FDE60E794E657B4ECCCB019ACCBAC,     431,Semi-VB-Decompiler\Semi VB Decompiler\data\ComFix.txt
+00153914DB499A6B54DDC9189151C946,   2DEF9,Semi-VB-Decompiler\Semi VB Decompiler\data\VB32.OLB
+376F14DCD409160260FDF98B20FB12DC,   4825A,Semi-VB-Decompiler\Semi VB Decompiler\data\VB6.OLB
+96FFBC9E2C36D5756B8B3EEDE39AB595,    9987,Semi-VB-Decompiler\Semi VB Decompiler\data\asm.txt
+4553B30993D512E8E512E50482D9B9A5,    1CB0,Semi-VB-Decompiler\Semi VB Decompiler\data\vb4api.txt
+64EC8881C5ADBEFEB5CE990896F77ABC,    513F,Semi-VB-Decompiler\Semi VB Decompiler\data\vb5api.txt
+C578D2FAF4A97D34A822E70A28C3D1CA,    586E,Semi-VB-Decompiler\Semi VB Decompiler\data\vb6api.txt
+6ADF56FE2A80DDB4389031DB98A79BBD,   CABE5,Semi-VB-Decompiler\Semi VB Decompiler\data\winapi.dat
+306232E5AC0CE5805B3D09E2210254A6,     1AE,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\ANIBUTON.300
+7A4AABA6C6C8D42FCB3DFF7D76157D74,     201,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\CMDIALOG.300
+93BD28E9385F3F16DBB4A582EA80DED2,     255,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\CRYSTAL.300
+D2A794DFA36D8DB495250A32B994A3CC,      27,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\DBVBZIP.300
+69CE9B9529202F339300251EC942A0E7,    7F00,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\FRMS2TXT.EXE
+719CEB5DFDB62EA2EE3E20CFBA923D39,      4B,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\FRMS2TXT.INI
+927DB59FB9E6B7707FD8609BF191BCA5,     A80,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\FRMS2TXT.WRI
+75FE204590DD03D96B495D7A37ED2674,     117,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\GAUGE.300
+55D0272D6B53A5ACBA15AAFB69A74F46,     61C,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\GRAPH.300
+F7415FD11D8E884AF9DA91602C5DE3FE,     2A9,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\GRID.300
+8A10E3F88AB0F958E8BF8D8D2AC11A55,      AE,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\KEYSTAT.300
+2BBF9ED38E955341DAA49F1A44E2D197,     7D5,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\MCI.300
+0E207CB3B1BF50B70C248011832EC5D9,     220,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\MSCOMM.300
+87261CE97BDA43240840201D61B47208,     37C,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\MSMAPI.300
+EC4B99DF5191516244FBFB225BC913BA,     1C0,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\MSMASKED.300
+C8756B4AA22244A18F27B7A52DDF47B2,     2E5,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\MSOLE2.300
+5793EBA448385954AEF6474498048236,     25E,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\MSOUTLIN.300
+E1511D08D893E74A62717C137DA4F19C,     7A3,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\PENCNTRL.300
+769612DDFE1B7ADC1B56F3AA15E876E8,     138,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\PICCLIP.300
+1C9F556887B09EACEA45E7AEDC66DA1F,     15B,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\SPIN.300
+49E1923AE36CE3CA14C5A99FC9728F88,     5B0,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\STD_P_E.300
+3E8821D1C046929FFA679B0B0475914A,     5FC,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\THREED.300
+ABE5AC5FE535E58EAFE56C829021AE08,      27,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\VBCTL3D.300
+623C878DD18D777559B9265B17595FF7,   152AE,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\VBDIS2X.DAT
+7850C0A2B6D8F587AEDBFCB13517EF30,    12B8,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\VBDIS3I.DAT
+8FF24E33904372C1381A023290A13978,   152AE,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\VBDIS3X.DAT
+5B0FC02EE1994ED75D25E646C7275907,    1AF8,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\VBRUN200.300
+46452C6C7A8C36E848F86B0CD274B42D,    210F,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\VBRUN300.300
+10AD3CAD4FEABCED9CD6D14E7F88F9C2,     299,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\VBTRANS.DAT
+EC4B99DF5191516244FBFB225BC913BA,     1C0,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\_MSMASKED.300
+81051BCC2CF1BEDF378224B0A93E2877,       2,Semi-VB-Decompiler\Semi VB Decompiler\data\vb3\empty.frm
+086819C0D7446CCD5F4124023EB9E01B,     2C5,Semi-VB-Decompiler\Semi VB Decompiler\lang\Dutch.ini
+1A0ED5CB765B30B4E4B15657FCB13A28,     236,Semi-VB-Decompiler\Semi VB Decompiler\lang\English.ini
+83BB6551DAFE2DA333D4DF8DB7453AFE,     2B8,Semi-VB-Decompiler\Semi VB Decompiler\lang\French.ini
+C556CC97CF2DF170207CEDE733D0EB65,     2A4,Semi-VB-Decompiler\Semi VB Decompiler\lang\German.ini
+696C60CC5F9D979758ACFEB2B475B079,     276,Semi-VB-Decompiler\Semi VB Decompiler\lang\Italian.ini
+A6E6F869AE69173E0D50590379A5E57D,     2AC,Semi-VB-Decompiler\Semi VB Decompiler\lang\Portuguese.ini
+A2C16F78F70B1DB0FF0AFF61EBB888D7,     2CB,Semi-VB-Decompiler\Semi VB Decompiler\lang\Spanish.ini
+4B45B1FC18C6A25F3CCCDC1A0B66DF1C,      73,Semi-VB-Decompiler\Semi VB Decompiler\lang\lang.ini
+E51572DC65FC98531E13EFEADE8EAD94,      E7,Semi-VB-Decompiler\VB3 Decompiler OCX\EMPTY.FRM
+3941B05F540516C6D054B8B5E162890C,    20E6,Semi-VB-Decompiler\VB3 Decompiler OCX\F0000.FRM
+7E2032F291FC4E48E8BF32863CFC507F,       C,Semi-VB-Decompiler\VB3 Decompiler OCX\F0000.FRX
+53C19F4B806F90FF33FD974745DC8943,     A9A,Semi-VB-Decompiler\VB3 Decompiler OCX\F0001.FRM
+ABB0B5EDD4620609B8AB8B51952A8CFF,     F31,Semi-VB-Decompiler\VB3 Decompiler OCX\F0002.FRM
+436255612148FD780386CFB550B02A9D,    1242,Semi-VB-Decompiler\VB3 Decompiler OCX\F0003.FRM
+7E2032F291FC4E48E8BF32863CFC507F,       C,Semi-VB-Decompiler\VB3 Decompiler OCX\F0003.frx
+3981A76F0455257DCC07878FB299B1D8,    213C,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE1.BAS
+315C29C2812067E1A5B0AD5EBB20CD07,    1460,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE10.BAS
+F41A56A556BB8625C27EFEA5AE72B8F3,    6460,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE11.BAS
+C0635660A9C08006E346457E2026BDF7,    2B5A,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE12.BAS
+9435D53BFFEBAD86ED882C65504EA7F3,     F2F,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE13.BAS
+18902AED93CF5E8B2798E8232062F69C,    62B2,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE14.BAS
+DFF43749307C728222A1D8D88B75C7F3,     17F,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE15.BAS
+3EABC9C1FBAAEC58877AE00C7D98EC06,    5D83,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE16.BAS
+874F4E1620C34AC205D7F614C3E4622C,    244E,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE17.BAS
+18F9F025CC035B00DA733DE25161D94B,     B7E,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE18.BAS
+B06BC93CC76D3B136E25D58F060AD589,      1B,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE19.BAS
+477AD72F779567F819A6934332009733,    196B,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE2.BAS
+29B41863713AB23B9069F7187F5DF785,     BE6,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE20.BAS
+28944D9A6A37402484CB57A71023321E,     6A7,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE21.BAS
+602B7B7041F29A77B537E31FC5138182,      1B,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE22.BAS
+10DE85A535869482F4C69853233C298D,    11EC,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE3.BAS
+C189BE99C75FB07DDF5F20D6F0A41E33,    4205,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE4.BAS
+6241DDF55C36CB052E318696EA55AC87,     80D,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE5.BAS
+7442DBC493783051A1BFD821C045D318,    802D,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE6.BAS
+2273D0CCD6EFF4C23F550A6E541D279F,    19C2,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE7.BAS
+9506E4905F5F94A052241C83543D9665,     2AA,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE8.BAS
+B839D1E9954013F6B7E9E9C634F7697C,      1A,Semi-VB-Decompiler\VB3 Decompiler OCX\MODULE9.BAS
+D34D30ECF59A8EAB237FDD716C3FDCB2,    10C9,Semi-VB-Decompiler\VB3 Decompiler OCX\VB3DecompilerOcx.ctl
+6A3CBD9F4A2694959A8CE494C1729E75,   15C51,Semi-VB-Decompiler\VB3 Decompiler OCX\VB3DecompilerOcx.ctx
+C042564D44FC66C2F9FE65C49DC6A7F0,     C12,Semi-VB-Decompiler\VB3 Decompiler OCX\frmAbout.frm
+D781FAB2A95D10F899818EE98E1ACACB,     51B,Semi-VB-Decompiler\VB3 Decompiler OCX\frmTester.frm
+71E21C579A7AD2D47EC3B3E6E1486C31,    4BB7,Semi-VB-Decompiler\VB3 Decompiler OCX\modGlobals.bas
+F8672CA4FBB445FBAC8C4B5BBD77C27F,     2D8,Semi-VB-Decompiler\VB3 Decompiler OCX\prjTester.vbp
+5456874555BF4E720944B8EF9304BD3C,      35,Semi-VB-Decompiler\VB3 Decompiler OCX\prjTester.vbw
+57A7760F812D328017BDD921A1033304,     438,Semi-VB-Decompiler\VB3 Decompiler OCX\prjVB3Decompiler.exp
+C313EF591487125348DDE34574B16FA8,     AC8,Semi-VB-Decompiler\VB3 Decompiler OCX\prjVB3Decompiler.lib
+4B3E245A33139901B628FC2A2C0DC370,    2600,Semi-VB-Decompiler\VB3 Decompiler OCX\prjVB3Decompiler.oca
+074AC7B4F3E8F1EA020253B7BAF1F470,   56000,Semi-VB-Decompiler\VB3 Decompiler OCX\prjVB3Decompiler.ocx
+B07DA6FB8807884EA0A55BCE1DE79EAF,     63C,Semi-VB-Decompiler\VB3 Decompiler OCX\prjVB3Decompiler.vbp
+5C48B0619744E47336AF0F67AE0A2D64,     2FD,Semi-VB-Decompiler\VB3 Decompiler OCX\prjVB3Decompiler.vbw
+306232E5AC0CE5805B3D09E2210254A6,     1AE,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\ANIBUTON.300
+7A4AABA6C6C8D42FCB3DFF7D76157D74,     201,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\CMDIALOG.300
+93BD28E9385F3F16DBB4A582EA80DED2,     255,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\CRYSTAL.300
+D2A794DFA36D8DB495250A32B994A3CC,      27,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\DBVBZIP.300
+E51572DC65FC98531E13EFEADE8EAD94,      E7,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\EMPTY.FRM
+69CE9B9529202F339300251EC942A0E7,    7F00,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\FRMS2TXT.EXE
+748CD1B2D2F581A8023710A16B170EE8,      43,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\FRMS2TXT.INI
+927DB59FB9E6B7707FD8609BF191BCA5,     A80,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\FRMS2TXT.WRI
+75FE204590DD03D96B495D7A37ED2674,     117,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\GAUGE.300
+55D0272D6B53A5ACBA15AAFB69A74F46,     61C,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\GRAPH.300
+F7415FD11D8E884AF9DA91602C5DE3FE,     2A9,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\GRID.300
+8A10E3F88AB0F958E8BF8D8D2AC11A55,      AE,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\KEYSTAT.300
+2BBF9ED38E955341DAA49F1A44E2D197,     7D5,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\MCI.300
+0E207CB3B1BF50B70C248011832EC5D9,     220,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\MSCOMM.300
+87261CE97BDA43240840201D61B47208,     37C,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\MSMAPI.300
+C8756B4AA22244A18F27B7A52DDF47B2,     2E5,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\MSOLE2.300
+5793EBA448385954AEF6474498048236,     25E,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\MSOUTLIN.300
+E1511D08D893E74A62717C137DA4F19C,     7A3,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\PENCNTRL.300
+769612DDFE1B7ADC1B56F3AA15E876E8,     138,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\PICCLIP.300
+1C9F556887B09EACEA45E7AEDC66DA1F,     15B,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\SPIN.300
+49E1923AE36CE3CA14C5A99FC9728F88,     5B0,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\STD_P_E.300
+3E8821D1C046929FFA679B0B0475914A,     5FC,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\THREED.300
+623C878DD18D777559B9265B17595FF7,   152AE,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\VBDIS2X.DAT
+7850C0A2B6D8F587AEDBFCB13517EF30,    12B8,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\VBDIS3I.DAT
+8FF24E33904372C1381A023290A13978,   152AE,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\VBDIS3X.DAT
+5B0FC02EE1994ED75D25E646C7275907,    1AF8,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\VBRUN200.300
+46452C6C7A8C36E848F86B0CD274B42D,    210F,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\VBRUN300.300
+10AD3CAD4FEABCED9CD6D14E7F88F9C2,     299,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\VBTRANS.DAT
+EC4B99DF5191516244FBFB225BC913BA,     1C0,Semi-VB-Decompiler\VB3 Decompiler OCX\vb3\_MSMASKED.300
+AEA9AED420895D6F040CCC32739D187E,   12000,Semi-VB-Decompiler\VBEXEObfuscator\VBObfuscator.exe
+E0D99F74798EC371B29A7C0E072A9AFD,    345F,Semi-VB-Decompiler\VBEXEObfuscator\frmAbout.frm
+54A9372CAB7B076CBE513B6405BD840C,    2EDE,Semi-VB-Decompiler\VBEXEObfuscator\frmAbout.frx
+F8AF3E871E835ECB02E35F22A7ED195F,    4756,Semi-VB-Decompiler\VBEXEObfuscator\frmMain.frm
+288826BE8ABB6AEDB0C310A024C2C2D2,     3D4,Semi-VB-Decompiler\VBEXEObfuscator\frmMain.frx
+40706490BF51DA49DCB15A6E739C3447,    55FE,Semi-VB-Decompiler\VBEXEObfuscator\modGlobals.bas
+CB721A046B870C7C9E446CCEDDB10DD9,    10DB,Semi-VB-Decompiler\VBEXEObfuscator\modNeFormat.bas
+F56E54581694AF5E174B2261D828FD36,    824B,Semi-VB-Decompiler\VBEXEObfuscator\modPeSkeleton.bas
+5282CEBEA287D4B5EC32311790AEA5EE,     408,Semi-VB-Decompiler\VBEXEObfuscator\prjVBObfuscator.vbp
+006469F8433CDAE241E6F749ED423DF6,      CA,Semi-VB-Decompiler\VBEXEObfuscator\prjVBObfuscator.vbw
+56090A1B648FCD6FAEF2D895907443C4,    1D55,Semi-VB-Decompiler\vb3 binary to text\Install.iit
+E55B16AAF15FB1E2047481A842E71E53,  18938C,Semi-VB-Decompiler\vb3 binary to text\VB123Installer.exe
+77CCDFC990A4D017AC92D6FDA1E72171,    1768,Semi-VB-Decompiler\vb3 binary to text\clsFile.cls
+877E67943F1295A0C84DDA186AA434DB,    3484,Semi-VB-Decompiler\vb3 binary to text\frmAbout.frm
+54A9372CAB7B076CBE513B6405BD840C,    2EDE,Semi-VB-Decompiler\vb3 binary to text\frmAbout.frx
+58A79A94D23E8E983695442A26AEBB0B,    612E,Semi-VB-Decompiler\vb3 binary to text\frmMain.frm
+C5B491C9EA395C27071474084A8F17D5,    2C86,Semi-VB-Decompiler\vb3 binary to text\frmMain.frx
+2D68B56625EFEA15FE21DC334E732CBB,     FBF,Semi-VB-Decompiler\vb3 binary to text\modCheckBox.bas
+652EE5D513960A75D6D573176E036497,     E52,Semi-VB-Decompiler\vb3 binary to text\modComboBox.bas
+FFE5D211B9575D81DA4D68B18F8B976A,     E19,Semi-VB-Decompiler\vb3 binary to text\modCommandButton.bas
+238C64C8D0EBCB22C910997F1BDC350F,    4355,Semi-VB-Decompiler\vb3 binary to text\modCustom.bas
+167FEC256A8886F2872BE01458B1B070,     DAF,Semi-VB-Decompiler\vb3 binary to text\modDirectoryListbox.bas
+D092FA105F1D9EB2162B75147CDA2827,     CF1,Semi-VB-Decompiler\vb3 binary to text\modDriveListBox.bas
+D46B876E63DFA78DC0BDADC83BE66C3C,    1013,Semi-VB-Decompiler\vb3 binary to text\modFileListbox.bas
+47FD33BBDC44C0D2AB5DB1A95D8BFE8E,    16AE,Semi-VB-Decompiler\vb3 binary to text\modForm.bas
+DA79BFE45BABED7D593E2269CDF152DC,     D68,Semi-VB-Decompiler\vb3 binary to text\modFrame.bas
+5D80FADDF57BDB268FCD3697DFEAAA01,    19C4,Semi-VB-Decompiler\vb3 binary to text\modGlobals.bas
+F0F79D32247D66442FE47DEF64F317F2,     C84,Semi-VB-Decompiler\vb3 binary to text\modHscroll.bas
+BA864F5533B8492AF11696A5344427FF,     E2B,Semi-VB-Decompiler\vb3 binary to text\modImage.bas
+88EA8A6E03FACE47B0FD4BBC2196F522,    10C2,Semi-VB-Decompiler\vb3 binary to text\modLabel.bas
+897601981601431BFC56FAA23081F513,     864,Semi-VB-Decompiler\vb3 binary to text\modLine.bas
+21B650D6BABF0059390AE84B7E54B628,     EB6,Semi-VB-Decompiler\vb3 binary to text\modListBox.bas
+E29930F5274ED5250027B0225B92DE52,    1573,Semi-VB-Decompiler\vb3 binary to text\modMDIForm.bas
+EF5CBF1653FD58F45A2F05F1FF1BD7FB,     D2D,Semi-VB-Decompiler\vb3 binary to text\modMenu.bas
+C1B089F67FB2BF0B4BAE5C3E5246F55A,     E48,Semi-VB-Decompiler\vb3 binary to text\modOptionbutton.bas
+885500BEA3FB07B8856FC379A5C3E61C,    1648,Semi-VB-Decompiler\vb3 binary to text\modPictureBox.bas
+3EBBBDF9FC376A151338EDCA86334186,     B29,Semi-VB-Decompiler\vb3 binary to text\modShape.bas
+C03455923F10E468085A808DD9EB63B8,    12E2,Semi-VB-Decompiler\vb3 binary to text\modTextBox.bas
+8B85511639AAD2A7ABE86038B2EF6EBE,     7CC,Semi-VB-Decompiler\vb3 binary to text\modTimer.bas
+5466CFA99558B8540498EC6B1302415D,     D59,Semi-VB-Decompiler\vb3 binary to text\modVscroll.bas
+E1CC63832E57A6313248B566719058E3,   21000,Semi-VB-Decompiler\vb3 binary to text\prjVBBinaryToText.exe
+FD69AD68BDCB2E174F70CE8589B21789,     7B4,Semi-VB-Decompiler\vb3 binary to text\prjVBBinaryToText.vbp
+CD3490D37AE969749B63779332C1795C,     37D,Semi-VB-Decompiler\vb3 binary to text\prjVBBinaryToText.vbw
+7527D946873989893423427D29C5A187,     18B,Semi-VB-Decompiler\vb3 binary to text\readme.txt
+3895122C3D22435A8B9C9246ADD67023,     21B,Semi-VB-Decompiler\vb3 binary to text\readmebinarytotext.txt
+661BF037C143117522CBA55840965FFE,  152510,Semi-VB-Decompiler\vb3 binary to text\install folder\MSVBVM60.DLL
+714CF24FC19A20AE0DC701B48DED2CF6,  1044C0,Semi-VB-Decompiler\vb3 binary to text\install folder\Mscomctl.ocx
+6801F45DFAC0743D3A0D73B121E261DA,   2A910,Semi-VB-Decompiler\vb3 binary to text\install folder\RICHED32.DLL
+EB4A8F35A70A887FE32F43A3AA7D4E9A,   31CC8,Semi-VB-Decompiler\vb3 binary to text\install folder\RICHTX32.OCX
+DC7A3BC0FC185CD68848DC6F7D7B026B,    A000,Semi-VB-Decompiler\vb3 binary to text\install folder\SSubTmr6.dll
+4219192ACF00A39F10F6E76439290580,   1E000,Semi-VB-Decompiler\vb3 binary to text\install folder\cPopMenu6.ocx
+D76F0EAB36F83A31D411AEAF70DA7396,   22400,Semi-VB-Decompiler\vb3 binary to text\install folder\comdlg32.ocx
+5950211FCC06A876F838D1996A77022A,   2F000,Semi-VB-Decompiler\vb3 binary to text\install folder\prjVBBinaryToText.exe
+06B5D6309E3F915A1E5D41B003A954FF,     21A,Semi-VB-Decompiler\vb3 binary to text\install folder\readmebinarytotext.txt
+0857394E30DE11CA0CD9497E310D6469,    4600,Semi-VB-Decompiler\vb3 binary to text\install folder\stdole2.tlb
+E91416E1A6B02CEA51BCC7FEBF32899A,    D96C,Semi-VB-Decompiler\Historical_Versions\Semi_VB_De1773187232004.zip
+BB53383C3D5CA0F22F6F28B11436FAA4,    24BD,Semi-VB-Decompiler\Historical_Versions\screen1_small.PNG
+6F0CD4B21FB1B96022CA0893595EAC98,    2599,Semi-VB-Decompiler\Historical_Versions\screen2_small.PNG
+482881616E3F4D29AB7CCAE96C365775,    12D1,Semi-VB-Decompiler\Historical_Versions\ssPcode_small.png
+8855C6B619247E5CF8DED3566C00981D,     A1D,Semi-VB-Decompiler\Historical_Versions\vbdeco_small.jpg
+20C2D2E65A0C0F6B06AF83E2F1FD6648,    248F,Semi-VB-Decompiler\Historical_Versions\screen3_small.PNG
+FDFBE0199EF8B521560ABAFE7ADE9805,    7040,Semi-VB-Decompiler\Historical_Versions\screen1.PNG
+898905C6658E3880814896C708CE0011,    685E,Semi-VB-Decompiler\Historical_Versions\screen2.PNG
+C2DDC26F9E02376A03652506DE1B7527,    AA5F,Semi-VB-Decompiler\Historical_Versions\ssPcode.png
+3DEE777E13EC13FAB8B53759F46CB374,   1A890,Semi-VB-Decompiler\Historical_Versions\vbdeco.jpg
+4A3F9EDF9436B726B062F74A2E821BA1,    5526,Semi-VB-Decompiler\Historical_Versions\screen3.PNG
+54495943D9156A63F23CBA3D60864138,    24BC,Semi-VB-Decompiler\Historical_Versions\readme.html
+260FD45B821EBF9DC9DF8CD26E5B6B99,    32D7,Semi-VB-Decompiler\Historical_Versions\history_and_license.txt
+617EF24FB72FD8A073CCDBE1EE66012F,   2FD14,Semi-VB-Decompiler\Historical_Versions\Semi_VB_De178817912004.zip
+BF07BC1F51C401AF67315B38888AEFA2,    75F8,Semi-VB-Decompiler\Historical_Versions\compare_table.png
+DD04F4C9BB583C0DFB554D3847E273B0,      5E,Semi-VB-Decompiler\Historical_Versions\links\VB6- Semi VB Decompiler-VBForums.URL
+DE511AEDFB23ECFA4F67CE52FF6E6291,      6D,Semi-VB-Decompiler\Historical_Versions\links\Semi VB Decompiler 0.03 by vbgamer45 (from psc cd).URL
+CE230449F01AA46EB14F558EC831C9A1,      6B,Semi-VB-Decompiler\Historical_Versions\links\Semi VB Decompiler - Source Code + More-VBForums.URL
+551DFA73CB8E8C147A25DCBC06C626B2,      6D,Semi-VB-Decompiler\Historical_Versions\links\Semi VB Decompiler by vbgamer45 (from psc cd).URL
+97DF0843DDEE163BC27C9AE2B8CCDD7B,      57,Semi-VB-Decompiler\Historical_Versions\links\TheProgrammingZone.com - Semi VB Decompiler.URL
+40CF4440D900C0B1DDB3848DC4AF0F13,   643C2,Semi-VB-Decompiler\Historical_Versions\pdf\VB6- Semi VB Decompiler-VBForums.pdf
+FD81DE156B009250397C740C88EE7BD2,   36AAB,Semi-VB-Decompiler\Historical_Versions\pdf\Semi VB Decompiler 0.3_psc.pdf
+DD43871327A0FF2AC378511F4C8F5F09,   6AD2F,Semi-VB-Decompiler\Historical_Versions\pdf\Semi VB Decompiler - Source Code + More-VBForums.pdf
+1A8EDA3DCC045B54396C662E3D82875A,   2A68D,Semi-VB-Decompiler\Historical_Versions\pdf\TheProgrammingZone.com - Semi VB Decompilerl.pdf
+A241C23C3F9CAF9194319143ECDE3153,   35D8A,Semi-VB-Decompiler\Historical_Versions\pdf\Semi_vb_Decompiler_Build.2_original_psc.png
+4387EFC803E51468A2F66F91BE24B361,  1109C8,Semi-VB-Decompiler\Historical_Versions\5-30-10_vb_forums_release\Semi VB Decompiler Updates Source Code.rar
+A61E7EF88E079991034244CEFCCE5DBA,    B7C6,Semi-VB-Decompiler\Historical_Versions\5-30-10_vb_forums_release\VBEXEObfuscator.rar
+5E4E01D991981C04B4B7E337E0A501F4,   112BB,Semi-VB-Decompiler\Historical_Versions\5-30-10_vb_forums_release\vb3 binary to text.rar
+CFD0162480E8EEBEEAE8D011ABBE5AED,   628C3,Semi-VB-Decompiler\Historical_Versions\5-30-10_vb_forums_release\VB3 Decompiler OCX.rar
+B162E089743E6FBF79BF259D06D1C006,   1767A,Semi-VB-Decompiler\Historical_Versions\5-30-10_vb_forums_release\Semi VB API Loader.rar
