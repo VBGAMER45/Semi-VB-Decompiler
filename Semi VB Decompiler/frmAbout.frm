@@ -340,3 +340,5 @@ End Sub
 Private Sub lblWebsite_Click()
     ShellExecute Me.hWnd, vbNullString, "http://www.visualbasiczone.com/products/semivbdecompiler/", vbNullString, "C:\", SW_SHOWNORMAL
 End Sub
+
+

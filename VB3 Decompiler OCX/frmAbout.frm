@@ -89,3 +89,4 @@ End Sub
 Private Sub lblUrl_Click()
     ShellExecute Me.hwnd, vbNullString, "http://www.visualbasiczone.com", vbNullString, "C:\", SW_SHOWNORMAL
 End Sub
+

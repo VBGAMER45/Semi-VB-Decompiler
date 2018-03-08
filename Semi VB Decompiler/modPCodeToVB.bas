@@ -138,3 +138,4 @@ Public Function Hex2Dec(sText As String) As Long
 Exit Function
 err:
 End Function
+

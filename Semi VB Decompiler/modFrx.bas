@@ -188,3 +188,4 @@ Private Type typePreviewPic
     ParentForm As String
 End Type
 Global FrxPreview() As typePreviewPic
+

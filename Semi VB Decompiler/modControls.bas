@@ -2428,3 +2428,4 @@ Sub GetControlSizeEdit(F As Variant)
     End If
 
 End Sub
+

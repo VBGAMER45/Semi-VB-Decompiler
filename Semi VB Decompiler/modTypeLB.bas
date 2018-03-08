@@ -57,3 +57,4 @@ Private Sub RegisterMe(FilePath As String, Filename As String)
     MsgBox "Registration of Type Library: " & Filename & " Unsuccessful", vbInformation, "Registration Unsuccessful"
   End If
 End Sub ' RegisterMe(FilePath As String, FileName As String)
+

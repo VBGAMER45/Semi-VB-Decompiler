@@ -195,3 +195,4 @@ Property Get Length() As Long:    Length = LOF(mFileNumber): End Property
 Property Get FileNumber() As Integer:    FileNumber = mFileNumber: End Property
 Property Get Filename() As String:    Filename = mFileName: End Property
 Property Get ShortFileName() As String:    ShortFileName = mShortFileName: End Property
+

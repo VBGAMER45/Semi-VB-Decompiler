@@ -168,3 +168,4 @@ errHandle:
     MsgBox "Error_modAntiDecompiler_EncryptExe: " & err.Number & " " & err.Description
 End Sub
 
+

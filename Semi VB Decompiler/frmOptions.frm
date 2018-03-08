@@ -421,3 +421,5 @@ Private Sub Form_Load()
     lblKeyword.ForeColor = modGlobals.InstrColor
     lblComments.ForeColor = modGlobals.CommentColor
 End Sub
+
+

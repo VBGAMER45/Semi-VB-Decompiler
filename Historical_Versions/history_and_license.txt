@@ -1,0 +1,259 @@
+
+Pieced together the history of this project through some web searches 
+including the license the author has stated. 
+
+From what I gather:
+
+ vbgamer45 releases first and second version on PSC around Sep 2nd, 2004.
+ version 0.03 gets released on vbforums.com as well at this time.
+
+ product goes closed source commercial and sold through theprogrammingzone.com 
+ for a number of years.
+
+ May 30th, 2010 source code is released to the public
+
+ License: All I ask if you use is include me in the credits.- vbgamer45
+
+-------------------------------------------------------------------------------------------
+
+
+https://www.planet-source-code.com/vb/scripts/ShowCode.asp?txtCodeId=55134&lngWId=1
+
+Submitted on: 	2/8/2015 6:54:00 AM [real date lost to when psc crashed and did cd restore]
+By: 	vbgamer45 (from psc cd)  
+Level: 	Intermediate
+User Rating: 	By 13 Users
+Compatibility: 	VB 5.0, VB 6.0
+Views: 	1451
+	
+ 
+     A Semi VB Decomiler. Decompiles the interface using COM. COM is not always correct in the datatypes it returns for a certain property. I started this project a week ago after seeing there were no good open source vb interface decompilers and the other examples on this site are not very good. Another reason is there are some companies that charge for just decompiling the interface which I do not think is very fair. This is not complete but use it as a guide to making your own interface decompiler and maybe make something more. Hope you can learn something from this.
+
+-------------------------------------------------------------------------------------------
+
+
+https://www.planet-source-code.com/vb/scripts/ShowCode.asp?txtCodeId=55935&lngWId=1
+
+Submitted on: 	2/8/2015 8:15:00 PM  [real date lost to when psc crashed and did cd restore]
+By: 	vbgamer45 (from psc cd)  
+Level: 	Advanced
+User Rating: 	By 33 Users
+Compatibility: 	VB 5.0, VB 6.0
+Views: 	2628
+
+Release 0.03 Added Ocx Support Added P-Code procedure decompile to P-Code tokens. Added Image Extraction Added Better Handling of Control properties. Added Form Patch Editor Added Syntax Coloring. Better support of User Controls/And MDI Forms. Api's Recovered Procedure Names recovered for Forms and classes. Resizing of the windows added. Numerous Bug fixes and other things added. Begun work on a basic antidecompiler. Features Advanced decompiling using COM via VB6.OLB Using COM allows me not to have to hard code every single property The only properties that need to be hardcoded is the size, font, and dataformat opcodes. One day I hope to use msvbvm60.dll instead of vb6.olb so nothing will have to be hardcoded. This is the best Open Source VB Decompiler you can find. Show your support and leave comments and vote.
+
+-------------------------------------------------------------------------------------------
+
+
+http://www.vbforums.com/showthread.php?303457-VB6-Semi-VB-Decompiler
+
+ Sep 2nd, 2004, 04:33 PM #1
+vbgamer45
+vbgamer45 is offline
+
+Thread Starter
+Lively Member
+vbgamer45's Avatar
+
+Join Date
+    Sep 2004
+Posts
+    67	
+
+VB6- Semi VB Decompiler
+
+    Semi VB Decompiler
+    This is the only open source example that allows you to look inside the file format of vb 6.0 native/pcode exe or ocx.
+    It uses COM to find out the opcodes for the grahpical components of the exe, which means less things need to be hardcoded.
+    Learn the important visual basic strutures in a vb exe , understand why COM is an important part of the visual basic system, and see what is going on behind the scenes in your program. Enjoy.
+
+    Release 0.03
+    Added Ocx Support
+    Added P-Code procedure decompile to P-Code tokens.
+    Added Image Extraction
+    Added Better Handling of Control properties.
+    Added Form Patch Editor
+    Added Syntax Coloring.
+    Better support of User Controls/And MDI Forms.
+    Api's Recovered
+    Procedure Names recovered for Forms and classes.
+    Resizing of the windows added.
+    Numerous Bug fixes and other things added.
+    Begun work on a basic antidecompiler.
+    Features Advanced decompiling using COM via VB6.OLB
+    Using COM allows me not to have to hard code every single property
+    The only properties that need to be hardcoded is the size, font, and dataformat opcodes.
+    One day I hope to use msvbvm60.dll instead of vb6.olb so nothing will have to be hardcoded. 
+
+Attached Files Attached Files
+
+    File Type: zip semivbdecom003.zip (192.4 KB, 18956 views)
+
+
+
+ Apr 3rd, 2005, 09:18 AM #4
+vbgamer45
+vbgamer45 is offline
+
+Thread Starter
+Lively Member
+vbgamer45's Avatar
+
+Join Date
+    Sep 2004
+Posts
+    67	
+
+Re: VB6- Semi VB Decompiler
+
+    Wow, first time somone responded in a long time. Well Semi VB Decompiler is no longer open source and the current version is 0.06. Been busy rewriting and adding new features all the time.
+    http://www.visualbasiczone.com/produ...mivbdecompiler
+
+    Main things that I want to work on now is .Net support, right now my goal is a basic IL Dissassembler. Right now it just processes some of metadata information and displays the streams and shows the clr header. The other thing I want to add is full support for VB 2/3 decompiling. Half way to my goal with my VB 1/2/3 binary form to text converter is almost complete, you can make these things a lot faster after the first time around.
+
+    Some of the internal structures that I used can be found at vb-decompiler.com a nice place to get you started on a P-Code decompiler. That's where I started and within a couple months I now know a lot of information and how VB really works.
+
+    Native decompiling I actually think it can be done, but I would have to write my own disassembly engine then I can at least process and translate certain vb api calls. Very time consuming. 
+
+
+-------------------------------------------------------------------------------------------
+
+
+https://www.theprogrammingzone.com/products/semivbdecompiler/
+
+
+Semi VB Decompiler
+For Visual Basic 4(32bit)/5/6 (Native/P-Code)
+Information:
+
+Semi VB Decompiler a tool to use to recover your lost Visual Basic 4(32bit)/5/6 code from an exe, dll, or an ocx. Allows you to extract the project file, all forms, api calls (sometimes the parameters are recovered if they are in the api database), procedures names, events names, and P-Code tokens if the application was compiled to P-Code. Also comes with a form and control editor which you can use to make changes to the forms and controls then save the changes to the file. Check out the comparison table below, to see how our product compares to other products on the market.
+Features:
+
+    Extracts all forms and resources.
+    Allows you to edit the controls and forms properties of an exe program and save them!
+    P-Code Event/Procedure decompile to P-Code tokens.
+    Shows the P-Code's tokens and attempts to convert the code to VB code..
+    Supports Visual Basic exe's, dll's, and ocx files.
+    Shows metadata information for .Net exe files and lists the streams information.
+    Gets the procedures names for forms and class files.  If they were public.
+    Recovers the events of the common controls.
+    Recovers the api's called and in some cases recovers the full api call including parameters.
+    Shows the exe's imports from  msvbvm50.dll  and msvbvm60.dll
+    Allows you to view the Visual Basic Structures in the exe.
+    Recovers the number of procedures in forms, modules, and classes.
+    Decompile from offset for VB 5/6, helpful for packed applications.
+    Startup form patcher, change which form is displayed first.
+    Syntax coloring
+    Shows the offsets of key GUI components.
+    Generates a report on the file and has a patch report as well.
+    Multilanguage support! Currently supports Dutch, French, German, Italian, Portuguese, and Spanish.
+    Cheap Price! Compared to others who want $50 to $150
+    And much more! Updates added all the time and you get them for no charge!.
+
+System Requirements:
+
+    Windows XP and higher
+
+Screenshots:
+
+Comparison Table:
+  	                                  Semi VB Decompiler 	VBRezq 	VBReformer
+Recovers Project File 	                                Yes 	Yes 	Yes
+Recovers Forms 	                                        Yes 	Yes 	Yes
+VB6 Support 	                                        Yes 	Yes 	Yes
+VB5 Support 	                                        Yes 	Yes 	Yes
+VB4(32bit) Support 	                                Yes 	Yes 	No
+Ocx/DLL Support (5/6) 	                                Yes 	Yes 	Yes
+Identifies Procedures and events (5/6) 	                Yes 	Yes 	Yes
+Recovers P-Code  procedures and events (5/6) 	        Yes 	No 	No
+Recovers full Api calls (5/6) 	                        Yes 	Yes* 	Yes*
+Recovers Native Code 	                                No 	No 	Barely**
+Shows internal VB Structures 	                        Yes 	No 	No
+Allows you to edit forms/controls and save it to exe. 	Yes 	No 	Yes
+Shows vbvm imports and PE info	                       	Yes 	No 	Yes
+VB Obfuscator 	                                        Yes 	No 	No
+VB 1/2/3 Binary Form To Text Converter 	                Yes 	No 	No
+
+
+Price: 	$30 	$150 	49 Euros = about $68 dollars as of 1/27/2010
+*Does not recover parameters of api calls.
+**Recovers some basic information nothing really useful.
+Recent Updates:
+
+Added a helper application called Api Add which allows you to add API's to the Semi VB Decompiler API Database.
+
+Updated Native procedure decompile dissembles faster and added some native dissemble options to the options screen. Also updated decompile from offset, now verifies the file has a VB5! signature. For .Net applications added the view console under the Tools menu. Added data directories to the PE Optional Header list.
+
+Two minor little fixes on project generation. Fixed a bug with directory listbox and bug in VBP generation.
+
+Changed how the P-Code property database worked the VTable information is now directly pulled form the typelib of VB6.OLB, this means that Semi VB Decompiler now has complete support for all properties of the standard VB toolbox controls.
+
+Updates over the last month, added menu for easy access to the other tools,  added over 100 more P-Code properties to the database. Fixed some handling of certain VB files.
+
+Added another tool to Semi VB Decompiler a VB Obfuscator for Visual Basic 5/6. What does an Obfuscator do? Well it makes the decompiled code harder to read and understand, making a little tougher.   My version obfuscates the object names, and control names for Visual Basic 5/6 programs.
+
+Version 0.07 released.   Now using a property sheet control to display and edit control/form properties.  Under the treeview, the controls now have there own icons to recognize the control type.  More properties for the controls added.  Improved the speed on various functions. Under the tools menu there is now a link to the FileReport.txt. Working on a system to handle external controls.
+Purchase:
+You can purchase this product for only $30 today! And when there are updates to the Semi VB Decompiler you get them for free!
+
+We accept the following methods of payment:
+
+
+-----------------------------------------------------------------------------------------
+
+
+
+http://www.vbforums.com/showthread.php?616623-Semi-VB-Decompiler-Source-Code-More
+
+ May 30th, 2010, 05:08 PM #1
+vbgamer45
+vbgamer45 is offline
+
+Thread Starter
+Lively Member
+vbgamer45's Avatar
+
+Join Date
+    Sep 2004
+Posts
+    67	
+
+Thumbs up Semi VB Decompiler - Source Code + More
+
+    Been about five years since I have done any VB decompiler work so releasing what I have done so far. Has been a great learning experience for me and should help others as well!
+
+
+    Learn about internal VB structure, exe file formats. Supports VB 4,5,6
+    vb 2,3 can be supported with the addons.
+    .Net CLR information, processing streams.
+    And more!
+
+
+    All I ask if you use is include me in the credits.
+    Sources work for VB6
+
+    Semi VB Decompiler
+    http://www.theprogrammingzone.com/source/Semi%20VB%20Decompiler%20Updates%20Source%20Code.rar
+
+    Simple VB EXE Obfuscator
+    http://www.theprogrammingzone.com/source/VBEXEObfuscator.rar
+
+    VB 3 Binary Form to Text converter
+    http://www.theprogrammingzone.com/source/vb3%20binary%20to%20text.rar
+
+    VB 3 Decompiler OCX turned Dodis decompiler into an ocx can be linked to semi vb decompiler
+    http://www.theprogrammingzone.com/source/VB3%20Decompiler%20OCX.rar
+
+    Addon for Semi VB Decompiler
+    http://www.theprogrammingzone.com/source/Semi%20VB%20API%20Loader.rar
+
+    Semi VB Decompiler 0.07 Getting better everyday
+    http://www.visualbasiczone.com/produ...ivbdecompiler/
+    VisualBasicZone
+    http://www.visualbasiczone.com
+    EasyPHPBB.com
+    Free PHPBB forums the quick and easy way!
+
+
+    prjVB3decompiler.ocx is in VB 3 Decompiler OCX 

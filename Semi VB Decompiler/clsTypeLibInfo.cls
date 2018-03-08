@@ -964,3 +964,4 @@ Public Function TKind2String(ByVal k As TYPEKIND) As String
         Case TKIND_UNION:           TKind2String = "Union"
     End Select
 End Function
+

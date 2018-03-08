@@ -604,3 +604,4 @@ Public Function MakeString(Length As Long) As String
     
     MakeString = strDATA
 End Function
+

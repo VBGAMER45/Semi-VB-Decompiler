@@ -39,3 +39,4 @@ BadFile:
     MsgBox "Error_clsConsole_SaveConsoleToFile: " & err.Description, vbCritical
 Exit Sub
 End Sub
+

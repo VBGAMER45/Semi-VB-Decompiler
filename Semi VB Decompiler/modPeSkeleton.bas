@@ -1052,3 +1052,4 @@ Function ReturnVBVersionNe(iFileNumber As Integer) As Integer
     End If
   Next i
 End Function
+
