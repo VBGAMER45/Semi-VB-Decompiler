@@ -1,8 +1,8 @@
 -------------------------------
-Semi VB Decompiler - VisualBasicZone.com
+Semi VB Decompiler
 Version: 0.09
 Build: 1.0.65
-Website: http://www.visualbasiczone.com/products/semivbdecompiler
+Website: https://www.theprogrammingzone.com/products/semivbdecompiler/
 -------------------------------
 Contents
 1. What's New?
@@ -195,14 +195,12 @@ Contents
 4. Bugs
      Some properties aren't handled yet such as dataformat
      P-Code decoding may hang use the disable P-Code option under options.
-     If you would wish to report a bug email me at
-     support@visualbasiczone.com
+
      Please include as much information as possible so we can try to fix it and even better send us the file if possible.
 
 5. Contact/Support
-     Email=support@visualbasiczone.com
      Semi VB Decompiler Website:
-     http://www.visualbasiczone.com/products/semivbdecompiler/
+     https://www.theprogrammingzone.com/forums/
 
 6. Credits
      I would like to thank the following people for helping me with this project.
