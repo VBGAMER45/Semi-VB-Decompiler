@@ -195,12 +195,9 @@ Contents
 4. Bugs
      Some properties aren't handled yet such as dataformat
      P-Code decoding may hang use the disable P-Code option under options.
-     If you would wish to report a bug email me at
-     support@visualbasiczone.com
      Please include as much information as possible so we can try to fix it and even better send us the file if possible.
 
 5. Contact/Support
-     Email=support@visualbasiczone.com
      Semi VB Decompiler Website:
      http://www.visualbasiczone.com/products/semivbdecompiler/
 
