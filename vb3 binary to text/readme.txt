@@ -13,7 +13,3 @@ Contents
    Converts VB 1/2/3 Binary forms to text.
    You can open a whole project and convert each form.
 
-2. Bugs
-
-3. Contact
-   You can reach me at gmdecompiler@yahoo.com
