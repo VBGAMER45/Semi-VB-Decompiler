@@ -1,4 +1,4 @@
-Attribute VB_Name = "MODULE4"
+Attribute VB_Name = "Module4"
 ' Module4
 Option Explicit
 Dim m000E As T148E
