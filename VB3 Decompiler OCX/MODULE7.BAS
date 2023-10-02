@@ -1,3 +1,4 @@
+Attribute VB_Name = "Module7"
 ' Module7
 Option Explicit
 

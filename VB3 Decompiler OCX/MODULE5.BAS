@@ -1,4 +1,4 @@
-Attribute VB_Name = "MODULE5"
+Attribute VB_Name = "Module5"
 ' Module5
 Option Explicit
 Declare Function extfn0529 Lib "Kernel32" Alias "GetPrivateProfileStringA" (ByVal p1$, ByVal p2$, ByVal p3$, ByVal p4$, ByVal p5%, ByVal p6$) As Integer
