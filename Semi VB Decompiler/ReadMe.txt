@@ -190,7 +190,7 @@ Contents
       All of the above files need to be registered(the installer should auto register the files.)
       If you are examining a .Net file then you need to have the .Net framework installed.
    Q. Where can I learn more about Visual Basic 5/6 Decompiling?
-   A. Head over to http://www.vb-decompiler.com  tons of information on vb decompiling.
+   A. Head over to https://sandsprite.com/vb-reversing/  tons of information on vb decompiling.
 
 4. Bugs
      Some properties aren't handled yet such as dataformat
