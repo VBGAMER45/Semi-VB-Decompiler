@@ -55,6 +55,10 @@ End Enum
 Private Declare Sub CopyMemory Lib "kernel32" Alias "RtlMoveMemory" (Destination As Any, Source As Any, ByVal length As Long)
 
 Private dsmNative As CDisassembler
+'Raw disassembly text of the proc most recently passed to
+'DecompileNativeProcToVB - built from the same DisasmProc result so the Dism
+'tab can be cached without a second disassembly pass.
+Public NVLastDisasmText As String
 
 '--- Per-procedure data-flow state ---
 Private NVForm As String          'owning form/object (for control resolution)
@@ -106,6 +110,13 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 
     Set col = dsmNative.DisasmProc(b, addr, 8192)
     If col Is Nothing Then DecompileNativeProcToVB = "' (could not disassemble " & Hex$(addr) & ")": Exit Function
+
+    'Build the raw disassembly listing from the SAME collection (no second
+    'disassembly) so the Dism tab can be served from cache later.
+    NVLastDisasmText = ""
+    For Each inst In col
+        NVLastDisasmText = NVLastDisasmText & inst.offset & "  " & inst.dump & "  " & inst.command & vbCrLf
+    Next
 
     'Reset per-proc state
     NVForm = NativeFormOf(addr)

@@ -24,6 +24,9 @@ Global NativeShowHexInformation As Boolean
 'Decompiled code, grouped by owning object (form/module/class), built once at
 'load so the main tree can show it inline.  Keyed "OBJ_<UPPER object name>".
 Public gNativeCodeCache As Collection
+'Raw native disassembly per object, keyed "OBJ_<UPPER name>", built in the same
+'pass as gNativeCodeCache so the Dism tab never disassembles a second time.
+Public gNativeDismCache As Collection
 
 '*****************************
 'ScanNativeProcsByPrologue
@@ -175,12 +178,14 @@ Public Sub BuildNativeCodeCache()
     Dim sn As String, objName As String, dotPos As Long
 
     Set gNativeCodeCache = New Collection
+    Set gNativeDismCache = New Collection
+    Dim objDism() As String
     Dim ub As Long
     ub = -1
     ub = UBound(gNativeProcArray)                      '-1 stays if not dimensioned
     If ub < 0 Then Exit Sub
     total = ub
-    ReDim objNames(64): ReDim objCode(64): objCount = 0
+    ReDim objNames(64): ReDim objCode(64): ReDim objDism(64): objCount = 0
 
     For p = 0 To ub - 1
         If CancelDecompile = True Then Exit For
@@ -198,10 +203,11 @@ Public Sub BuildNativeCodeCache()
         Next
         If found = -1 Then
             If objCount > UBound(objNames) Then
-                ReDim Preserve objNames(objCount + 64): ReDim Preserve objCode(objCount + 64)
+                ReDim Preserve objNames(objCount + 64): ReDim Preserve objCode(objCount + 64): ReDim Preserve objDism(objCount + 64)
             End If
             objNames(objCount) = objName
             objCode(objCount) = ""
+            objDism(objCount) = ""
             found = objCount: objCount = objCount + 1
         End If
 
@@ -212,11 +218,18 @@ Public Sub BuildNativeCodeCache()
 
         body = modNativeToVB.DecompileNativeProcToVB(addr)
         objCode(found) = objCode(found) & body & vbCrLf
+        'Raw disassembly captured during the decompile above (no re-disassembly).
+        objDism(found) = objDism(found) & _
+            "; ---------------------------------------------" & vbCrLf & _
+            "; " & sn & "  (" & Hex$(addr) & "h)" & vbCrLf & _
+            "; ---------------------------------------------" & vbCrLf & _
+            modNativeToVB.NVLastDisasmText & vbCrLf
 nextProc:
     Next p
 
     For oi = 0 To objCount - 1
         gNativeCodeCache.Add objCode(oi), "OBJ_" & objNames(oi)
+        gNativeDismCache.Add objDism(oi), "OBJ_" & objNames(oi)
     Next
 End Sub
 
@@ -248,9 +261,10 @@ End Function
 '*****************************
 'GetNativeObjectDisassembly
 'Return the raw native disassembly of every procedure that belongs to objName
-'(form / module / class), one block per procedure.  Used by the "Dism" tab on
-'frmMain so a whole object can be viewed at the assembly level without opening
-'the per-procedure Native Decompile window.
+'(form / module / class).  Served from gNativeDismCache, which is built in the
+'same pass as the decompiled code (BuildNativeCodeCache) so the procedure is
+'never disassembled a second time.  Falls back to a live disassembly only if
+'the cache was never built.
 '*****************************
 Public Function GetNativeObjectDisassembly(ByVal objName As String) As String
     On Error GoTo done
@@ -259,52 +273,43 @@ Public Function GetNativeObjectDisassembly(ByVal objName As String) As String
         Exit Function
     End If
 
+    'Fast path: cached during load.
+    If Not gNativeDismCache Is Nothing Then
+        Dim cached As String
+        cached = gNativeDismCache("OBJ_" & UCase$(objName))
+        If Len(cached) > 0 Then GetNativeObjectDisassembly = cached: Exit Function
+    End If
+
+    'Fallback: cache not built yet - disassemble live this once.
     Dim ub As Long
     ub = -1
     ub = UBound(gNativeProcArray)
     If ub < 1 Then Exit Function
 
-    Dim dsm As CDisassembler
-    Set dsm = New CDisassembler
-
-    Dim fp As Integer
-    fp = FreeFile
-    Open SFilePath For Binary Access Read As #fp
-
     Dim p As Long, dotPos As Long, owner As String, va As Long, cnt As Long
-    Dim b() As Byte, col As Collection, inst As CInstruction, sb As String
-    Dim target As String
+    Dim sb As String, target As String, ignoreVB As String
     target = UCase$(objName)
-
     For p = 0 To ub - 1
         If gNativeProcArray(p).offset <> 0 Then
             dotPos = InStr(gNativeProcArray(p).sName, ".")
             If dotPos > 0 Then owner = UCase$(Left$(gNativeProcArray(p).sName, dotPos - 1)) Else owner = ""
             If owner = target Then
                 va = gNativeProcArray(p).offset
-                ReDim b(5000)
-                Get #fp, va + 1 - OptHeader.ImageBase, b
+                'Fills NVLastDisasmText as a side effect; the VB return is ignored.
+                ignoreVB = modNativeToVB.DecompileNativeProcToVB(va)
                 sb = sb & "; ---------------------------------------------" & vbCrLf
                 sb = sb & "; " & gNativeProcArray(p).sName & "  (" & Hex$(va) & "h)" & vbCrLf
                 sb = sb & "; ---------------------------------------------" & vbCrLf
-                Set col = dsm.DisasmBlock(b(), va)
-                For Each inst In col
-                    sb = sb & inst.offset & "  " & inst.dump & "  " & inst.command & vbCrLf
-                    If inst.command = "RETN" Then Exit For
-                Next
-                sb = sb & vbCrLf
+                sb = sb & modNativeToVB.NVLastDisasmText & vbCrLf
                 cnt = cnt + 1
             End If
         End If
     Next p
-    Close #fp
 
     If cnt = 0 Then sb = "; No native procedures found for " & objName
     GetNativeObjectDisassembly = sb
     Exit Function
 done:
-    On Error Resume Next
-    Close #fp
     GetNativeObjectDisassembly = sb & vbCrLf & "; (disassembly stopped: " & err.Description & ")"
 End Function
 
