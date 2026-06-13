@@ -1,7 +1,7 @@
 -------------------------------
 Semi VB Decompiler - VisualBasicZone.com
-Version: 0.09
-Build: 1.0.64
+Version: 2.0
+Build: 2.0.0
 Website: http://www.visualbasiczone.com/products/semivbdecompiler
 -------------------------------
 Contents
@@ -13,6 +13,9 @@ Contents
 6. Credits
 
 1. What's New?
+
+   Version 2.0
+   Native decompiler now finds procedure offsets for modules and classes, recovers .bas module procedures, lists them in the project tree, exports the decompiled code into the generated project, and adds a raw disassembly (Dism) tab.
 
    Version 0.09
    Added a new tool. Api Add allows you to add Api's to the Semi VB Decompiler Api Database.

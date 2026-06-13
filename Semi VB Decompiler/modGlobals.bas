@@ -14,7 +14,7 @@ Attribute VB_Name = "modGlobals"
 '*********************************************
 Option Explicit
 Const MAX_PATH = 260
-Public Const Version As String = "0.09" 'Current Version of Semi VB Decompiler
+Public Const Version As String = "2.0" 'Current Version of Semi VB Decompiler
 
 Type VBHeader
     signature               As String * 4  '00h 00d
@@ -1286,6 +1286,9 @@ Sub PrintReadMe()
         Print #F, "6. Credits"
         Print #F, ""
         Print #F, "1. What's New?"
+        Print #F, ""
+        Print #F, "   Version 2.0"
+        Print #F, "   Native decompiler now finds procedure offsets for modules and classes, recovers .bas module procedures, shows them in the project tree, exports decompiled code into the generated project, and adds a raw disassembly (Dism) tab."
         Print #F, ""
         Print #F, "   Version 0.09"
         Print #F, "   Added a new tool. Api Add allows you to add Api's to the Semi VB Decompiler Api Database."
