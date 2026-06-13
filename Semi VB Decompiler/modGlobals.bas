@@ -2031,7 +2031,7 @@ Sub LoadObjectType()
 '*****************************
 'Purpose: Checks wether a FileExists or not
 '*****************************
-    ReDim gObjectTypeList(15)
+    ReDim gObjectTypeList(17)
     gObjectTypeList(0).value = 98435
     gObjectTypeList(0).strType = 1
     gObjectTypeList(1).value = 98467
@@ -2064,6 +2064,13 @@ Sub LoadObjectType()
     gObjectTypeList(14).strType = 5
     gObjectTypeList(15).value = 1411075
     gObjectTypeList(15).strType = 6
+    'Module variants with bit5/bit6 set (e.g. 0x18041), same pattern as the
+    'form variants above.  Without these a .bas module is not recognised and
+    'never gets a tree node / methods count / code view.
+    gObjectTypeList(16).value = 98369   '0x18041
+    gObjectTypeList(16).strType = 2
+    gObjectTypeList(17).value = 98401   '0x18061
+    gObjectTypeList(17).strType = 2
 End Sub
 Public Sub AddToErrorLog(ByVal strError As String)
     strErrorLog = strErrorLog & strError & vbCrLf
