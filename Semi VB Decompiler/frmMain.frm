@@ -1761,11 +1761,14 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                                 Get F, lNative(i) + 1 - OptHeader.ImageBase, LinkNative
                                 'MsgBox LinkNative.jmpOpCode
                                 'MsgBox LinkNative.jmpOffset + Loc(f) + 5
-                                 currPos = Loc(F) + 1
-     
-                                 gNativeProcArray(UBound(gNativeProcArray)).sName = gObjectNameArray(loopC) & ".proc:" & LinkNative.jmpoffset + 5 + currPos + 5 + OptHeader.ImageBase
+                                 'jmp rel32 thunk: target VA = thunk_VA + 5 + jmpOffset.
+                                 'After the Get, Loc(F) = lNative(i) - ImageBase + 5, so adding
+                                 'jmpOffset + ImageBase yields the procedure's virtual address.
+                                 currPos = Loc(F) + LinkNative.jmpoffset + OptHeader.ImageBase
+
+                                 gNativeProcArray(UBound(gNativeProcArray)).sName = gObjectNameArray(loopC) & ".proc_" & Hex$(currPos)
                                  'Debug.Print gNativeProcArray(UBound(gNativeProcArray)).sName
-                                 gNativeProcArray(UBound(gNativeProcArray)).offset = LinkNative.jmpoffset + 5 + currPos + 5 + OptHeader.ImageBase
+                                 gNativeProcArray(UBound(gNativeProcArray)).offset = currPos
                                  ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
                                  'frmNativeDecompile.lstProcedures.AddItem LinkNative.jmpOffset + 5 + currPos + 5 + OptHeader.ImageBase
                             Next i
