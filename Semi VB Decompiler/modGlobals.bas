@@ -603,6 +603,10 @@ Global gPcodeDecompile As Boolean
 '(the Dism tab) into the source files instead of the decompiled VB code.
 Global gExportDisassembly As Boolean
 
+'When True the app is running headless (command line); suppress all message
+'boxes / prompts and never block waiting for user input.
+Global gQuietMode As Boolean
+
 Private Type typeControlName
     strParentForm As String
     strControlName As String

@@ -348,9 +348,11 @@ Public Function CheckHeader() As Boolean
 
         bISVBNET = True
         Call ProccessVBNETFile(GetPtrFromRVA(OptHeader.DataDirectory(14).Address) + 1, InFileNumber)
-        MsgBox "This is a .NET assembly. Browse the reconstructed classes under " & _
-               """.Net Classes"" in the project tree (C# / VB.NET / IL views), or use " & _
-               "File > Build .NET Solution to export them. Raw IL is also under Tools > .Net Console.", vbInformation
+        If gQuietMode = False Then
+            MsgBox "This is a .NET assembly. Browse the reconstructed classes under " & _
+                   """.Net Classes"" in the project tree (C# / VB.NET / IL views), or use " & _
+                   "File > Build .NET Solution to export them. Raw IL is also under Tools > .Net Console.", vbInformation
+        End If
         VBVersion = 7
     End If
     

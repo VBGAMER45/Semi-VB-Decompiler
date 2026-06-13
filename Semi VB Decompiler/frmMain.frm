@@ -1231,8 +1231,6 @@ Private Sub mnuFileGenerate_Click()
     Dim structFolder As BROWSEINFO
     Dim iNull As Integer
     Dim ret As Long
-    Dim g As Integer
-    Dim i As Integer
     structFolder.hOwner = Me.hwnd
     structFolder.lpszTitle = "Browse for folder"
     structFolder.ulFlags = BIF_NEWDIALOGSTYLE  'To create make new folder option
@@ -1249,16 +1247,30 @@ Private Sub mnuFileGenerate_Click()
             sPath = Left$(sPath, iNull - 1)
         End If
     End If
-    
+
     If sPath = vbNullString Then Exit Sub
-    
+
+    Call GenerateProject(sPath)
+
+    Dim strResponse As String
+    strResponse = MsgBox("Project Generated. Do you want to open the project file now?", vbYesNo + vbInformation)
+    If strResponse = vbYes Then
+        ShellExecute Me.hwnd, vbNullString, sPath & "\" & ProjectName & ".vbp", vbNullString, "C:\", SW_SHOWNORMAL
+    End If
+End Sub
+
+'Write the regenerated VB project (.vbp + all objects) into sPath.  Shared by
+'the File > Generate menu and the command-line (headless) mode.
+Public Sub GenerateProject(ByVal sPath As String)
+    Dim g As Integer
+    Dim i As Integer
+
     'Write The Project File
     If gVB4App = True Then
       Call WriteVBPVB4(sPath & "\" & ProjectName & ".vbp")
     Else
       Call WriteVBP(sPath & "\" & ProjectName & ".vbp")
     End If
-
 
     'Write the Forms
     If VBVersion = 4 Then
@@ -1267,20 +1279,20 @@ Private Sub mnuFileGenerate_Click()
                 Call modOutput.WriteForms(sPath & "\" & strVB4Forms(i) & ".frm", strVB4Forms(i), i)
             End If
         Next
-        
+
     Else
         'Write VB5/6 Forms
         For i = 0 To UBound(gObject)
             For g = 0 To UBound(gObjectTypeList)
                 If gObject(i).ObjectType = gObjectTypeList(g).value And gObjectTypeList(g).strType = 1 Then
-           
+
                     Call modOutput.WriteForms(sPath & "\" & gObjectNameArray(i) & ".frm", gObjectNameArray(i), i)
                     Exit For
                 End If
             Next g
         Next
-   
-        
+
+
         'Write Forms frx files
         For i = 0 To UBound(gObject)
             For g = 0 To UBound(gObjectTypeList)
@@ -1335,7 +1347,7 @@ Private Sub mnuFileGenerate_Click()
                 End If
             Next g
         Next
-        
+
         'Write Designers
         For i = 0 To UBound(gObject)
             If gObject(i).ObjectType = 17926147 Then
@@ -1343,16 +1355,6 @@ Private Sub mnuFileGenerate_Click()
             End If
         Next i
     End If
-    
-    Dim strResponse As String
-    strResponse = MsgBox("Project Generated. Do you want to open the project file now?", vbYesNo + vbInformation)
-    If strResponse = vbYes Then
-        ShellExecute Me.hwnd, vbNullString, sPath & "\" & ProjectName & ".vbp", vbNullString, "C:\", SW_SHOWNORMAL
-    End If
-
-Exit Sub
-errHandle:
-    MsgBox "Error_frmMain_mnuFileGenerate: " & err.Number & " " & err.Description
 End Sub
 
 Private Sub mnuFileGenerateDism_Click()
@@ -1557,11 +1559,15 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
         If bAdvDecompile = False Then
             'Get FileVersion Info
             gFileInfo = modGlobals.FileInfo(SFilePath)
-            MsgBox "Not a VB 4/5/6 file.", vbOKOnly Or vbCritical Or vbApplicationModal, "Bad file!"
+            '.NET assemblies are handled separately (see the .Net Classes tree);
+            'don't scold the user with a "bad file" prompt for them.
+            If bISVBNET = False And gQuietMode = False Then
+                MsgBox "Not a VB 4/5/6 file.", vbOKOnly Or vbCritical Or vbApplicationModal, "Bad file!"
+            End If
             gVB5App = False
             gVB4App = False
             gVB6App = False
-            
+
         End If
         Close #InFileNumber
         If bAdvDecompile = False Then

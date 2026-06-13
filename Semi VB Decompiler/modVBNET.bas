@@ -513,7 +513,7 @@ Sub ProccessVBNETFile(lOffsetVBNETHEADER As Long, FileNum As Integer)
     If IsDotNetInstalled = True Then
         'MsgBox ".Net Runtime is installed"
     Else
-        MsgBox ".Net Runtime is not installed on this machine. Please download and install it.  To Process .Net files", vbCritical
+        If gQuietMode = False Then MsgBox ".Net Runtime is not installed on this machine. Please download and install it.  To Process .Net files", vbCritical
         Exit Sub
     End If
     
@@ -4601,14 +4601,16 @@ On Error GoTo bad
     Call WriteTextFile(root & "\" & baseName & ".sln", SlnText(baseName))
     Call WriteTextFile(root & "\README.txt", ReadmeText())
 
-    Dim r As VbMsgBoxResult
-    r = MsgBox("Solution scaffold written to:" & vbCrLf & root & vbCrLf & vbCrLf & _
-               "Note: the reconstruction is best-effort and may not compile as-is." & vbCrLf & _
-               "Open the folder now?", vbYesNo + vbInformation)
-    If r = vbYes Then Shell "explorer.exe " & Chr$(34) & root & Chr$(34), vbNormalFocus
+    If gQuietMode = False Then
+        Dim r As VbMsgBoxResult
+        r = MsgBox("Solution scaffold written to:" & vbCrLf & root & vbCrLf & vbCrLf & _
+                   "Note: the reconstruction is best-effort and may not compile as-is." & vbCrLf & _
+                   "Open the folder now?", vbYesNo + vbInformation)
+        If r = vbYes Then Shell "explorer.exe " & Chr$(34) & root & Chr$(34), vbNormalFocus
+    End If
     Exit Sub
 bad:
-    MsgBox "Error_BuildDotNetSolution: " & err.Description, vbCritical
+    If gQuietMode = False Then MsgBox "Error_BuildDotNetSolution: " & err.Description, vbCritical
 End Sub
 
 Private Sub EnsureDir(ByVal path As String)
