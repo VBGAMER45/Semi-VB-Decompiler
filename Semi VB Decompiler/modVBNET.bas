@@ -351,6 +351,38 @@ Dim Notprototype As Boolean
 Dim Writenamespace As Boolean
 Dim lasttypedisplayed As Long
 
+'*** modVBNET decompiler (IL + C#/VB.NET reconstruction) state ***
+Private Const LANG_IL As Integer = 0
+Private Const LANG_CS As Integer = 1
+Private Const LANG_VB As Integer = 2
+'Operand kinds for the IL opcode table
+Private Const OK_NONE As Integer = 0
+Private Const OK_I1 As Integer = 1
+Private Const OK_U1 As Integer = 2
+Private Const OK_VAR As Integer = 3
+Private Const OK_I4 As Integer = 4
+Private Const OK_I8 As Integer = 5
+Private Const OK_R4 As Integer = 6
+Private Const OK_R8 As Integer = 7
+Private Const OK_BR1 As Integer = 8
+Private Const OK_BR4 As Integer = 9
+Private Const OK_TOK As Integer = 10
+Private Const OK_STR As Integer = 11
+Private Const OK_SWITCH As Integer = 12
+'Decoded instruction stream for the current method body
+Private gInsCount As Long
+Private gInsPos() As Long
+Private gInsName() As String
+Private gInsText() As String
+Private gInsVal() As Long
+'Per-type captured output, used by the project tree and the solution builder
+Private gNetTypeCount As Long
+Private gNetTypeName() As String
+Private gNetTypeCS() As String
+Private gNetTypeVB() As String
+Private gNetTypeIL() As String
+Private gNetTypeMethods() As String
+
 'SemiVBDecompilerHelper.dll (.NET) is no longer required - its BitConverter /
 'bit-shift helpers are implemented in pure VB6 further down this module.
 'Used to check if .Net is installed
@@ -483,9 +515,14 @@ Sub ProccessVBNETFile(lOffsetVBNETHEADER As Long, FileNum As Integer)
     Call DisplayTypeDefs
     Call DisplayTypeDefsAndMethods
 
+    'Full decompilation pass: IL disassembly + best-effort C#/VB.NET source.
+    Call DecompileDotNet
+
     Console.SaveConsoleToFile App.Path & "\dump\" & SFile & "\netconsole.txt"
     'Make the console report menu visible
     frmMain.mnuToolsNetConsole.Visible = True
+    'Enable the .NET solution export now that classes have been reconstructed
+    frmMain.mnuFileBuildSolution.Enabled = True
     'Add to recent files
     Call frmMain.AddToRecentList(SFilePath, SFile)
 End Sub
@@ -2812,4 +2849,1748 @@ Private Function IsDotNetInstalled() As Boolean
     Else
         IsDotNetInstalled = True
     End If
+End Function
+
+'==========================================================================
+'  FULL .NET DECOMPILER
+'  ------------------------------------------------------------------------
+'  Builds three views of the assembly from the metadata already parsed by
+'  ReadTablesIntoStructures:
+'     decompiled.il  - IL disassembly (types, fields, method signatures and
+'                      full IL opcode listings for every method body)
+'     decompiled.cs  - best-effort C# reconstruction
+'     decompiled.vb  - best-effort VB.NET reconstruction
+'  The C#/VB views emit accurate type/field/method signatures and a simple
+'  stack-machine reconstruction of straight-line method bodies.  Anything
+'  with real control flow is left as a comment pointing back at the IL.
+'==========================================================================
+Public Sub DecompileDotNet()
+On Error GoTo done
+    Dim ilOut As clsConsole, csOut As clsConsole, vbOut As clsConsole
+    Set ilOut = New clsConsole
+    Set csOut = New clsConsole
+    Set vbOut = New clsConsole
+
+    Dim fdec As Integer
+    fdec = FreeFile
+    Open SFilePath For Binary Access Read As #fdec
+
+    ilOut.WriteLine "// ======================================================"
+    ilOut.WriteLine "// Semi VB Decompiler - .NET IL Disassembly"
+    ilOut.WriteLine "// Assembly: " & SFile
+    ilOut.WriteLine "// ======================================================"
+    ilOut.WriteLine ""
+    csOut.WriteLine "// Semi VB Decompiler - reconstructed C# (best effort)"
+    csOut.WriteLine "// Assembly: " & SFile
+    csOut.WriteLine ""
+    vbOut.WriteLine "' Semi VB Decompiler - reconstructed VB.NET (best effort)"
+    vbOut.WriteLine "' Assembly: " & SFile
+    vbOut.WriteLine ""
+
+    Dim lastType As Long
+    lastType = iRows(2)
+    'Reset the per-type store that backs the project tree and solution builder
+    gNetTypeCount = 0
+    ReDim gNetTypeName(lastType + 1)
+    ReDim gNetTypeCS(lastType + 1)
+    ReDim gNetTypeVB(lastType + 1)
+    ReDim gNetTypeIL(lastType + 1)
+    ReDim gNetTypeMethods(lastType + 1)
+    Dim t As Long
+    For t = 1 To lastType
+        Call EmitTypeAll(t, fdec, ilOut, csOut, vbOut)
+    Next
+
+    Close #fdec
+
+    Dim outDir As String
+    outDir = App.Path & "\dump\" & SFile & "\"
+    ilOut.SaveConsoleToFile outDir & "decompiled.il"
+    csOut.SaveConsoleToFile outDir & "decompiled.cs"
+    vbOut.SaveConsoleToFile outDir & "decompiled.vb"
+
+    If Not Console Is Nothing Then
+        Console.WriteLine ""
+        Console.WriteLine "// Decompiled output written to:"
+        Console.WriteLine "//   " & outDir & "decompiled.il"
+        Console.WriteLine "//   " & outDir & "decompiled.cs"
+        Console.WriteLine "//   " & outDir & "decompiled.vb"
+    End If
+    Exit Sub
+done:
+    On Error Resume Next
+    Close #fdec
+    If Not Console Is Nothing Then Console.WriteLine "// DecompileDotNet error: " & err.Description
+End Sub
+
+'--- Type emission -------------------------------------------------------
+Private Sub EmitTypeAll(t As Long, f As Integer, ilOut As clsConsole, csOut As clsConsole, vbOut As clsConsole)
+On Error GoTo skip
+    Dim nm As String, ns As String
+    nm = GetString(TypeDefStruct(t).name)
+    ns = GetString(TypeDefStruct(t).nspace)
+    Dim isModule As Boolean
+    isModule = (t = 1) And (nm = "<Module>")
+
+    Dim fFirst As Long, fLast As Long, mFirst As Long, mLast As Long
+    Call GetFieldRange(t, fFirst, fLast)
+    Call GetMethodRange(t, mFirst, mLast)
+
+    'Emit into per-type buffers so each class can be stored individually;
+    'they are then appended to the whole-file outputs below.
+    Dim ilT As clsConsole, csT As clsConsole, vbT As clsConsole
+    Set ilT = New clsConsole
+    Set csT = New clsConsole
+    Set vbT = New clsConsole
+
+    'IL class header
+    ilT.WriteLine ".class " & GetTypeAttributeFlags(TypeDefStruct(t).flags, t) & FullName(ns, nm)
+    Dim baseNm As String
+    baseNm = GetExtendsName(t, LANG_IL)
+    If Len(baseNm) > 0 Then ilT.WriteLine "       extends " & baseNm
+    ilT.WriteLine "{"
+
+    'C#/VB class header
+    If Not isModule Then
+        csT.WriteLine CsTypeHeader(t, ns, nm)
+        csT.WriteLine "{"
+        vbT.WriteLine VbTypeHeader(t, ns, nm)
+    End If
+
+    Dim i As Long
+    For i = fFirst To fLast
+        If i >= 1 And i <= iRows(4) Then Call EmitField(i, t, isModule, ilT, csT, vbT)
+    Next
+    For i = mFirst To mLast
+        If i >= 1 And i <= iRows(6) Then Call EmitMethod(i, t, isModule, f, ilT, csT, vbT)
+    Next
+
+    ilT.WriteLine "} // end of class " & FullName(ns, nm)
+    ilT.WriteLine ""
+    If Not isModule Then
+        csT.WriteLine "}"
+        csT.WriteLine ""
+        vbT.WriteLine "End " & TypeKind(t, LANG_VB)
+        vbT.WriteLine ""
+    End If
+
+    'Append this type to the whole-file outputs
+    ilOut.WriteA ilT.Text
+    csOut.WriteA csT.Text
+    vbOut.WriteA vbT.Text
+
+    'Store this type for the project tree and the solution builder
+    gNetTypeName(gNetTypeCount) = FullName(ns, nm)
+    gNetTypeIL(gNetTypeCount) = ilT.Text
+    gNetTypeCS(gNetTypeCount) = csT.Text
+    gNetTypeVB(gNetTypeCount) = vbT.Text
+    gNetTypeMethods(gNetTypeCount) = BuildMethodSigList(t)
+    gNetTypeCount = gNetTypeCount + 1
+    Exit Sub
+skip:
+End Sub
+
+Private Sub GetFieldRange(t As Long, ByRef first As Long, ByRef last As Long)
+    first = TypeDefStruct(t).findex
+    If t < iRows(2) Then
+        last = TypeDefStruct(t + 1).findex - 1
+    Else
+        last = iRows(4)
+    End If
+End Sub
+
+Private Sub GetMethodRange(t As Long, ByRef first As Long, ByRef last As Long)
+    first = TypeDefStruct(t).mindex
+    If t < iRows(2) Then
+        last = TypeDefStruct(t + 1).mindex - 1
+    Else
+        last = iRows(6)
+    End If
+End Sub
+
+Private Function FullName(ns As String, nm As String) As String
+    If Len(ns) > 0 Then
+        FullName = ns & "." & nm
+    Else
+        FullName = nm
+    End If
+End Function
+
+Private Function GetExtendsName(t As Long, lang As Integer) As String
+    Dim coded As Long
+    coded = TypeDefStruct(t).cindex
+    If coded = 0 Then Exit Function
+    GetExtendsName = GetTypeDefOrRefName(coded, lang)
+End Function
+
+'Resolve a 2-bit TypeDefOrRef coded index (as stored in metadata tables)
+Private Function GetTypeDefOrRefName(coded As Long, lang As Integer) As String
+    Dim tag As Long, row As Long
+    tag = coded And 3
+    row = coded \ 4
+    Select Case tag
+        Case 0: GetTypeDefOrRefName = GetTypeDefFullName(row, lang)
+        Case 1: GetTypeDefOrRefName = GetTypeRefFullName(row, lang)
+        Case Else: GetTypeDefOrRefName = "TypeSpec[" & row & "]"
+    End Select
+End Function
+
+Private Function GetTypeDefFullName(row As Long, lang As Integer) As String
+    On Error Resume Next
+    If row < 1 Or row > iRows(2) Then GetTypeDefFullName = "object": Exit Function
+    GetTypeDefFullName = MapSystemName(FullName(GetString(TypeDefStruct(row).nspace), GetString(TypeDefStruct(row).name)), lang)
+End Function
+
+Private Function GetTypeRefFullName(row As Long, lang As Integer) As String
+    On Error Resume Next
+    If row < 1 Or row > iRows(1) Then GetTypeRefFullName = "object": Exit Function
+    GetTypeRefFullName = MapSystemName(FullName(GetString(TypeRefStruct(row).nspace), GetString(TypeRefStruct(row).name)), lang)
+End Function
+
+'Map common System.* names to language keywords; leave others untouched.
+Private Function MapSystemName(full As String, lang As Integer) As String
+    If lang = LANG_IL Then MapSystemName = full: Exit Function
+    Dim cs As Boolean
+    cs = (lang = LANG_CS)
+    Select Case full
+        Case "System.Void": MapSystemName = "void"
+        Case "System.Object": MapSystemName = IIf(cs, "object", "Object")
+        Case "System.String": MapSystemName = IIf(cs, "string", "String")
+        Case "System.Boolean": MapSystemName = IIf(cs, "bool", "Boolean")
+        Case "System.Char": MapSystemName = IIf(cs, "char", "Char")
+        Case "System.SByte": MapSystemName = IIf(cs, "sbyte", "SByte")
+        Case "System.Byte": MapSystemName = IIf(cs, "byte", "Byte")
+        Case "System.Int16": MapSystemName = IIf(cs, "short", "Short")
+        Case "System.UInt16": MapSystemName = IIf(cs, "ushort", "UShort")
+        Case "System.Int32": MapSystemName = IIf(cs, "int", "Integer")
+        Case "System.UInt32": MapSystemName = IIf(cs, "uint", "UInteger")
+        Case "System.Int64": MapSystemName = IIf(cs, "long", "Long")
+        Case "System.UInt64": MapSystemName = IIf(cs, "ulong", "ULong")
+        Case "System.Single": MapSystemName = IIf(cs, "float", "Single")
+        Case "System.Double": MapSystemName = IIf(cs, "double", "Double")
+        Case "System.Decimal": MapSystemName = IIf(cs, "decimal", "Decimal")
+        Case Else: MapSystemName = full
+    End Select
+End Function
+
+Private Function TypeKind(t As Long, lang As Integer) As String
+    Dim fl As Long
+    fl = TypeDefStruct(t).flags
+    Dim baseNm As String
+    baseNm = GetExtendsName(t, LANG_IL)
+    If (fl And &H20) <> 0 Then
+        TypeKind = "Interface"
+    ElseIf baseNm = "System.ValueType" Then
+        TypeKind = "Structure"
+    ElseIf baseNm = "System.Enum" Then
+        TypeKind = "Enum"
+    Else
+        TypeKind = "Class"
+    End If
+    If lang = LANG_CS Then TypeKind = LCase$(TypeKind)
+    If lang = LANG_CS And TypeKind = "structure" Then TypeKind = "struct"
+End Function
+
+Private Function CsTypeHeader(t As Long, ns As String, nm As String) As String
+    Dim fl As Long
+    fl = TypeDefStruct(t).flags
+    Dim s As String
+    s = CsVisibility(fl)
+    Dim kind As String
+    kind = TypeKind(t, LANG_CS)
+    If kind = "class" Then
+        If (fl And &H80) <> 0 And (fl And &H100) <> 0 Then
+            s = s & "static "
+        ElseIf (fl And &H80) <> 0 Then
+            s = s & "abstract "
+        ElseIf (fl And &H100) <> 0 Then
+            s = s & "sealed "
+        End If
+    End If
+    s = s & kind & " " & nm
+    Dim baseNm As String
+    baseNm = GetExtendsName(t, LANG_CS)
+    If kind = "class" And baseNm <> "" And baseNm <> "object" Then
+        s = s & " : " & baseNm
+    End If
+    CsTypeHeader = s
+End Function
+
+Private Function VbTypeHeader(t As Long, ns As String, nm As String) As String
+    Dim fl As Long
+    fl = TypeDefStruct(t).flags
+    Dim s As String
+    s = VbVisibility(fl)
+    Dim kind As String
+    kind = TypeKind(t, LANG_VB)
+    If kind = "Class" Then
+        If (fl And &H80) <> 0 And (fl And &H100) <> 0 Then
+            s = s & "NotInheritable "
+        ElseIf (fl And &H80) <> 0 Then
+            s = s & "MustInherit "
+        ElseIf (fl And &H100) <> 0 Then
+            s = s & "NotInheritable "
+        End If
+    End If
+    s = s & kind & " " & nm
+    Dim baseNm As String
+    baseNm = GetExtendsName(t, LANG_VB)
+    If kind = "Class" And baseNm <> "" And baseNm <> "Object" Then
+        s = s & vbCrLf & "    Inherits " & baseNm
+    End If
+    VbTypeHeader = s
+End Function
+
+Private Function CsVisibility(fl As Long) As String
+    Select Case (fl And 7)
+        Case 1, 2: CsVisibility = "public "
+        Case 3: CsVisibility = "private "
+        Case 4: CsVisibility = "protected "
+        Case 6, 7: CsVisibility = "protected internal "
+        Case Else: CsVisibility = "internal "
+    End Select
+End Function
+
+Private Function VbVisibility(fl As Long) As String
+    Select Case (fl And 7)
+        Case 1, 2: VbVisibility = "Public "
+        Case 3: VbVisibility = "Private "
+        Case 4: VbVisibility = "Protected "
+        Case 6, 7: VbVisibility = "Protected Friend "
+        Case Else: VbVisibility = "Friend "
+    End Select
+End Function
+
+'--- Field emission ------------------------------------------------------
+Private Sub EmitField(fi As Long, t As Long, isModule As Boolean, ilOut As clsConsole, csOut As clsConsole, vbOut As clsConsole)
+On Error GoTo skip
+    Dim nm As String
+    nm = GetString(FieldStruct(fi).name)
+    Dim fl As Long
+    fl = FieldStruct(fi).flags
+    ilOut.WriteLine "    .field " & FieldAttrIL(fl) & ParseFieldSigLang(FieldStruct(fi).sig, LANG_IL) & " " & nm
+    csOut.WriteLine "    " & CsFieldModifiers(fl) & ParseFieldSigLang(FieldStruct(fi).sig, LANG_CS) & " " & nm & ";"
+    vbOut.WriteLine "    " & VbFieldModifiers(fl) & nm & " As " & ParseFieldSigLang(FieldStruct(fi).sig, LANG_VB)
+    Exit Sub
+skip:
+End Sub
+
+Private Function FieldAttrIL(fl As Long) As String
+    Dim s As String
+    Select Case (fl And 7)
+        Case 1: s = "private "
+        Case 2: s = "famandassem "
+        Case 3: s = "assembly "
+        Case 4: s = "family "
+        Case 5: s = "famorassem "
+        Case 6: s = "public "
+        Case Else: s = "privatescope "
+    End Select
+    If (fl And &H10) <> 0 Then s = s & "static "
+    If (fl And &H20) <> 0 Then s = s & "initonly "
+    If (fl And &H40) <> 0 Then s = s & "literal "
+    FieldAttrIL = s
+End Function
+
+Private Function CsFieldModifiers(fl As Long) As String
+    Dim s As String
+    s = CsVisibility(fl)
+    If (fl And &H40) <> 0 Then
+        s = s & "const "
+    Else
+        If (fl And &H10) <> 0 Then s = s & "static "
+        If (fl And &H20) <> 0 Then s = s & "readonly "
+    End If
+    CsFieldModifiers = s
+End Function
+
+Private Function VbFieldModifiers(fl As Long) As String
+    Dim s As String
+    s = VbVisibility(fl)
+    If (fl And &H40) <> 0 Then
+        s = s & "Const "
+    Else
+        If (fl And &H10) <> 0 Then s = s & "Shared "
+        If (fl And &H20) <> 0 Then s = s & "ReadOnly "
+    End If
+    VbFieldModifiers = s
+End Function
+
+'--- Method emission -----------------------------------------------------
+Private Sub EmitMethod(mi As Long, t As Long, isModule As Boolean, f As Integer, ilOut As clsConsole, csOut As clsConsole, vbOut As clsConsole)
+On Error GoTo skip
+    Dim nm As String
+    nm = GetString(MethodStruct(mi).name)
+    Dim fl As Long
+    fl = MethodStruct(mi).flags
+    Dim isCtor As Boolean
+    isCtor = (nm = ".ctor" Or nm = ".cctor")
+    Dim typeName As String
+    typeName = GetString(TypeDefStruct(t).name)
+
+    Dim retIL As String, retCS As String, retVB As String
+    Dim pIL() As String, pCS() As String, pVB() As String
+    Dim pc As Long, hasThis As Boolean
+    Call ParseMethodSigFull(MethodStruct(mi).signature, retIL, pIL, pc, hasThis, LANG_IL)
+    Call ParseMethodSigFull(MethodStruct(mi).signature, retCS, pCS, pc, hasThis, LANG_CS)
+    Call ParseMethodSigFull(MethodStruct(mi).signature, retVB, pVB, pc, hasThis, LANG_VB)
+
+    Dim pName() As String
+    ReDim pName(pc + 1)
+    Call GetParamNames(mi, pc, pName)
+
+    'IL signature
+    Dim ilSig As String
+    ilSig = "    .method " & MethodAttrIL(fl) & retIL & " " & nm & "(" & JoinParamsIL(pIL, pc) & ") cil managed"
+    ilOut.WriteLine ilSig
+    ilOut.WriteLine "    {"
+
+    'C# signature
+    Dim csName As String
+    If isCtor Then csName = typeName Else csName = nm
+    Dim csSig As String
+    csSig = "    " & CsMethodModifiers(fl)
+    If Not isCtor Then csSig = csSig & retCS & " "
+    csSig = csSig & csName & "(" & JoinParamsNamed(pCS, pName, pc, LANG_CS) & ")"
+
+    'VB signature
+    Dim vbIsSub As Boolean
+    vbIsSub = (retIL = "void") Or isCtor
+    Dim vbName As String
+    If isCtor Then vbName = "New" Else vbName = nm
+    Dim vbSig As String
+    vbSig = "    " & VbMethodModifiers(fl) & IIf(vbIsSub, "Sub ", "Function ") & vbName & "(" & JoinParamsNamed(pVB, pName, pc, LANG_VB) & ")"
+    If Not vbIsSub Then vbSig = vbSig & " As " & retVB
+
+    Dim rva As Long
+    rva = MethodStruct(mi).rva
+    If rva = 0 Then
+        ilOut.WriteLine "        // no body (abstract / extern / pinvoke)"
+        ilOut.WriteLine "    } // end of method " & nm
+        ilOut.WriteLine ""
+        csOut.WriteLine csSig & ";"
+        csOut.WriteLine ""
+        vbOut.WriteLine vbSig
+        vbOut.WriteLine "    End " & IIf(vbIsSub, "Sub", "Function")
+        vbOut.WriteLine ""
+        Exit Sub
+    End If
+
+    Dim ilBytes() As Byte, codeSize As Long, localTok As Long
+    If ReadMethodBodyBytes(f, rva, ilBytes, codeSize, localTok) Then
+        Call DecodeInstructions(ilBytes, codeSize)
+        'IL body
+        Dim j As Long
+        For j = 0 To gInsCount - 1
+            ilOut.WriteLine "        " & FormatILLine(j)
+        Next
+        'C# body
+        csOut.WriteLine csSig
+        csOut.WriteLine "    {"
+        csOut.WriteA ReconstructBody(mi, hasThis, pc, pName, retIL, LANG_CS)
+        csOut.WriteLine "    }"
+        csOut.WriteLine ""
+        'VB body
+        vbOut.WriteLine vbSig
+        vbOut.WriteA ReconstructBody(mi, hasThis, pc, pName, retIL, LANG_VB)
+        vbOut.WriteLine "    End " & IIf(vbIsSub, "Sub", "Function")
+        vbOut.WriteLine ""
+    Else
+        ilOut.WriteLine "        // unable to read method body"
+        csOut.WriteLine csSig & " { }"
+        csOut.WriteLine ""
+        vbOut.WriteLine vbSig
+        vbOut.WriteLine "    End " & IIf(vbIsSub, "Sub", "Function")
+        vbOut.WriteLine ""
+    End If
+    ilOut.WriteLine "    } // end of method " & nm
+    ilOut.WriteLine ""
+    Exit Sub
+skip:
+End Sub
+
+Private Function MethodAttrIL(fl As Long) As String
+    Dim s As String
+    Select Case (fl And 7)
+        Case 1: s = "private "
+        Case 2: s = "famandassem "
+        Case 3: s = "assembly "
+        Case 4: s = "family "
+        Case 5: s = "famorassem "
+        Case 6: s = "public "
+        Case Else: s = "privatescope "
+    End Select
+    If (fl And &H10) <> 0 Then s = s & "static "
+    If (fl And &H20) <> 0 Then s = s & "final "
+    If (fl And &H40) <> 0 Then s = s & "virtual "
+    If (fl And &H80) <> 0 Then s = s & "hidebysig "
+    If (fl And &H400) <> 0 Then s = s & "abstract "
+    If (fl And &H800) <> 0 Then s = s & "specialname "
+    MethodAttrIL = s
+End Function
+
+Private Function CsMethodModifiers(fl As Long) As String
+    Dim s As String
+    s = CsVisibility(fl)
+    If (fl And &H10) <> 0 Then s = s & "static "
+    If (fl And &H400) <> 0 Then
+        s = s & "abstract "
+    ElseIf (fl And &H40) <> 0 Then
+        s = s & "virtual "
+    End If
+    CsMethodModifiers = s
+End Function
+
+Private Function VbMethodModifiers(fl As Long) As String
+    Dim s As String
+    s = VbVisibility(fl)
+    If (fl And &H10) <> 0 Then s = s & "Shared "
+    If (fl And &H400) <> 0 Then
+        s = s & "MustOverride "
+    ElseIf (fl And &H40) <> 0 Then
+        s = s & "Overridable "
+    End If
+    VbMethodModifiers = s
+End Function
+
+Private Function JoinParamsIL(p() As String, pc As Long) As String
+    Dim s As String, k As Long
+    For k = 1 To pc
+        If k > 1 Then s = s & ", "
+        s = s & p(k)
+    Next
+    JoinParamsIL = s
+End Function
+
+Private Function JoinParamsNamed(p() As String, pName() As String, pc As Long, lang As Integer) As String
+    Dim s As String, k As Long
+    For k = 1 To pc
+        If k > 1 Then s = s & ", "
+        If lang = LANG_VB Then
+            s = s & "ByVal " & pName(k) & " As " & p(k)
+        Else
+            s = s & p(k) & " " & pName(k)
+        End If
+    Next
+    JoinParamsNamed = s
+End Function
+
+Private Sub GetParamNames(mi As Long, pc As Long, ByRef pName() As String)
+    Dim k As Long
+    For k = 1 To pc
+        pName(k) = "A" & k
+    Next
+    If iRows(8) = 0 Then Exit Sub
+    Dim pFirst As Long, pLast As Long
+    pFirst = MethodStruct(mi).param
+    If mi < iRows(6) Then
+        pLast = MethodStruct(mi + 1).param - 1
+    Else
+        pLast = iRows(8)
+    End If
+    For k = pFirst To pLast
+        If k >= 1 And k <= iRows(8) Then
+            Dim seq As Long
+            seq = ParamStruct(k).sequence
+            If seq >= 1 And seq <= pc Then
+                Dim n As String
+                n = GetString(ParamStruct(k).name)
+                If Len(n) > 0 Then pName(seq) = n
+            End If
+        End If
+    Next
+End Sub
+
+'--- Signature blob decoding (ECMA-335 II.23.2) --------------------------
+Private Function ReadCompressedUInt(arr() As Byte, ByRef pos As Long) As Long
+    Dim b As Long
+    b = arr(pos)
+    If (b And &H80) = 0 Then
+        ReadCompressedUInt = b
+        pos = pos + 1
+    ElseIf (b And &HC0) = &H80 Then
+        ReadCompressedUInt = ((b And &H3F) * 256&) + arr(pos + 1)
+        pos = pos + 2
+    Else
+        ReadCompressedUInt = ((b And &H1F) * 16777216) + (CLng(arr(pos + 1)) * 65536) + (CLng(arr(pos + 2)) * 256) + arr(pos + 3)
+        pos = pos + 4
+    End If
+End Function
+
+'Position the cursor at the start of blob data, skipping the length prefix.
+Private Function BlobDataStart(blobIndex As Long, ByRef pos As Long) As Boolean
+    If blobIndex <= 0 Then BlobDataStart = False: Exit Function
+    On Error GoTo bad
+    pos = blobIndex
+    Dim length As Long
+    length = ReadCompressedUInt(BlobByteArray, pos)
+    BlobDataStart = True
+    Exit Function
+bad:
+    BlobDataStart = False
+End Function
+
+Private Function ParseFieldSigLang(blobIndex As Long, lang As Integer) As String
+    On Error GoTo bad
+    Dim pos As Long
+    If Not BlobDataStart(blobIndex, pos) Then ParseFieldSigLang = IIf(lang = LANG_VB, "Object", "object"): Exit Function
+    'first byte is the FIELD calling convention (0x06)
+    pos = pos + 1
+    ParseFieldSigLang = ParseTypeSig(BlobByteArray, pos, lang)
+    Exit Function
+bad:
+    ParseFieldSigLang = IIf(lang = LANG_VB, "Object", "object")
+End Function
+
+Private Sub ParseMethodSigFull(blobIndex As Long, ByRef ret As String, ByRef params() As String, ByRef pc As Long, ByRef hasThis As Boolean, lang As Integer)
+    On Error GoTo bad
+    pc = 0
+    ReDim params(0)
+    hasThis = False
+    ret = "void"
+    Dim pos As Long
+    If Not BlobDataStart(blobIndex, pos) Then Exit Sub
+    Dim first As Long
+    first = BlobByteArray(pos)
+    pos = pos + 1
+    hasThis = (first And &H20) <> 0
+    If (first And &H10) <> 0 Then
+        Dim gp As Long
+        gp = ReadCompressedUInt(BlobByteArray, pos)   'generic param count
+    End If
+    pc = ReadCompressedUInt(BlobByteArray, pos)
+    ret = ParseTypeSig(BlobByteArray, pos, lang)
+    ReDim params(pc + 1)
+    Dim k As Long
+    For k = 1 To pc
+        params(k) = ParseTypeSig(BlobByteArray, pos, lang)
+    Next
+    Exit Sub
+bad:
+End Sub
+
+Private Sub GetSigCounts(blobIndex As Long, ByRef argc As Long, ByRef hasThis As Boolean, ByRef returnsVal As Boolean)
+    Dim ret As String
+    Dim p() As String
+    Dim pc As Long
+    Call ParseMethodSigFull(blobIndex, ret, p, pc, hasThis, LANG_IL)
+    argc = pc
+    returnsVal = (ret <> "void")
+End Sub
+
+'Recursive type-signature reader.  Returns a name in the requested language.
+Private Function ParseTypeSig(arr() As Byte, ByRef pos As Long, lang As Integer) As String
+    On Error GoTo bad
+    Dim e As Long
+    e = arr(pos)
+    pos = pos + 1
+    Select Case e
+        Case &H1 To &HE, &H18, &H19, &H1C
+            ParseTypeSig = PrimName(e, lang)
+        Case &HF      'PTR
+            ParseTypeSig = ParseTypeSig(arr, pos, lang) & "*"
+        Case &H10     'BYREF
+            If lang = LANG_CS Then
+                ParseTypeSig = "ref " & ParseTypeSig(arr, pos, lang)
+            ElseIf lang = LANG_VB Then
+                ParseTypeSig = ParseTypeSig(arr, pos, lang)
+            Else
+                ParseTypeSig = ParseTypeSig(arr, pos, lang) & "&"
+            End If
+        Case &H11, &H12   'VALUETYPE / CLASS
+            Dim tok As Long
+            tok = ReadCompressedUInt(arr, pos)
+            ParseTypeSig = GetTypeDefOrRefName(tok, lang)
+        Case &H13     'VAR (generic type param)
+            ParseTypeSig = "T" & ReadCompressedUInt(arr, pos)
+        Case &H1E     'MVAR (generic method param)
+            ParseTypeSig = "T" & ReadCompressedUInt(arr, pos)
+        Case &H1D     'SZARRAY
+            ParseTypeSig = ParseTypeSig(arr, pos, lang) & IIf(lang = LANG_VB, "()", "[]")
+        Case &H14     'ARRAY
+            Dim el As String
+            el = ParseTypeSig(arr, pos, lang)
+            Dim rank As Long, nSizes As Long, nLo As Long, z As Long
+            rank = ReadCompressedUInt(arr, pos)
+            nSizes = ReadCompressedUInt(arr, pos)
+            For z = 1 To nSizes
+                Call ReadCompressedUInt(arr, pos)
+            Next
+            nLo = ReadCompressedUInt(arr, pos)
+            For z = 1 To nLo
+                Call ReadCompressedUInt(arr, pos)
+            Next
+            ParseTypeSig = el & IIf(lang = LANG_VB, "()", "[]")
+        Case &H15     'GENERICINST
+            pos = pos + 1   'skip the CLASS/VALUETYPE indicator
+            Dim gtok As Long
+            gtok = ReadCompressedUInt(arr, pos)
+            Dim baseNm As String
+            baseNm = GetTypeDefOrRefName(gtok, lang)
+            Dim ac As Long, ga As String, w As Long
+            ac = ReadCompressedUInt(arr, pos)
+            For w = 1 To ac
+                If w > 1 Then ga = ga & ", "
+                ga = ga & ParseTypeSig(arr, pos, lang)
+            Next
+            If lang = LANG_VB Then
+                'strip the `n arity marker if present
+                ParseTypeSig = StripArity(baseNm) & "(Of " & ga & ")"
+            ElseIf lang = LANG_CS Then
+                ParseTypeSig = StripArity(baseNm) & "<" & ga & ">"
+            Else
+                ParseTypeSig = baseNm & "<" & ga & ">"
+            End If
+        Case &H1F, &H20   'CMOD_REQD / CMOD_OPT
+            Call ReadCompressedUInt(arr, pos)   'skip modifier token
+            ParseTypeSig = ParseTypeSig(arr, pos, lang)
+        Case &H45     'PINNED
+            ParseTypeSig = ParseTypeSig(arr, pos, lang)
+        Case &H16     'TYPEDBYREF
+            ParseTypeSig = "TypedReference"
+        Case Else
+            ParseTypeSig = IIf(lang = LANG_VB, "Object", "object")
+    End Select
+    Exit Function
+bad:
+    ParseTypeSig = IIf(lang = LANG_VB, "Object", "object")
+End Function
+
+Private Function StripArity(nm As String) As String
+    Dim p As Long
+    p = InStr(nm, "`")
+    If p > 0 Then
+        StripArity = Left$(nm, p - 1)
+    Else
+        StripArity = nm
+    End If
+End Function
+
+Private Function PrimName(e As Long, lang As Integer) As String
+    Dim cs As Boolean
+    cs = (lang = LANG_CS)
+    Dim il As Boolean
+    il = (lang = LANG_IL)
+    Select Case e
+        Case &H1: PrimName = "void"
+        Case &H2: PrimName = IIf(il, "bool", IIf(cs, "bool", "Boolean"))
+        Case &H3: PrimName = IIf(il, "char", IIf(cs, "char", "Char"))
+        Case &H4: PrimName = IIf(il, "int8", IIf(cs, "sbyte", "SByte"))
+        Case &H5: PrimName = IIf(il, "unsigned int8", IIf(cs, "byte", "Byte"))
+        Case &H6: PrimName = IIf(il, "int16", IIf(cs, "short", "Short"))
+        Case &H7: PrimName = IIf(il, "unsigned int16", IIf(cs, "ushort", "UShort"))
+        Case &H8: PrimName = IIf(il, "int32", IIf(cs, "int", "Integer"))
+        Case &H9: PrimName = IIf(il, "unsigned int32", IIf(cs, "uint", "UInteger"))
+        Case &HA: PrimName = IIf(il, "int64", IIf(cs, "long", "Long"))
+        Case &HB: PrimName = IIf(il, "unsigned int64", IIf(cs, "ulong", "ULong"))
+        Case &HC: PrimName = IIf(il, "float32", IIf(cs, "float", "Single"))
+        Case &HD: PrimName = IIf(il, "float64", IIf(cs, "double", "Double"))
+        Case &HE: PrimName = IIf(il, "string", IIf(cs, "string", "String"))
+        Case &H18: PrimName = IIf(il, "native int", "IntPtr")
+        Case &H19: PrimName = IIf(il, "native unsigned int", "UIntPtr")
+        Case &H1C: PrimName = IIf(il, "object", IIf(cs, "object", "Object"))
+        Case Else: PrimName = IIf(cs, "object", IIf(il, "object", "Object"))
+    End Select
+End Function
+
+'--- Method body reading (ECMA-335 II.25.4) ------------------------------
+Private Function ReadMethodBodyBytes(f As Integer, rva As Long, ByRef ilBytes() As Byte, ByRef codeSize As Long, ByRef localSigTok As Long) As Boolean
+    On Error GoTo bad
+    localSigTok = 0
+    codeSize = 0
+    If rva = 0 Then Exit Function
+    Dim foff As Long
+    foff = GetPtrFromRVA2(rva)
+    Seek #f, foff + 1
+    Dim b0 As Byte
+    Get #f, , b0
+    If (b0 And 3) = 2 Then
+        'Tiny format: code size is in the top 6 bits, IL follows immediately.
+        codeSize = b0 \ 4
+    ElseIf (b0 And 3) = 3 Then
+        'Fat format: 12-byte header.
+        Dim b1 As Byte
+        Get #f, , b1
+        Dim maxStack As Integer
+        Get #f, , maxStack
+        Dim cs As Long
+        Get #f, , cs
+        Get #f, , localSigTok
+        codeSize = cs
+    Else
+        Exit Function
+    End If
+    If codeSize <= 0 Then
+        ReDim ilBytes(0)
+        ReadMethodBodyBytes = True
+        Exit Function
+    End If
+    ReDim ilBytes(codeSize - 1)
+    Get #f, , ilBytes
+    ReadMethodBodyBytes = True
+    Exit Function
+bad:
+    ReadMethodBodyBytes = False
+End Function
+
+'--- IL disassembly ------------------------------------------------------
+Private Sub DecodeInstructions(il() As Byte, codeSize As Long)
+    gInsCount = 0
+    ReDim gInsPos(255)
+    ReDim gInsName(255)
+    ReDim gInsText(255)
+    ReDim gInsVal(255)
+    Dim p As Long
+    p = 0
+    Do While p < codeSize
+        If gInsCount > UBound(gInsPos) Then
+            ReDim Preserve gInsPos(gInsCount + 256)
+            ReDim Preserve gInsName(gInsCount + 256)
+            ReDim Preserve gInsText(gInsCount + 256)
+            ReDim Preserve gInsVal(gInsCount + 256)
+        End If
+        Dim startP As Long
+        startP = p
+        Dim full As Integer
+        Dim b As Integer
+        b = il(p): p = p + 1
+        If b = &HFE Then
+            Dim b2 As Integer
+            b2 = il(p): p = p + 1
+            full = 256 + b2
+        Else
+            full = b
+        End If
+        Dim nm As String, kind As Integer
+        Call LookupOpcode(full, nm, kind)
+        Dim txt As String, val As Long
+        txt = "": val = 0
+        Select Case kind
+            Case OK_NONE
+            Case OK_I1
+                val = SByteVal(il(p)): p = p + 1: txt = CStr(val)
+            Case OK_U1
+                val = il(p): p = p + 1: txt = CStr(val)
+            Case OK_VAR
+                val = il(p) + il(p + 1) * 256&: p = p + 2: txt = CStr(val)
+            Case OK_I4
+                val = BitConverterToInt32(il, p): p = p + 4: txt = CStr(val)
+            Case OK_I8
+                val = BitConverterToInt32(il, p): p = p + 8: txt = CStr(val)
+            Case OK_R4
+                txt = "0x" & RawHex(il, p, 4): p = p + 4
+            Case OK_R8
+                txt = "0x" & RawHex(il, p, 8): p = p + 8
+            Case OK_BR1
+                Dim d1 As Long
+                d1 = SByteVal(il(p)): p = p + 1: val = p + d1: txt = "IL_" & Hex4(val)
+            Case OK_BR4
+                Dim d4 As Long
+                d4 = BitConverterToInt32(il, p): p = p + 4: val = p + d4: txt = "IL_" & Hex4(val)
+            Case OK_TOK
+                val = BitConverterToInt32(il, p): p = p + 4: txt = GetTokenDisplay(val, LANG_IL)
+            Case OK_STR
+                val = BitConverterToInt32(il, p): p = p + 4: txt = GetUserStringByToken(val)
+            Case OK_SWITCH
+                Dim n As Long, s As Long
+                n = BitConverterToInt32(il, p): p = p + 4
+                For s = 1 To n
+                    p = p + 4
+                Next
+                txt = "(" & n & " targets)"
+        End Select
+        gInsPos(gInsCount) = startP
+        gInsName(gInsCount) = nm
+        gInsText(gInsCount) = txt
+        gInsVal(gInsCount) = val
+        gInsCount = gInsCount + 1
+    Loop
+End Sub
+
+Private Function FormatILLine(j As Long) As String
+    Dim s As String
+    s = "IL_" & Hex4(gInsPos(j)) & ":  " & gInsName(j)
+    If Len(gInsText(j)) > 0 Then s = s & " " & gInsText(j)
+    FormatILLine = s
+End Function
+
+Private Function SByteVal(b As Byte) As Long
+    If b < 128 Then
+        SByteVal = b
+    Else
+        SByteVal = CLng(b) - 256
+    End If
+End Function
+
+Private Function Hex4(n As Long) As String
+    Hex4 = Right$("0000" & Hex$(n And &HFFFF&), 4)
+End Function
+
+Private Function RawHex(arr() As Byte, ByVal pos As Long, ByVal n As Long) As String
+    Dim s As String, i As Long
+    For i = n - 1 To 0 Step -1
+        s = s & Right$("0" & Hex$(arr(pos + i)), 2)
+    Next
+    RawHex = s
+End Function
+
+'Opcode table (ECMA-335 Partition III).  full < 256 is a one-byte opcode;
+'full >= 256 is a two-byte 0xFE-prefixed opcode (full = 256 + secondByte).
+Private Sub LookupOpcode(full As Integer, ByRef nm As String, ByRef kind As Integer)
+    kind = OK_NONE
+    Select Case full
+        Case &H0: nm = "nop"
+        Case &H1: nm = "break"
+        Case &H2: nm = "ldarg.0"
+        Case &H3: nm = "ldarg.1"
+        Case &H4: nm = "ldarg.2"
+        Case &H5: nm = "ldarg.3"
+        Case &H6: nm = "ldloc.0"
+        Case &H7: nm = "ldloc.1"
+        Case &H8: nm = "ldloc.2"
+        Case &H9: nm = "ldloc.3"
+        Case &HA: nm = "stloc.0"
+        Case &HB: nm = "stloc.1"
+        Case &HC: nm = "stloc.2"
+        Case &HD: nm = "stloc.3"
+        Case &HE: nm = "ldarg.s": kind = OK_U1
+        Case &HF: nm = "ldarga.s": kind = OK_U1
+        Case &H10: nm = "starg.s": kind = OK_U1
+        Case &H11: nm = "ldloc.s": kind = OK_U1
+        Case &H12: nm = "ldloca.s": kind = OK_U1
+        Case &H13: nm = "stloc.s": kind = OK_U1
+        Case &H14: nm = "ldnull"
+        Case &H15: nm = "ldc.i4.m1"
+        Case &H16: nm = "ldc.i4.0"
+        Case &H17: nm = "ldc.i4.1"
+        Case &H18: nm = "ldc.i4.2"
+        Case &H19: nm = "ldc.i4.3"
+        Case &H1A: nm = "ldc.i4.4"
+        Case &H1B: nm = "ldc.i4.5"
+        Case &H1C: nm = "ldc.i4.6"
+        Case &H1D: nm = "ldc.i4.7"
+        Case &H1E: nm = "ldc.i4.8"
+        Case &H1F: nm = "ldc.i4.s": kind = OK_I1
+        Case &H20: nm = "ldc.i4": kind = OK_I4
+        Case &H21: nm = "ldc.i8": kind = OK_I8
+        Case &H22: nm = "ldc.r4": kind = OK_R4
+        Case &H23: nm = "ldc.r8": kind = OK_R8
+        Case &H25: nm = "dup"
+        Case &H26: nm = "pop"
+        Case &H27: nm = "jmp": kind = OK_TOK
+        Case &H28: nm = "call": kind = OK_TOK
+        Case &H29: nm = "calli": kind = OK_TOK
+        Case &H2A: nm = "ret"
+        Case &H2B: nm = "br.s": kind = OK_BR1
+        Case &H2C: nm = "brfalse.s": kind = OK_BR1
+        Case &H2D: nm = "brtrue.s": kind = OK_BR1
+        Case &H2E: nm = "beq.s": kind = OK_BR1
+        Case &H2F: nm = "bge.s": kind = OK_BR1
+        Case &H30: nm = "bgt.s": kind = OK_BR1
+        Case &H31: nm = "ble.s": kind = OK_BR1
+        Case &H32: nm = "blt.s": kind = OK_BR1
+        Case &H33: nm = "bne.un.s": kind = OK_BR1
+        Case &H34: nm = "bge.un.s": kind = OK_BR1
+        Case &H35: nm = "bgt.un.s": kind = OK_BR1
+        Case &H36: nm = "ble.un.s": kind = OK_BR1
+        Case &H37: nm = "blt.un.s": kind = OK_BR1
+        Case &H38: nm = "br": kind = OK_BR4
+        Case &H39: nm = "brfalse": kind = OK_BR4
+        Case &H3A: nm = "brtrue": kind = OK_BR4
+        Case &H3B: nm = "beq": kind = OK_BR4
+        Case &H3C: nm = "bge": kind = OK_BR4
+        Case &H3D: nm = "bgt": kind = OK_BR4
+        Case &H3E: nm = "ble": kind = OK_BR4
+        Case &H3F: nm = "blt": kind = OK_BR4
+        Case &H40: nm = "bne.un": kind = OK_BR4
+        Case &H41: nm = "bge.un": kind = OK_BR4
+        Case &H42: nm = "bgt.un": kind = OK_BR4
+        Case &H43: nm = "ble.un": kind = OK_BR4
+        Case &H44: nm = "blt.un": kind = OK_BR4
+        Case &H45: nm = "switch": kind = OK_SWITCH
+        Case &H46: nm = "ldind.i1"
+        Case &H47: nm = "ldind.u1"
+        Case &H48: nm = "ldind.i2"
+        Case &H49: nm = "ldind.u2"
+        Case &H4A: nm = "ldind.i4"
+        Case &H4B: nm = "ldind.u4"
+        Case &H4C: nm = "ldind.i8"
+        Case &H4D: nm = "ldind.i"
+        Case &H4E: nm = "ldind.r4"
+        Case &H4F: nm = "ldind.r8"
+        Case &H50: nm = "ldind.ref"
+        Case &H51: nm = "stind.ref"
+        Case &H52: nm = "stind.i1"
+        Case &H53: nm = "stind.i2"
+        Case &H54: nm = "stind.i4"
+        Case &H55: nm = "stind.i8"
+        Case &H56: nm = "stind.r4"
+        Case &H57: nm = "stind.r8"
+        Case &H58: nm = "add"
+        Case &H59: nm = "sub"
+        Case &H5A: nm = "mul"
+        Case &H5B: nm = "div"
+        Case &H5C: nm = "div.un"
+        Case &H5D: nm = "rem"
+        Case &H5E: nm = "rem.un"
+        Case &H5F: nm = "and"
+        Case &H60: nm = "or"
+        Case &H61: nm = "xor"
+        Case &H62: nm = "shl"
+        Case &H63: nm = "shr"
+        Case &H64: nm = "shr.un"
+        Case &H65: nm = "neg"
+        Case &H66: nm = "not"
+        Case &H67: nm = "conv.i1"
+        Case &H68: nm = "conv.i2"
+        Case &H69: nm = "conv.i4"
+        Case &H6A: nm = "conv.i8"
+        Case &H6B: nm = "conv.r4"
+        Case &H6C: nm = "conv.r8"
+        Case &H6D: nm = "conv.u4"
+        Case &H6E: nm = "conv.u8"
+        Case &H6F: nm = "callvirt": kind = OK_TOK
+        Case &H70: nm = "cpobj": kind = OK_TOK
+        Case &H71: nm = "ldobj": kind = OK_TOK
+        Case &H72: nm = "ldstr": kind = OK_STR
+        Case &H73: nm = "newobj": kind = OK_TOK
+        Case &H74: nm = "castclass": kind = OK_TOK
+        Case &H75: nm = "isinst": kind = OK_TOK
+        Case &H76: nm = "conv.r.un"
+        Case &H79: nm = "unbox": kind = OK_TOK
+        Case &H7A: nm = "throw"
+        Case &H7B: nm = "ldfld": kind = OK_TOK
+        Case &H7C: nm = "ldflda": kind = OK_TOK
+        Case &H7D: nm = "stfld": kind = OK_TOK
+        Case &H7E: nm = "ldsfld": kind = OK_TOK
+        Case &H7F: nm = "ldsflda": kind = OK_TOK
+        Case &H80: nm = "stsfld": kind = OK_TOK
+        Case &H81: nm = "stobj": kind = OK_TOK
+        Case &H82: nm = "conv.ovf.i1.un"
+        Case &H83: nm = "conv.ovf.i2.un"
+        Case &H84: nm = "conv.ovf.i4.un"
+        Case &H85: nm = "conv.ovf.i8.un"
+        Case &H86: nm = "conv.ovf.u1.un"
+        Case &H87: nm = "conv.ovf.u2.un"
+        Case &H88: nm = "conv.ovf.u4.un"
+        Case &H89: nm = "conv.ovf.u8.un"
+        Case &H8A: nm = "conv.ovf.i.un"
+        Case &H8B: nm = "conv.ovf.u.un"
+        Case &H8C: nm = "box": kind = OK_TOK
+        Case &H8D: nm = "newarr": kind = OK_TOK
+        Case &H8E: nm = "ldlen"
+        Case &H8F: nm = "ldelema": kind = OK_TOK
+        Case &H90: nm = "ldelem.i1"
+        Case &H91: nm = "ldelem.u1"
+        Case &H92: nm = "ldelem.i2"
+        Case &H93: nm = "ldelem.u2"
+        Case &H94: nm = "ldelem.i4"
+        Case &H95: nm = "ldelem.u4"
+        Case &H96: nm = "ldelem.i8"
+        Case &H97: nm = "ldelem.i"
+        Case &H98: nm = "ldelem.r4"
+        Case &H99: nm = "ldelem.r8"
+        Case &H9A: nm = "ldelem.ref"
+        Case &H9B: nm = "stelem.i"
+        Case &H9C: nm = "stelem.i1"
+        Case &H9D: nm = "stelem.i2"
+        Case &H9E: nm = "stelem.i4"
+        Case &H9F: nm = "stelem.i8"
+        Case &HA0: nm = "stelem.r4"
+        Case &HA1: nm = "stelem.r8"
+        Case &HA2: nm = "stelem.ref"
+        Case &HA3: nm = "ldelem": kind = OK_TOK
+        Case &HA4: nm = "stelem": kind = OK_TOK
+        Case &HA5: nm = "unbox.any": kind = OK_TOK
+        Case &HB3: nm = "conv.ovf.i1"
+        Case &HB4: nm = "conv.ovf.u1"
+        Case &HB5: nm = "conv.ovf.i2"
+        Case &HB6: nm = "conv.ovf.u2"
+        Case &HB7: nm = "conv.ovf.i4"
+        Case &HB8: nm = "conv.ovf.u4"
+        Case &HB9: nm = "conv.ovf.i8"
+        Case &HBA: nm = "conv.ovf.u8"
+        Case &HC2: nm = "refanyval": kind = OK_TOK
+        Case &HC3: nm = "ckfinite"
+        Case &HC6: nm = "mkrefany": kind = OK_TOK
+        Case &HD0: nm = "ldtoken": kind = OK_TOK
+        Case &HD1: nm = "conv.u2"
+        Case &HD2: nm = "conv.u1"
+        Case &HD3: nm = "conv.i"
+        Case &HD4: nm = "conv.ovf.i"
+        Case &HD5: nm = "conv.ovf.u"
+        Case &HD6: nm = "add.ovf"
+        Case &HD7: nm = "add.ovf.un"
+        Case &HD8: nm = "mul.ovf"
+        Case &HD9: nm = "mul.ovf.un"
+        Case &HDA: nm = "sub.ovf"
+        Case &HDB: nm = "sub.ovf.un"
+        Case &HDC: nm = "endfinally"
+        Case &HDD: nm = "leave": kind = OK_BR4
+        Case &HDE: nm = "leave.s": kind = OK_BR1
+        Case &HDF: nm = "stind.i"
+        Case &HE0: nm = "conv.u"
+        'two-byte 0xFE opcodes
+        Case 256 + &H0: nm = "arglist"
+        Case 256 + &H1: nm = "ceq"
+        Case 256 + &H2: nm = "cgt"
+        Case 256 + &H3: nm = "cgt.un"
+        Case 256 + &H4: nm = "clt"
+        Case 256 + &H5: nm = "clt.un"
+        Case 256 + &H6: nm = "ldftn": kind = OK_TOK
+        Case 256 + &H7: nm = "ldvirtftn": kind = OK_TOK
+        Case 256 + &H9: nm = "ldarg": kind = OK_VAR
+        Case 256 + &HA: nm = "ldarga": kind = OK_VAR
+        Case 256 + &HB: nm = "starg": kind = OK_VAR
+        Case 256 + &HC: nm = "ldloc": kind = OK_VAR
+        Case 256 + &HD: nm = "ldloca": kind = OK_VAR
+        Case 256 + &HE: nm = "stloc": kind = OK_VAR
+        Case 256 + &HF: nm = "localloc"
+        Case 256 + &H11: nm = "endfilter"
+        Case 256 + &H12: nm = "unaligned.": kind = OK_U1
+        Case 256 + &H13: nm = "volatile."
+        Case 256 + &H14: nm = "tail."
+        Case 256 + &H15: nm = "initobj": kind = OK_TOK
+        Case 256 + &H16: nm = "constrained.": kind = OK_TOK
+        Case 256 + &H17: nm = "cpblk"
+        Case 256 + &H18: nm = "initblk"
+        Case 256 + &H1A: nm = "rethrow"
+        Case 256 + &H1C: nm = "sizeof": kind = OK_TOK
+        Case 256 + &H1D: nm = "refanytype"
+        Case 256 + &H1E: nm = "readonly."
+        Case Else
+            nm = "unknown.0x" & Hex$(full)
+    End Select
+End Sub
+
+'--- Token resolution ----------------------------------------------------
+'Display string for a metadata token used by an IL operand.
+Private Function GetTokenDisplay(token As Long, lang As Integer) As String
+    On Error GoTo bad
+    Dim table As Long, row As Long
+    table = (token \ &H1000000) And &HFF
+    row = token And &HFFFFFF
+    Select Case table
+        Case &H6     'MethodDef
+            GetTokenDisplay = GetMethodOwnerTypeName(row, lang) & "::" & GetString(MethodStruct(row).name)
+        Case &HA     'MemberRef
+            GetTokenDisplay = GetMemberRefParentName(MemberRefStruct(row).clas, lang) & "::" & GetString(MemberRefStruct(row).name)
+        Case &H1     'TypeRef
+            GetTokenDisplay = GetTypeRefFullName(row, lang)
+        Case &H2     'TypeDef
+            GetTokenDisplay = GetTypeDefFullName(row, lang)
+        Case &H4     'Field
+            GetTokenDisplay = GetFieldOwnerTypeName(row, lang) & "::" & GetString(FieldStruct(row).name)
+        Case &H1B    'TypeSpec
+            GetTokenDisplay = "TypeSpec[" & row & "]"
+        Case &H2B    'MethodSpec
+            GetTokenDisplay = "MethodSpec[" & row & "]"
+        Case Else
+            GetTokenDisplay = "token_0x" & Hex$(token)
+    End Select
+    Exit Function
+bad:
+    GetTokenDisplay = "token_0x" & Hex$(token)
+End Function
+
+Private Function GetMethodOwnerTypeName(methodRow As Long, lang As Integer) As String
+    On Error Resume Next
+    Dim t As Long, mFirst As Long, mLast As Long
+    For t = 1 To iRows(2)
+        Call GetMethodRange(t, mFirst, mLast)
+        If methodRow >= mFirst And methodRow <= mLast Then
+            GetMethodOwnerTypeName = GetTypeDefFullName(t, lang)
+            Exit Function
+        End If
+    Next
+    GetMethodOwnerTypeName = "?"
+End Function
+
+Private Function GetFieldOwnerTypeName(fieldRow As Long, lang As Integer) As String
+    On Error Resume Next
+    Dim t As Long, fFirst As Long, fLast As Long
+    For t = 1 To iRows(2)
+        Call GetFieldRange(t, fFirst, fLast)
+        If fieldRow >= fFirst And fieldRow <= fLast Then
+            GetFieldOwnerTypeName = GetTypeDefFullName(t, lang)
+            Exit Function
+        End If
+    Next
+    GetFieldOwnerTypeName = "?"
+End Function
+
+'Resolve a 3-bit MemberRefParent coded index.
+Private Function GetMemberRefParentName(coded As Long, lang As Integer) As String
+    On Error Resume Next
+    Dim tag As Long, row As Long
+    tag = coded And 7
+    row = coded \ 8
+    Select Case tag
+        Case 0: GetMemberRefParentName = GetTypeDefFullName(row, lang)
+        Case 1: GetMemberRefParentName = GetTypeRefFullName(row, lang)
+        Case 2: GetMemberRefParentName = GetString(ModuleRefStruct(row).name)
+        Case 3: GetMemberRefParentName = GetMethodOwnerTypeName(row, lang)
+        Case 4: GetMemberRefParentName = "TypeSpec[" & row & "]"
+        Case Else: GetMemberRefParentName = "?"
+    End Select
+End Function
+
+'Read a #US user string by its 0x70xxxxxx token.  Returns a quoted literal.
+Private Function GetUserStringByToken(token As Long) As String
+    On Error GoTo bad
+    Dim offset As Long
+    offset = token And &HFFFFFF
+    If offset = 0 Then GetUserStringByToken = """""": Exit Function
+    Dim pos As Long
+    pos = offset
+    Dim length As Long
+    length = ReadCompressedUInt(USByteArray, pos)
+    If length <= 1 Then GetUserStringByToken = """""": Exit Function
+    Dim chars As Long
+    chars = (length - 1) \ 2
+    Dim s As String, i As Long, code As Long
+    For i = 0 To chars - 1
+        code = USByteArray(pos + i * 2) + USByteArray(pos + i * 2 + 1) * 256&
+        Select Case code
+            Case 34: s = s & "\"""
+            Case 92: s = s & "\\"
+            Case 13: s = s & "\r"
+            Case 10: s = s & "\n"
+            Case 9: s = s & "\t"
+            Case Else
+                If code >= 32 And code < 127 Then
+                    s = s & Chr$(code)
+                ElseIf code < 256 Then
+                    s = s & Chr$(code)
+                Else
+                    s = s & ChrW$(code)
+                End If
+        End Select
+    Next
+    GetUserStringByToken = """" & s & """"
+    Exit Function
+bad:
+    GetUserStringByToken = Chr$(34) & Chr$(34)
+End Function
+
+'--- Call/field token info for the reconstruction stack machine ----------
+Private Function CallInfoFromToken(token As Long, ByRef name As String, ByRef owner As String, ByRef argc As Long, ByRef hasThisC As Boolean, ByRef returnsVal As Boolean, lang As Integer) As Boolean
+    On Error GoTo bad
+    Dim table As Long, row As Long
+    table = (token \ &H1000000) And &HFF
+    row = token And &HFFFFFF
+    Dim sigBlob As Long
+    Select Case table
+        Case &H6     'MethodDef
+            name = GetString(MethodStruct(row).name)
+            owner = GetMethodOwnerTypeName(row, lang)
+            sigBlob = MethodStruct(row).signature
+        Case &HA     'MemberRef
+            name = GetString(MemberRefStruct(row).name)
+            owner = GetMemberRefParentName(MemberRefStruct(row).clas, lang)
+            sigBlob = MemberRefStruct(row).sig
+        Case Else
+            CallInfoFromToken = False
+            Exit Function
+    End Select
+    Call GetSigCounts(sigBlob, argc, hasThisC, returnsVal)
+    CallInfoFromToken = True
+    Exit Function
+bad:
+    CallInfoFromToken = False
+End Function
+
+Private Function FieldRefFromToken(token As Long, ByRef owner As String, ByRef name As String, lang As Integer) As Boolean
+    On Error GoTo bad
+    Dim table As Long, row As Long
+    table = (token \ &H1000000) And &HFF
+    row = token And &HFFFFFF
+    Select Case table
+        Case &H4     'Field
+            name = GetString(FieldStruct(row).name)
+            owner = GetFieldOwnerTypeName(row, lang)
+        Case &HA     'MemberRef
+            name = GetString(MemberRefStruct(row).name)
+            owner = GetMemberRefParentName(MemberRefStruct(row).clas, lang)
+        Case Else
+            FieldRefFromToken = False
+            Exit Function
+    End Select
+    FieldRefFromToken = True
+    Exit Function
+bad:
+    FieldRefFromToken = False
+End Function
+
+'--- Straight-line body reconstruction -----------------------------------
+'A tiny string-valued stack machine.  It models the common load/store/call
+'patterns; the first time it meets real control flow (a branch/switch) or an
+'opcode it does not model, it stops and leaves a note pointing at the IL.
+Private Function ReconstructBody(mi As Long, hasThis As Boolean, pc As Long, pName() As String, retIL As String, lang As Integer) As String
+    On Error GoTo bad
+    Dim sb As String
+    Dim stack() As String
+    ReDim stack(512)
+    Dim sp As Long
+    sp = 0
+    Dim term As String, thisKw As String, nullKw As String, newKw As String, retKw As String, throwKw As String, eqOp As String
+    If lang = LANG_CS Then
+        term = ";": thisKw = "this": nullKw = "null": newKw = "new ": retKw = "return": throwKw = "throw": eqOp = " == "
+    Else
+        term = "": thisKw = "Me": nullKw = "Nothing": newKw = "New ": retKw = "Return": throwKw = "Throw": eqOp = " = "
+    End If
+    Dim indent As String
+    indent = "        "
+    Dim complex As Boolean
+    Dim j As Long
+    For j = 0 To gInsCount - 1
+        Dim op As String
+        op = gInsName(j)
+        Dim a1 As String, a2 As String, e As String
+        Select Case op
+            Case "nop", "break", "volatile.", "readonly.", "tail.", "constrained.", "unaligned."
+                'ignore prefixes / nops
+            Case "ldstr"
+                sp = sp + 1: stack(sp) = gInsText(j)
+            Case "ldnull"
+                sp = sp + 1: stack(sp) = nullKw
+            Case "ldc.i4.m1": sp = sp + 1: stack(sp) = "-1"
+            Case "ldc.i4.0": sp = sp + 1: stack(sp) = "0"
+            Case "ldc.i4.1": sp = sp + 1: stack(sp) = "1"
+            Case "ldc.i4.2": sp = sp + 1: stack(sp) = "2"
+            Case "ldc.i4.3": sp = sp + 1: stack(sp) = "3"
+            Case "ldc.i4.4": sp = sp + 1: stack(sp) = "4"
+            Case "ldc.i4.5": sp = sp + 1: stack(sp) = "5"
+            Case "ldc.i4.6": sp = sp + 1: stack(sp) = "6"
+            Case "ldc.i4.7": sp = sp + 1: stack(sp) = "7"
+            Case "ldc.i4.8": sp = sp + 1: stack(sp) = "8"
+            Case "ldc.i4.s", "ldc.i4", "ldc.i8"
+                sp = sp + 1: stack(sp) = CStr(gInsVal(j))
+            Case "ldc.r4", "ldc.r8"
+                sp = sp + 1: stack(sp) = gInsText(j)
+            Case "ldarg.0"
+                sp = sp + 1: stack(sp) = ArgName(0, hasThis, pc, pName, thisKw)
+            Case "ldarg.1"
+                sp = sp + 1: stack(sp) = ArgName(1, hasThis, pc, pName, thisKw)
+            Case "ldarg.2"
+                sp = sp + 1: stack(sp) = ArgName(2, hasThis, pc, pName, thisKw)
+            Case "ldarg.3"
+                sp = sp + 1: stack(sp) = ArgName(3, hasThis, pc, pName, thisKw)
+            Case "ldarg.s", "ldarg", "ldarga.s", "ldarga"
+                sp = sp + 1: stack(sp) = ArgName(gInsVal(j), hasThis, pc, pName, thisKw)
+            Case "ldloc.0": sp = sp + 1: stack(sp) = "V_0"
+            Case "ldloc.1": sp = sp + 1: stack(sp) = "V_1"
+            Case "ldloc.2": sp = sp + 1: stack(sp) = "V_2"
+            Case "ldloc.3": sp = sp + 1: stack(sp) = "V_3"
+            Case "ldloc.s", "ldloc", "ldloca.s", "ldloca"
+                sp = sp + 1: stack(sp) = "V_" & gInsVal(j)
+            Case "stloc.0": sb = sb & indent & "V_0 = " & PopX(stack, sp) & term & vbCrLf
+            Case "stloc.1": sb = sb & indent & "V_1 = " & PopX(stack, sp) & term & vbCrLf
+            Case "stloc.2": sb = sb & indent & "V_2 = " & PopX(stack, sp) & term & vbCrLf
+            Case "stloc.3": sb = sb & indent & "V_3 = " & PopX(stack, sp) & term & vbCrLf
+            Case "stloc.s", "stloc"
+                sb = sb & indent & "V_" & gInsVal(j) & " = " & PopX(stack, sp) & term & vbCrLf
+            Case "starg.s", "starg"
+                sb = sb & indent & ArgName(gInsVal(j), hasThis, pc, pName, thisKw) & " = " & PopX(stack, sp) & term & vbCrLf
+            Case "dup"
+                If sp > 0 Then sp = sp + 1: stack(sp) = stack(sp - 1)
+            Case "pop"
+                sb = sb & indent & PopX(stack, sp) & term & vbCrLf
+            Case "ldfld", "ldflda"
+                a1 = PopX(stack, sp)
+                sp = sp + 1: stack(sp) = a1 & "." & FieldNameOnly(gInsVal(j))
+            Case "ldsfld", "ldsflda"
+                sp = sp + 1: stack(sp) = FieldFullName(gInsVal(j), lang)
+            Case "stfld"
+                a2 = PopX(stack, sp): a1 = PopX(stack, sp)
+                sb = sb & indent & a1 & "." & FieldNameOnly(gInsVal(j)) & " = " & a2 & term & vbCrLf
+            Case "stsfld"
+                a2 = PopX(stack, sp)
+                sb = sb & indent & FieldFullName(gInsVal(j), lang) & " = " & a2 & term & vbCrLf
+            Case "call", "callvirt"
+                If Not EmitCall(gInsVal(j), stack, sp, sb, indent, term, lang) Then complex = True
+            Case "newobj"
+                Call EmitNewObj(gInsVal(j), stack, sp, newKw, lang)
+            Case "castclass"
+                a1 = PopX(stack, sp)
+                If lang = LANG_CS Then
+                    sp = sp + 1: stack(sp) = "((" & gInsText(j) & ")" & a1 & ")"
+                Else
+                    sp = sp + 1: stack(sp) = "CType(" & a1 & ", " & gInsText(j) & ")"
+                End If
+            Case "isinst"
+                a1 = PopX(stack, sp)
+                If lang = LANG_CS Then
+                    sp = sp + 1: stack(sp) = "(" & a1 & " as " & gInsText(j) & ")"
+                Else
+                    sp = sp + 1: stack(sp) = "TryCast(" & a1 & ", " & gInsText(j) & ")"
+                End If
+            Case "box", "unbox.any", "unbox", "conv.i1", "conv.i2", "conv.i4", "conv.i8", "conv.r4", "conv.r8", "conv.u1", "conv.u2", "conv.u4", "conv.u8", "conv.i", "conv.u"
+                'leave the value on the stack unchanged
+            Case "add", "add.ovf", "add.ovf.un": Call BinOp(stack, sp, " + ")
+            Case "sub", "sub.ovf", "sub.ovf.un": Call BinOp(stack, sp, " - ")
+            Case "mul", "mul.ovf", "mul.ovf.un": Call BinOp(stack, sp, " * ")
+            Case "div", "div.un": Call BinOp(stack, sp, " / ")
+            Case "rem", "rem.un": Call BinOp(stack, sp, IIf(lang = LANG_VB, " Mod ", " % "))
+            Case "and": Call BinOp(stack, sp, IIf(lang = LANG_VB, " And ", " & "))
+            Case "or": Call BinOp(stack, sp, IIf(lang = LANG_VB, " Or ", " | "))
+            Case "xor": Call BinOp(stack, sp, IIf(lang = LANG_VB, " Xor ", " ^ "))
+            Case "shl": Call BinOp(stack, sp, " << ")
+            Case "shr", "shr.un": Call BinOp(stack, sp, " >> ")
+            Case "ceq": Call BinOp(stack, sp, eqOp)
+            Case "cgt", "cgt.un": Call BinOp(stack, sp, " > ")
+            Case "clt", "clt.un": Call BinOp(stack, sp, " < ")
+            Case "neg"
+                a1 = PopX(stack, sp): sp = sp + 1: stack(sp) = "(-" & a1 & ")"
+            Case "not"
+                a1 = PopX(stack, sp): sp = sp + 1: stack(sp) = IIf(lang = LANG_VB, "(Not " & a1 & ")", "(~" & a1 & ")")
+            Case "throw"
+                a1 = PopX(stack, sp)
+                sb = sb & indent & throwKw & " " & a1 & term & vbCrLf
+            Case "ret"
+                If retIL <> "void" And sp > 0 Then
+                    sb = sb & indent & retKw & " " & PopX(stack, sp) & term & vbCrLf
+                ElseIf j < gInsCount - 1 Then
+                    sb = sb & indent & retKw & term & vbCrLf
+                End If
+            Case Else
+                'branches, switch, leave, endfinally, unknown -> real control flow
+                complex = True
+                Exit For
+        End Select
+    Next
+    If complex Then
+        sb = sb & indent & IIf(lang = LANG_CS, "// ", "' ") & "... method contains control flow; see decompiled.il for the full IL." & vbCrLf
+    End If
+    ReconstructBody = sb
+    Exit Function
+bad:
+    ReconstructBody = "        " & IIf(lang = LANG_CS, "// ", "' ") & "reconstruction failed; see decompiled.il" & vbCrLf
+End Function
+
+Private Function PopX(ByRef stack() As String, ByRef sp As Long) As String
+    If sp > 0 Then
+        PopX = stack(sp)
+        sp = sp - 1
+    Else
+        PopX = "?"
+    End If
+End Function
+
+Private Sub BinOp(ByRef stack() As String, ByRef sp As Long, oper As String)
+    Dim b As String, a As String
+    b = PopX(stack, sp)
+    a = PopX(stack, sp)
+    sp = sp + 1
+    stack(sp) = "(" & a & oper & b & ")"
+End Sub
+
+Private Function ArgName(index As Long, hasThis As Boolean, pc As Long, pName() As String, thisKw As String) As String
+    If hasThis And index = 0 Then
+        ArgName = thisKw
+        Exit Function
+    End If
+    Dim ord As Long
+    If hasThis Then ord = index Else ord = index + 1
+    If ord >= 1 And ord <= pc Then
+        ArgName = pName(ord)
+    Else
+        ArgName = "arg" & index
+    End If
+End Function
+
+Private Function FieldNameOnly(token As Long) As String
+    Dim owner As String, name As String
+    If FieldRefFromToken(token, owner, name, LANG_CS) Then
+        FieldNameOnly = name
+    Else
+        FieldNameOnly = "field"
+    End If
+End Function
+
+Private Function FieldFullName(token As Long, lang As Integer) As String
+    Dim owner As String, name As String
+    If FieldRefFromToken(token, owner, name, lang) Then
+        FieldFullName = owner & "." & name
+    Else
+        FieldFullName = "field"
+    End If
+End Function
+
+Private Function EmitCall(token As Long, ByRef stack() As String, ByRef sp As Long, ByRef sb As String, indent As String, term As String, lang As Integer) As Boolean
+    Dim name As String, owner As String
+    Dim argc As Long, hasThisC As Boolean, returnsVal As Boolean
+    If Not CallInfoFromToken(token, name, owner, argc, hasThisC, returnsVal, lang) Then
+        EmitCall = False
+        Exit Function
+    End If
+    Dim a() As String
+    ReDim a(argc + 1)
+    Dim z As Long
+    For z = argc To 1 Step -1
+        a(z) = PopX(stack, sp)
+    Next
+    Dim argstr As String
+    For z = 1 To argc
+        If z > 1 Then argstr = argstr & ", "
+        argstr = argstr & a(z)
+    Next
+    Dim target As String
+    If hasThisC Then
+        target = PopX(stack, sp)
+    Else
+        target = owner
+    End If
+
+    'Property accessors read nicer as member access.
+    If hasThisC And Left$(name, 4) = "get_" And argc = 0 Then
+        sp = sp + 1: stack(sp) = target & "." & Mid$(name, 5)
+        EmitCall = True
+        Exit Function
+    ElseIf hasThisC And Left$(name, 4) = "set_" And argc = 1 Then
+        sb = sb & indent & target & "." & Mid$(name, 5) & " = " & a(1) & term & vbCrLf
+        EmitCall = True
+        Exit Function
+    End If
+
+    Dim callee As String
+    If name = ".ctor" Then
+        'base/this constructor call - note it but keep going
+        sb = sb & indent & IIf(lang = LANG_CS, "// ", "' ") & "base constructor " & owner & "(" & argstr & ")" & vbCrLf
+        EmitCall = True
+        Exit Function
+    End If
+    If hasThisC Then
+        callee = target & "." & name
+    Else
+        callee = owner & "." & name
+    End If
+    Dim expr As String
+    expr = callee & "(" & argstr & ")"
+    If returnsVal Then
+        sp = sp + 1: stack(sp) = expr
+    Else
+        sb = sb & indent & expr & term & vbCrLf
+    End If
+    EmitCall = True
+End Function
+
+Private Sub EmitNewObj(token As Long, ByRef stack() As String, ByRef sp As Long, newKw As String, lang As Integer)
+    Dim name As String, owner As String
+    Dim argc As Long, hasThisC As Boolean, returnsVal As Boolean
+    If Not CallInfoFromToken(token, name, owner, argc, hasThisC, returnsVal, lang) Then
+        sp = sp + 1: stack(sp) = newKw & "object()"
+        Exit Sub
+    End If
+    Dim a() As String
+    ReDim a(argc + 1)
+    Dim z As Long
+    For z = argc To 1 Step -1
+        a(z) = PopX(stack, sp)
+    Next
+    Dim argstr As String
+    For z = 1 To argc
+        If z > 1 Then argstr = argstr & ", "
+        argstr = argstr & a(z)
+    Next
+    sp = sp + 1
+    stack(sp) = newKw & owner & "(" & argstr & ")"
+End Sub
+
+'==========================================================================
+'  Per-type accessors (consumed by frmMain's project tree / code viewer)
+'==========================================================================
+Public Function GetDotNetTypeCount() As Long
+    GetDotNetTypeCount = gNetTypeCount
+End Function
+
+Public Function GetDotNetTypeName(ByVal i As Long) As String
+    If i >= 0 And i < gNetTypeCount Then GetDotNetTypeName = gNetTypeName(i)
+End Function
+
+Public Function GetDotNetTypeMethods(ByVal i As Long) As String
+    If i >= 0 And i < gNetTypeCount Then GetDotNetTypeMethods = gNetTypeMethods(i)
+End Function
+
+'lang: 0 = IL, 1 = C#, 2 = VB.NET
+Public Function GetDotNetTypeCode(ByVal i As Long, ByVal lang As Integer) As String
+    If i < 0 Or i >= gNetTypeCount Then Exit Function
+    Select Case lang
+        Case LANG_IL: GetDotNetTypeCode = gNetTypeIL(i)
+        Case LANG_VB: GetDotNetTypeCode = gNetTypeVB(i)
+        Case Else: GetDotNetTypeCode = gNetTypeCS(i)
+    End Select
+End Function
+
+'One-line, C#-style method signature list for a type (vbLf separated).
+Private Function BuildMethodSigList(t As Long) As String
+    Dim mFirst As Long, mLast As Long
+    Call GetMethodRange(t, mFirst, mLast)
+    Dim s As String, mi As Long
+    For mi = mFirst To mLast
+        If mi >= 1 And mi <= iRows(6) Then
+            s = s & GetMethodDisplaySig(mi, t, LANG_CS) & vbLf
+        End If
+    Next
+    BuildMethodSigList = s
+End Function
+
+Private Function GetMethodDisplaySig(mi As Long, t As Long, lang As Integer) As String
+On Error GoTo bad
+    Dim nm As String
+    nm = GetString(MethodStruct(mi).name)
+    Dim isCtor As Boolean
+    isCtor = (nm = ".ctor" Or nm = ".cctor")
+    Dim ret As String
+    Dim p() As String
+    Dim pc As Long, hasThis As Boolean
+    Call ParseMethodSigFull(MethodStruct(mi).signature, ret, p, pc, hasThis, lang)
+    Dim pName() As String
+    ReDim pName(pc + 1)
+    Call GetParamNames(mi, pc, pName)
+    Dim head As String
+    If isCtor Then
+        head = GetString(TypeDefStruct(t).name)
+    Else
+        head = ret & " " & nm
+    End If
+    GetMethodDisplaySig = head & "(" & JoinParamsNamed(p, pName, pc, lang) & ")"
+    Exit Function
+bad:
+    GetMethodDisplaySig = GetString(MethodStruct(mi).name) & "()"
+End Function
+
+'==========================================================================
+'  Build a navigable solution scaffold on disk from the reconstructed code.
+'  Writes one .cs and one .vb per class, plus SDK-style project files and a
+'  .sln.  The reconstruction is best-effort and may not compile as-is.
+'==========================================================================
+Public Sub BuildDotNetSolution(ByVal sPath As String)
+On Error GoTo bad
+    If gNetTypeCount = 0 Then
+        MsgBox "No .NET classes are loaded. Open a .NET assembly first.", vbExclamation
+        Exit Sub
+    End If
+    Dim baseName As String
+    baseName = SanitizeName(SFile)
+    If Len(baseName) = 0 Then baseName = "Decompiled"
+
+    Dim root As String
+    root = sPath & "\" & baseName
+    Call EnsureDir(sPath)
+    Call EnsureDir(root)
+    Call EnsureDir(root & "\CSharp")
+    Call EnsureDir(root & "\VBNet")
+
+    Dim i As Long
+    For i = 0 To gNetTypeCount - 1
+        Dim fn As String
+        fn = SanitizeName(GetDotNetTypeName(i))
+        If Len(fn) = 0 Then fn = "Type" & i
+        Call WriteTextFile(root & "\CSharp\" & fn & ".cs", "using System;" & vbCrLf & vbCrLf & GetDotNetTypeCode(i, LANG_CS))
+        Call WriteTextFile(root & "\VBNet\" & fn & ".vb", "Imports System" & vbCrLf & vbCrLf & GetDotNetTypeCode(i, LANG_VB))
+    Next
+
+    Call WriteTextFile(root & "\CSharp\" & baseName & ".CS.csproj", CsProjText())
+    Call WriteTextFile(root & "\VBNet\" & baseName & ".VB.vbproj", VbProjText())
+    Call WriteTextFile(root & "\" & baseName & ".sln", SlnText(baseName))
+    Call WriteTextFile(root & "\README.txt", ReadmeText())
+
+    Dim r As VbMsgBoxResult
+    r = MsgBox("Solution scaffold written to:" & vbCrLf & root & vbCrLf & vbCrLf & _
+               "Note: the reconstruction is best-effort and may not compile as-is." & vbCrLf & _
+               "Open the folder now?", vbYesNo + vbInformation)
+    If r = vbYes Then Shell "explorer.exe " & Chr$(34) & root & Chr$(34), vbNormalFocus
+    Exit Sub
+bad:
+    MsgBox "Error_BuildDotNetSolution: " & err.Description, vbCritical
+End Sub
+
+Private Sub EnsureDir(ByVal path As String)
+    On Error Resume Next
+    MkDir path
+End Sub
+
+Private Sub WriteTextFile(ByVal path As String, ByVal content As String)
+    Dim ff As Integer
+    ff = FreeFile
+    Open path For Output As #ff
+    Print #ff, content
+    Close #ff
+End Sub
+
+Private Function SanitizeName(ByVal s As String) As String
+    Dim i As Long, c As String, r As String
+    For i = 1 To Len(s)
+        c = Mid$(s, i, 1)
+        Select Case c
+            Case "\", "/", ":", "*", "?", """", "<", ">", "|"
+                r = r & "_"
+            Case Else
+                r = r & c
+        End Select
+    Next
+    SanitizeName = r
+End Function
+
+Private Function CsProjText() As String
+    CsProjText = "<Project Sdk=""Microsoft.NET.Sdk"">" & vbCrLf & _
+        "  <PropertyGroup>" & vbCrLf & _
+        "    <OutputType>Library</OutputType>" & vbCrLf & _
+        "    <TargetFramework>net48</TargetFramework>" & vbCrLf & _
+        "    <Nullable>disable</Nullable>" & vbCrLf & _
+        "    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>" & vbCrLf & _
+        "  </PropertyGroup>" & vbCrLf & _
+        "</Project>" & vbCrLf
+End Function
+
+Private Function VbProjText() As String
+    VbProjText = "<Project Sdk=""Microsoft.NET.Sdk"">" & vbCrLf & _
+        "  <PropertyGroup>" & vbCrLf & _
+        "    <OutputType>Library</OutputType>" & vbCrLf & _
+        "    <TargetFramework>net48</TargetFramework>" & vbCrLf & _
+        "    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>" & vbCrLf & _
+        "  </PropertyGroup>" & vbCrLf & _
+        "</Project>" & vbCrLf
+End Function
+
+Private Function SlnText(ByVal baseName As String) As String
+    Dim csG As String, vbG As String, csP As String, vbP As String
+    csG = "{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}"
+    vbG = "{F184B08F-C81C-45F6-A57F-5ABD9991F28F}"
+    csP = "{11111111-1111-1111-1111-111111111111}"
+    vbP = "{22222222-2222-2222-2222-222222222222}"
+    Dim s As String
+    s = "Microsoft Visual Studio Solution File, Format Version 12.00" & vbCrLf
+    s = s & "# Visual Studio Version 17" & vbCrLf
+    s = s & "Project(" & Chr$(34) & csG & Chr$(34) & ") = " & Chr$(34) & baseName & ".CS" & Chr$(34) & ", " & Chr$(34) & "CSharp\" & baseName & ".CS.csproj" & Chr$(34) & ", " & Chr$(34) & csP & Chr$(34) & vbCrLf & "EndProject" & vbCrLf
+    s = s & "Project(" & Chr$(34) & vbG & Chr$(34) & ") = " & Chr$(34) & baseName & ".VB" & Chr$(34) & ", " & Chr$(34) & "VBNet\" & baseName & ".VB.vbproj" & Chr$(34) & ", " & Chr$(34) & vbP & Chr$(34) & vbCrLf & "EndProject" & vbCrLf
+    s = s & "Global" & vbCrLf
+    s = s & "  GlobalSection(SolutionConfigurationPlatforms) = preSolution" & vbCrLf
+    s = s & "    Debug|Any CPU = Debug|Any CPU" & vbCrLf
+    s = s & "    Release|Any CPU = Release|Any CPU" & vbCrLf
+    s = s & "  EndGlobalSection" & vbCrLf
+    s = s & "  GlobalSection(ProjectConfigurationPlatforms) = postSolution" & vbCrLf
+    s = s & ConfigLines(csP)
+    s = s & ConfigLines(vbP)
+    s = s & "  EndGlobalSection" & vbCrLf
+    s = s & "EndGlobal" & vbCrLf
+    SlnText = s
+End Function
+
+Private Function ConfigLines(ByVal g As String) As String
+    Dim s As String
+    s = "    " & g & ".Debug|Any CPU.ActiveCfg = Debug|Any CPU" & vbCrLf
+    s = s & "    " & g & ".Debug|Any CPU.Build.0 = Debug|Any CPU" & vbCrLf
+    s = s & "    " & g & ".Release|Any CPU.ActiveCfg = Release|Any CPU" & vbCrLf
+    s = s & "    " & g & ".Release|Any CPU.Build.0 = Release|Any CPU" & vbCrLf
+    ConfigLines = s
+End Function
+
+Private Function ReadmeText() As String
+    ReadmeText = "Generated by Semi VB Decompiler - VisualBasicZone.com" & vbCrLf & _
+        "This is a best-effort reconstruction of a .NET assembly." & vbCrLf & _
+        "Class structure, fields and method signatures are accurate; method" & vbCrLf & _
+        "bodies are simple stack-machine reconstructions and may need edits to" & vbCrLf & _
+        "compile.  See the per-class IL listing for the authoritative output." & vbCrLf
 End Function

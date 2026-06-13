@@ -18,6 +18,10 @@ Attribute VB_Exposed = False
 Option Explicit
 
 Private strConsoleText As String
+'Returns everything written so far (used to capture per-class decompiled text)
+Public Property Get Text() As String
+    Text = strConsoleText
+End Property
 Public Sub Clear()
     strConsoleText = ""
 End Sub

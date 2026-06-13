@@ -727,6 +727,10 @@ Begin VB.Form frmMain
          Caption         =   "Generate vbp (Disassembl&y)"
          Enabled         =   0   'False
       End
+      Begin VB.Menu mnuFileBuildSolution
+         Caption         =   "Build .NET &Solution"
+         Enabled         =   0   'False
+      End
       Begin VB.Menu mnuFileSaveExe
          Caption         =   "&Save Exe Changes"
          Enabled         =   0   'False
@@ -1363,6 +1367,36 @@ cleanup:
     gExportDisassembly = False     'always restore normal (code) export
 End Sub
 
+Private Sub mnuFileBuildSolution_Click()
+'*****************************
+'Purpose: Export the reconstructed .NET classes as a navigable solution
+'         scaffold (per-class .cs/.vb plus .sln/.csproj/.vbproj).
+'*****************************
+On Error GoTo errHandle
+    Dim sPath As String
+    Dim structFolder As BROWSEINFO
+    Dim iNull As Integer
+    Dim ret As Long
+    structFolder.hOwner = Me.hwnd
+    structFolder.lpszTitle = "Choose a folder for the .NET solution"
+    structFolder.ulFlags = BIF_NEWDIALOGSTYLE
+
+    ret = SHBrowseForFolder(structFolder)
+    If ret Then
+        sPath = String$(MAX_PATH, 0)
+        SHGetPathFromIDList ret, sPath
+        CoTaskMemFree ret
+        iNull = InStr(sPath, vbNullChar)
+        If iNull Then sPath = Left$(sPath, iNull - 1)
+    End If
+    If sPath = vbNullString Then Exit Sub
+
+    Call modVBNET.BuildDotNetSolution(sPath)
+Exit Sub
+errHandle:
+    MsgBox "Error_frmMain_mnuFileBuildSolution: " & err.Number & " " & err.Description
+End Sub
+
 Private Sub mnuFileOpen_Click()
 '*****************************
 'Purpose: Show Open Dialog and then call OpenVBExe
@@ -1413,6 +1447,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
     
     mnuFileGenerate.Enabled = False
     mnuFileGenerateDism.Enabled = False
+    mnuFileBuildSolution.Enabled = False
     mnuFileExportMemoryMap.Enabled = False
     mnuFileAntiDecompiler.Enabled = False
     mnuToolsNetConsole.Visible = False
@@ -2969,6 +3004,29 @@ On Error Resume Next
                             Call modVBNET.ShowBlobHeap(fxgEXEInfo)
                                       
                 End Select
+            Case "NETCODE"  '#####################################################'
+                If tblPath(2) <> vbNullString Then
+                    sstViewFile.TabVisible(0) = True
+                    sstViewFile.TabVisible(1) = False
+                    sstViewFile.TabVisible(2) = False
+                    sstViewFile.TabVisible(3) = False
+                    fxgEXEInfo.Visible = False
+                    Dim netIdx As Long
+                    Dim netLang As Integer
+                    netIdx = CLng(tblPath(2))
+                    netLang = 1 'default C#
+                    If tblPath(3) = "LANG" Then
+                        Select Case tblPath(4)
+                            Case "VB": netLang = 2
+                            Case "IL": netLang = 0
+                            Case Else: netLang = 1
+                        End Select
+                    End If
+                    txtCode.Text = modVBNET.GetDotNetTypeCode(netIdx, netLang)
+                    gUpdateText = True
+                    txtCode_Change
+                    gUpdateText = False
+                End If
             Case "EXEDATA"  '#####################################################'
                 sstViewFile.TabVisible(1) = True
                 sstViewFile.TabVisible(0) = False
@@ -3545,6 +3603,28 @@ On Error Resume Next
         tvProject.Nodes.Add strParent, tvwChild, "ROOT/NETSTRUCT/BLOBHEAP", "#Blob Heap", 2
         tvProject.Nodes.Add strParent, tvwChild, "ROOT/NETSTRUCT/GUIDHEAP", "#GUID Heap", 2
         tvProject.Nodes.Add strParent, tvwChild, "ROOT/NETSTRUCT/USHEAP", "User Strings Heap", 2
+
+        '####################   .Net Reconstructed Classes   ####################'
+        Call tvProject.Nodes.Add("ROOT/PROJECT/" & Filename, tvwChild, "ROOT/NETCODE/", ".Net Classes", 1)
+        Dim nt As Long, mm As Long
+        Dim methArr() As String, methText As String
+        For nt = 0 To modVBNET.GetDotNetTypeCount - 1
+            tvProject.Nodes.Add "ROOT/NETCODE/", tvwChild, "ROOT/NETCODE/" & nt & "/", modVBNET.GetDotNetTypeName(nt), 48
+            'One child per language view
+            tvProject.Nodes.Add "ROOT/NETCODE/" & nt & "/", tvwChild, "ROOT/NETCODE/" & nt & "/LANG/CS/", "C#", 2
+            tvProject.Nodes.Add "ROOT/NETCODE/" & nt & "/", tvwChild, "ROOT/NETCODE/" & nt & "/LANG/VB/", "VB.NET", 2
+            tvProject.Nodes.Add "ROOT/NETCODE/" & nt & "/", tvwChild, "ROOT/NETCODE/" & nt & "/LANG/IL/", "IL", 2
+            'One child per method (navigation)
+            methText = modVBNET.GetDotNetTypeMethods(nt)
+            If Len(methText) > 0 Then
+                methArr = Split(methText, vbLf)
+                For mm = 0 To UBound(methArr)
+                    If Len(methArr(mm)) > 0 Then
+                        tvProject.Nodes.Add "ROOT/NETCODE/" & nt & "/", tvwChild, "ROOT/NETCODE/" & nt & "/M/" & mm & "/", methArr(mm), 45
+                    End If
+                Next
+            End If
+        Next
     End If
     If gVB4App = True Or gVB5App = True Or gVB6App = True Then
         '####################   VB Structures       ####################'
