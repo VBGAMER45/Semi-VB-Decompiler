@@ -599,6 +599,9 @@ Global gDumpData As Boolean
 Global gShowOffsets As Boolean
 Global gShowColors As Boolean
 Global gPcodeDecompile As Boolean
+'When True, project generation writes each object's raw native disassembly
+'(the Dism tab) into the source files instead of the decompiled VB code.
+Global gExportDisassembly As Boolean
 
 Private Type typeControlName
     strParentForm As String

@@ -796,6 +796,14 @@ Sub WriteObjectProcedures(ByVal F As Long, ByVal ObjectName As String, ByVal inc
 '*****************************
     Dim nApi As Long
 
+    'Disassembly export mode: write the raw native disassembly (the Dism tab)
+    'instead of decompiled code.  (For P-Code projects GetNativeObjectDisassembly
+    'returns a "no native assembly" note.)
+    If gExportDisassembly = True Then
+        Print #F, modNative.GetNativeObjectDisassembly(ObjectName)
+        Exit Sub
+    End If
+
     'Native: bodies already built for the Code tab.
     If gProjectInfo.aNativeCode <> 0 Then
         Print #F, modNative.GetNativeObjectCode(ObjectName)
