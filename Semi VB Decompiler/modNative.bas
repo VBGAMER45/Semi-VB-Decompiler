@@ -39,10 +39,15 @@ Public gNativeDismCache As Collection
 '        8B EC       mov  ebp, esp
 'So we read the whole native code range (gProjectInfo.aStartOfCode ..
 'aEndOfCode) and add any prologue address we did not already discover through
-'the event tables.  Ownership is inferred from address range: procedures sort
-'by object, so a new proc belongs to the object whose first known (event-table)
-'proc is the greatest one at or below it; anything below the first such anchor
-'belongs to the leading module.
+'the event tables.
+'
+'Ownership: the form/class objects give exact code-start anchors (their lowest
+'event-proc address).  Because code is in object-table order, the modules that
+'follow an anchored object - up to the next anchored object - own the non-event
+'procedures found in that address range.  Within such a run of modules the procs
+'are split in proportion to each module's declared ProcCount (native code keeps
+'no per-module proc table, so this is the best available boundary).  See
+'AssignRegionProcs.
 '*****************************
 Public Sub ScanNativeProcsByPrologue(ByVal F As Integer)
     On Error GoTo done
@@ -54,19 +59,29 @@ Public Sub ScanNativeProcsByPrologue(ByVal F As Integer)
     codeLen = endVA - startVA
     If codeLen < 3 Or codeLen > 16000000 Then Exit Sub
 
-    'Per-object anchor = lowest event-table proc address already found.
-    Dim anchorMin() As Long
-    ReDim anchorMin(UBound(gObjectNameArray))
-    Dim p As Long, dotPos As Long, objName As String, oi As Long
+    Dim nObj As Long
+    nObj = UBound(gObjectNameArray)        'objects 0..nObj (table order = code order)
+
+    'Per object: anchor (lowest known event-proc addr - 0 if none, i.e. a module),
+    'whether it is a module, and its declared procedure count.
+    Dim objAnchor() As Long, objIsMod() As Boolean, objPC() As Long
+    ReDim objAnchor(nObj): ReDim objIsMod(nObj): ReDim objPC(nObj)
+    Dim oi As Long
+    For oi = 0 To nObj
+        objIsMod(oi) = ((gObject(oi).ObjectType And &H2) = 0)
+        objPC(oi) = gObject(oi).ProcCount
+    Next oi
+
+    Dim p As Long, dotPos As Long, objName As String
     For p = 0 To UBound(gNativeProcArray) - 1
         If gNativeProcArray(p).offset <> 0 Then
             dotPos = InStr(gNativeProcArray(p).sName, ".")
             If dotPos > 0 Then
                 objName = Left$(gNativeProcArray(p).sName, dotPos - 1)
-                For oi = 0 To UBound(gObjectNameArray)
+                For oi = 0 To nObj
                     If gObjectNameArray(oi) = objName Then
-                        If anchorMin(oi) = 0 Or gNativeProcArray(p).offset < anchorMin(oi) Then _
-                            anchorMin(oi) = gNativeProcArray(p).offset
+                        If objAnchor(oi) = 0 Or gNativeProcArray(p).offset < objAnchor(oi) Then _
+                            objAnchor(oi) = gNativeProcArray(p).offset
                         Exit For
                     End If
                 Next oi
@@ -74,7 +89,7 @@ Public Sub ScanNativeProcsByPrologue(ByVal F As Integer)
         End If
     Next p
 
-    'Set of addresses we already know (event procs + SubMain) so we never dup.
+    'Addresses we already know (event procs + SubMain) so we never duplicate.
     Dim seen As Collection
     Set seen = New Collection
     On Error Resume Next
@@ -84,46 +99,145 @@ Public Sub ScanNativeProcsByPrologue(ByVal F As Integer)
     If gVBHeader.aSubMain <> 0 Then seen.Add 1, "k" & gVBHeader.aSubMain
     On Error GoTo done
 
-    'Read the whole native code blob once (file offset = VA - ImageBase).
+    'Read the whole native code blob once and collect every new prologue address
+    '(55 8B EC = push ebp / mov ebp,esp) in ascending order.
     Dim b() As Byte
     ReDim b(codeLen - 1)
     Seek F, startVA + 1 - OptHeader.ImageBase
     Get F, , b
 
-    Dim j As Long, va As Long, owner As String
+    Dim newAddr() As Long, nNew As Long
+    ReDim newAddr(1024): nNew = 0
+    Dim j As Long, va As Long
     For j = 0 To codeLen - 3
         If b(j) = &H55 And b(j + 1) = &H8B And b(j + 2) = &HEC Then
             va = startVA + j
             If Not KeyExists(seen, "k" & va) Then
                 seen.Add 1, "k" & va
-                owner = OwnerForAddress(va, anchorMin())
-                gNativeProcArray(UBound(gNativeProcArray)).sName = owner & ".proc_" & Hex$(va)
-                gNativeProcArray(UBound(gNativeProcArray)).offset = va
-                ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
+                If nNew > UBound(newAddr) Then ReDim Preserve newAddr(nNew + 1024)
+                newAddr(nNew) = va: nNew = nNew + 1
             End If
         End If
     Next j
+    If nNew = 0 Then GoTo done
+
+    'Build segment boundaries from the anchored (form/class) objects.  Code is
+    'laid out in object-table order, so each anchored object starts a region and
+    'the module objects that follow it (before the next anchored object) own the
+    'non-event procedures found in that region.  Segment 0 covers any leading
+    'modules before the first anchored object.
+    Dim segStart() As Long, segLead() As Long, nSeg As Long
+    ReDim segStart(nObj + 2): ReDim segLead(nObj + 2)
+    segStart(0) = startVA: segLead(0) = -1: nSeg = 1
+    For oi = 0 To nObj
+        If objAnchor(oi) <> 0 Then
+            segStart(nSeg) = objAnchor(oi): segLead(nSeg) = oi: nSeg = nSeg + 1
+        End If
+    Next oi
+
+    'Sort segments by start address (object-table order should already be
+    'ascending, but guard against the odd out-of-order layout).
+    Dim a As Long, c As Long, ts As Long, tl As Long
+    For a = 0 To nSeg - 2
+        For c = a + 1 To nSeg - 1
+            If segStart(c) < segStart(a) Then
+                ts = segStart(a): segStart(a) = segStart(c): segStart(c) = ts
+                tl = segLead(a): segLead(a) = segLead(c): segLead(c) = tl
+            End If
+        Next c
+    Next a
+
+    Dim si As Long, regEnd As Long, nextLead As Long
+    For si = 0 To nSeg - 1
+        If si < nSeg - 1 Then regEnd = segStart(si + 1) Else regEnd = endVA
+        If si < nSeg - 1 Then nextLead = segLead(si + 1) Else nextLead = nObj + 1
+        Call AssignRegionProcs(newAddr(), nNew, segStart(si), regEnd, segLead(si), nextLead, objIsMod(), objPC())
+    Next si
 
 done:
 End Sub
 
-'Pick the owning object name for a scanned procedure address.
-Private Function OwnerForAddress(ByVal va As Long, ByRef anchorMin() As Long) As String
-    Dim oi As Long, bestIdx As Long, bestVal As Long
-    bestIdx = -1: bestVal = 0
-    For oi = 0 To UBound(anchorMin)
-        If anchorMin(oi) <> 0 And anchorMin(oi) <= va Then
-            If anchorMin(oi) > bestVal Then bestVal = anchorMin(oi): bestIdx = oi
+'Assign the new (non-event) procedures found in [regStart, regEnd) to the module
+'objects that fall between the leading anchored object and the next one.
+'Procedures are kept in address (code) order and split between the modules in
+'proportion to their declared ProcCount.  If the region has no modules the procs
+'are the leading form/class's own private procedures.
+Private Sub AssignRegionProcs(ByRef newAddr() As Long, ByVal nNew As Long, _
+        ByVal regStart As Long, ByVal regEnd As Long, ByVal leadIdx As Long, _
+        ByVal nextLead As Long, ByRef objIsMod() As Boolean, ByRef objPC() As Long)
+
+    Dim regProc() As Long, nReg As Long, i As Long
+    ReDim regProc(nNew): nReg = 0
+    For i = 0 To nNew - 1
+        If newAddr(i) >= regStart And newAddr(i) < regEnd Then
+            regProc(nReg) = newAddr(i): nReg = nReg + 1
+        End If
+    Next i
+    If nReg = 0 Then Exit Sub
+
+    'Module objects in (leadIdx, nextLead)
+    Dim mods() As Long, nMods As Long, oi As Long
+    ReDim mods(UBound(objIsMod) + 1)
+    nMods = 0
+    For oi = leadIdx + 1 To nextLead - 1
+        If oi >= 0 And oi <= UBound(objIsMod) Then
+            If objIsMod(oi) Then mods(nMods) = oi: nMods = nMods + 1
         End If
     Next oi
-    If bestIdx <> -1 Then OwnerForAddress = gObjectNameArray(bestIdx): Exit Function
 
-    'Below every anchor -> a leading module (object with no event table).
-    For oi = 0 To UBound(anchorMin)
-        If anchorMin(oi) = 0 Then OwnerForAddress = gObjectNameArray(oi): Exit Function
-    Next oi
-    OwnerForAddress = "Module1"
-End Function
+    'No modules -> the leading form/class owns these private procedures.
+    If nMods = 0 Then
+        If leadIdx >= 0 Then
+            For i = 0 To nReg - 1
+                AddNativeProc gObjectNameArray(leadIdx), regProc(i)
+            Next i
+        End If
+        Exit Sub
+    End If
+
+    'Shares proportional to ProcCount (even split if all counts are zero).
+    Dim share() As Long, totPC As Long, m As Long, used As Long
+    ReDim share(nMods - 1)
+    totPC = 0
+    For m = 0 To nMods - 1: totPC = totPC + objPC(mods(m)): Next m
+    used = 0
+    For m = 0 To nMods - 1
+        If totPC > 0 Then
+            share(m) = (CLng(nReg) * objPC(mods(m))) \ totPC
+        Else
+            share(m) = nReg \ nMods
+        End If
+        used = used + share(m)
+    Next m
+    'Hand out any rounding leftover round-robin so nothing is dropped.
+    Dim rr As Long, leftover As Long
+    leftover = nReg - used: rr = 0
+    Do While leftover > 0
+        share(rr Mod nMods) = share(rr Mod nMods) + 1
+        rr = rr + 1: leftover = leftover - 1
+    Loop
+
+    'Assign in address order, module by module.
+    Dim pIdx As Long, cnt As Long
+    pIdx = 0
+    For m = 0 To nMods - 1
+        For cnt = 1 To share(m)
+            If pIdx >= nReg Then Exit For
+            AddNativeProc gObjectNameArray(mods(m)), regProc(pIdx)
+            pIdx = pIdx + 1
+        Next cnt
+    Next m
+    Do While pIdx < nReg
+        AddNativeProc gObjectNameArray(mods(nMods - 1)), regProc(pIdx)
+        pIdx = pIdx + 1
+    Loop
+End Sub
+
+Private Sub AddNativeProc(ByVal owner As String, ByVal va As Long)
+    gNativeProcArray(UBound(gNativeProcArray)).sName = owner & ".proc_" & Hex$(va)
+    gNativeProcArray(UBound(gNativeProcArray)).offset = va
+    ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
+End Sub
 
 Private Function KeyExists(ByRef col As Collection, ByVal key As String) As Boolean
     Dim v As Variant
