@@ -25,6 +25,111 @@ Global NativeShowHexInformation As Boolean
 'load so the main tree can show it inline.  Keyed "OBJ_<UPPER object name>".
 Public gNativeCodeCache As Collection
 
+'*****************************
+'ScanNativeProcsByPrologue
+'Find procedures that have no event-link table entry - most importantly the
+'Sub/Function procedures in .bas modules, but also any private class procedure.
+'
+'VB6 lays out every object's native code contiguously, in object-table order,
+'and every procedure starts with the standard prologue:
+'        55          push ebp
+'        8B EC       mov  ebp, esp
+'So we read the whole native code range (gProjectInfo.aStartOfCode ..
+'aEndOfCode) and add any prologue address we did not already discover through
+'the event tables.  Ownership is inferred from address range: procedures sort
+'by object, so a new proc belongs to the object whose first known (event-table)
+'proc is the greatest one at or below it; anything below the first such anchor
+'belongs to the leading module.
+'*****************************
+Public Sub ScanNativeProcsByPrologue(ByVal F As Integer)
+    On Error GoTo done
+
+    Dim startVA As Long, endVA As Long, codeLen As Long
+    startVA = gProjectInfo.aStartOfCode
+    endVA = gProjectInfo.aEndOfCode
+    If startVA = 0 Or endVA <= startVA Then Exit Sub
+    codeLen = endVA - startVA
+    If codeLen < 3 Or codeLen > 16000000 Then Exit Sub
+
+    'Per-object anchor = lowest event-table proc address already found.
+    Dim anchorMin() As Long
+    ReDim anchorMin(UBound(gObjectNameArray))
+    Dim p As Long, dotPos As Long, objName As String, oi As Long
+    For p = 0 To UBound(gNativeProcArray) - 1
+        If gNativeProcArray(p).offset <> 0 Then
+            dotPos = InStr(gNativeProcArray(p).sName, ".")
+            If dotPos > 0 Then
+                objName = Left$(gNativeProcArray(p).sName, dotPos - 1)
+                For oi = 0 To UBound(gObjectNameArray)
+                    If gObjectNameArray(oi) = objName Then
+                        If anchorMin(oi) = 0 Or gNativeProcArray(p).offset < anchorMin(oi) Then _
+                            anchorMin(oi) = gNativeProcArray(p).offset
+                        Exit For
+                    End If
+                Next oi
+            End If
+        End If
+    Next p
+
+    'Set of addresses we already know (event procs + SubMain) so we never dup.
+    Dim seen As Collection
+    Set seen = New Collection
+    On Error Resume Next
+    For p = 0 To UBound(gNativeProcArray) - 1
+        If gNativeProcArray(p).offset <> 0 Then seen.Add 1, "k" & gNativeProcArray(p).offset
+    Next p
+    If gVBHeader.aSubMain <> 0 Then seen.Add 1, "k" & gVBHeader.aSubMain
+    On Error GoTo done
+
+    'Read the whole native code blob once (file offset = VA - ImageBase).
+    Dim b() As Byte
+    ReDim b(codeLen - 1)
+    Seek F, startVA + 1 - OptHeader.ImageBase
+    Get F, , b
+
+    Dim j As Long, va As Long, owner As String
+    For j = 0 To codeLen - 3
+        If b(j) = &H55 And b(j + 1) = &H8B And b(j + 2) = &HEC Then
+            va = startVA + j
+            If Not KeyExists(seen, "k" & va) Then
+                seen.Add 1, "k" & va
+                owner = OwnerForAddress(va, anchorMin())
+                gNativeProcArray(UBound(gNativeProcArray)).sName = owner & ".proc_" & Hex$(va)
+                gNativeProcArray(UBound(gNativeProcArray)).offset = va
+                ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
+            End If
+        End If
+    Next j
+
+done:
+End Sub
+
+'Pick the owning object name for a scanned procedure address.
+Private Function OwnerForAddress(ByVal va As Long, ByRef anchorMin() As Long) As String
+    Dim oi As Long, bestIdx As Long, bestVal As Long
+    bestIdx = -1: bestVal = 0
+    For oi = 0 To UBound(anchorMin)
+        If anchorMin(oi) <> 0 And anchorMin(oi) <= va Then
+            If anchorMin(oi) > bestVal Then bestVal = anchorMin(oi): bestIdx = oi
+        End If
+    Next oi
+    If bestIdx <> -1 Then OwnerForAddress = gObjectNameArray(bestIdx): Exit Function
+
+    'Below every anchor -> a leading module (object with no event table).
+    For oi = 0 To UBound(anchorMin)
+        If anchorMin(oi) = 0 Then OwnerForAddress = gObjectNameArray(oi): Exit Function
+    Next oi
+    OwnerForAddress = "Module1"
+End Function
+
+Private Function KeyExists(ByRef col As Collection, ByVal key As String) As Boolean
+    Dim v As Variant
+    On Error Resume Next
+    v = col(key)
+    KeyExists = (Err.Number = 0)
+    Err.Clear
+End Function
+
 Public Sub Decode(ByVal Filename As String)
 '*****************************
 'Purpose: To Get the procdures of a Native Exe and produce a report

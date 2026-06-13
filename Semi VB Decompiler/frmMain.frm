@@ -1931,6 +1931,13 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
         End If
         Next loopC
 
+        'Event tables only cover objects that expose events (forms/classes).
+        '.bas module procedures (and private class procs) have no event entry,
+        'so scan the native code for procedure prologues and add the rest.
+        If gProjectInfo.aNativeCode <> 0 Then
+            Call modNative.ScanNativeProcsByPrologue(F)
+        End If
+
         'Main Loop to Get all Form's Properties
         FrameStatus.Visible = True
         txtStatus.Text = vbNullString
