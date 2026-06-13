@@ -245,6 +245,69 @@ Public Function GetNativeObjectCode(ByVal objName As String) As String
     GetNativeObjectCode = code
 End Function
 
+'*****************************
+'GetNativeObjectDisassembly
+'Return the raw native disassembly of every procedure that belongs to objName
+'(form / module / class), one block per procedure.  Used by the "Dism" tab on
+'frmMain so a whole object can be viewed at the assembly level without opening
+'the per-procedure Native Decompile window.
+'*****************************
+Public Function GetNativeObjectDisassembly(ByVal objName As String) As String
+    On Error GoTo done
+    If gProjectInfo.aNativeCode = 0 Then
+        GetNativeObjectDisassembly = "; This project is compiled to P-Code - no native assembly available."
+        Exit Function
+    End If
+
+    Dim ub As Long
+    ub = -1
+    ub = UBound(gNativeProcArray)
+    If ub < 1 Then Exit Function
+
+    Dim dsm As CDisassembler
+    Set dsm = New CDisassembler
+
+    Dim fp As Integer
+    fp = FreeFile
+    Open SFilePath For Binary Access Read As #fp
+
+    Dim p As Long, dotPos As Long, owner As String, va As Long, cnt As Long
+    Dim b() As Byte, col As Collection, inst As CInstruction, sb As String
+    Dim target As String
+    target = UCase$(objName)
+
+    For p = 0 To ub - 1
+        If gNativeProcArray(p).offset <> 0 Then
+            dotPos = InStr(gNativeProcArray(p).sName, ".")
+            If dotPos > 0 Then owner = UCase$(Left$(gNativeProcArray(p).sName, dotPos - 1)) Else owner = ""
+            If owner = target Then
+                va = gNativeProcArray(p).offset
+                ReDim b(5000)
+                Get #fp, va + 1 - OptHeader.ImageBase, b
+                sb = sb & "; ---------------------------------------------" & vbCrLf
+                sb = sb & "; " & gNativeProcArray(p).sName & "  (" & Hex$(va) & "h)" & vbCrLf
+                sb = sb & "; ---------------------------------------------" & vbCrLf
+                Set col = dsm.DisasmBlock(b(), va)
+                For Each inst In col
+                    sb = sb & inst.offset & "  " & inst.dump & "  " & inst.command & vbCrLf
+                    If inst.command = "RETN" Then Exit For
+                Next
+                sb = sb & vbCrLf
+                cnt = cnt + 1
+            End If
+        End If
+    Next p
+    Close #fp
+
+    If cnt = 0 Then sb = "; No native procedures found for " & objName
+    GetNativeObjectDisassembly = sb
+    Exit Function
+done:
+    On Error Resume Next
+    Close #fp
+    GetNativeObjectDisassembly = sb & vbCrLf & "; (disassembly stopped: " & err.Description & ")"
+End Function
+
 Sub VBFunction_Description_Init(ByVal fRes As String)
 '*****************************
 'Purpose: To load the Msvbvm60.dll api list from a file

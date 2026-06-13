@@ -2534,6 +2534,18 @@ Private Sub picPreview_MouseDown(Button As Integer, Shift As Integer, x As Singl
         PopupMenu mnuPopUp
     End If
 End Sub
+
+'Fill the "Dism" tab with the raw native disassembly of every procedure in the
+'clicked object (form / module / class).  Native projects only.
+Private Sub ShowObjectDisassembly(ByVal objName As String)
+    If gProjectInfo.aNativeCode = 0 Then
+        sstViewFile.TabVisible(4) = False
+        Exit Sub
+    End If
+    sstViewFile.TabVisible(4) = True
+    txtDism.Text = modNative.GetNativeObjectDisassembly(objName)
+End Sub
+
 Private Sub tvProject_NodeClick(ByVal Node As MSComctlLib.Node)
 '*****************************
 'Purpose: To show the contents of each struture and textbox data
@@ -2549,6 +2561,10 @@ On Error Resume Next
     If CurrentItem <> tvProject.SelectedItem.key Then
         tblPath = Split(tvProject.SelectedItem.key, "/")
         CurrentItem = tvProject.SelectedItem.key
+
+        'Hide the native disassembly ("Dism") tab by default; the form / module /
+        'class cases below turn it back on and fill it for the clicked object.
+        sstViewFile.TabVisible(4) = False
 
         Select Case tblPath(1)
             Case "VERSIONINFO"
@@ -3327,6 +3343,7 @@ On Error Resume Next
                             Next
                         End If
                    
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
@@ -3353,11 +3370,12 @@ On Error Resume Next
                          Next
                         
                    
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
                 End If
-                
+
                 Case "MODS"
                 If tblPath(2) <> vbNullString Then
                     sstViewFile.TabVisible(0) = True
@@ -3376,6 +3394,7 @@ On Error Resume Next
                     End If
                     strBuffer = strBuffer & modNative.GetNativeObjectCode(tblPath(2))
                     txtCode.Text = strBuffer
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
@@ -3399,11 +3418,12 @@ On Error Resume Next
                     
                     strBuffer = strBuffer & modNative.GetNativeObjectCode(tblPath(2))
                     txtCode.Text = strBuffer
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
                 End If
-                
+
                 Case "USERDOC"
                 If tblPath(2) <> vbNullString Then
                     sstViewFile.TabVisible(0) = True
@@ -3424,11 +3444,12 @@ On Error Resume Next
                     Next
                         
                    
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
                 End If
-                
+
                 Case "IMAGES"
                 'Image Preview
                 If tblPath(2) <> vbNullString Then
