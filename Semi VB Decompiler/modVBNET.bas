@@ -351,7 +351,7 @@ Dim Notprototype As Boolean
 Dim Writenamespace As Boolean
 Dim lasttypedisplayed As Long
 
-Private MyDotNet As SemiVBHelper
+'Private MyDotNet As SemiVBHelper
 'Used to check if .Net is installed
 Private Declare Function LoadLibrary Lib "kernel32" Alias "LoadLibraryA" (ByVal lpLibFileName As String) As Long
 Private Sub InitDotNet()
@@ -1578,13 +1578,13 @@ Public Function tablepresent(tableindex As Byte) As Boolean
     Dim tablebit As Long
     'tablebit = HiLo.DWordShiftR(Valid, tableindex) And 1
     tablebit = MyDotNet.isTablePresent(MetaDataByteArray, tableindex)
-    Dim j As Integer
+    Dim J As Integer
     'For j = 0 To tableindex
-    Do While j < tableindex
+    Do While J < tableindex
         Dim o As Integer
-        o = Sizes(j) * iRows(j)
+        o = Sizes(J) * iRows(J)
         TableOffset = TableOffset + o
-        j = j + 1
+        J = J + 1
     Loop
     'Next
     If tablebit = 1 Then

@@ -249,7 +249,11 @@ On Error GoTo errHandle
         If optPCode.value = True Then
             txtView.Text = modPCode.DecompileProc(lstProcedures.Text)
         Else
-            txtView.Text = modPCode.DecompileProcToVB(lstProcedures.Text)
+            Dim strVB As String
+            modPCode.VBResetControlCollection
+            strVB = modPCode.DecompileProcToVB(lstProcedures.Text)
+            modPCode.VBApplyControlNames strVB   'resolve control tokens for this single procedure
+            txtView.Text = strVB
         End If
     End If
 Exit Sub

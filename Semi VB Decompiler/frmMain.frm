@@ -1,10 +1,9 @@
 VERSION 5.00
 Object = "{F9043C88-F6F2-101A-A3C9-08002B2F49FB}#1.2#0"; "COMDLG32.OCX"
-Object = "{3B7C8863-D78F-101B-B9B5-04021C009402}#1.2#0"; "RICHTX32.OCX"
+Object = "{3B7C8863-D78F-101B-B9B5-04021C009402}#1.2#0"; "richtx32.ocx"
 Object = "{831FDD16-0C5C-11D2-A9FC-0000F8754DA1}#2.0#0"; "MSCOMCTL.OCX"
-Object = "{BDC217C8-ED16-11CD-956C-0000C04E4C0A}#1.1#0"; "Tabctl32.ocx"
-Object = "{5E9E78A0-531B-11CF-91F6-C2863C385E30}#1.0#0"; "Msflxgrd.ocx"
-Object = "{FCEA04FA-85AF-4857-AF33-3842A581C8BC}#1.0#0"; "pePropertySheet.ocx"
+Object = "{BDC217C8-ED16-11CD-956C-0000C04E4C0A}#1.1#0"; "TABCTL32.OCX"
+Object = "{5E9E78A0-531B-11CF-91F6-C2863C385E30}#1.0#0"; "MSFLXGRD.OCX"
 Begin VB.Form frmMain 
    Caption         =   "Semi VB Decompiler - VisualBasicZone.com"
    ClientHeight    =   6375
@@ -114,6 +113,7 @@ Begin VB.Form frmMain
       _ExtentX        =   3625
       _ExtentY        =   2990
       _Version        =   393217
+      Enabled         =   -1  'True
       TextRTF         =   $"frmMain.frx":5E5E
    End
    Begin VB.Frame FrameStatus 
@@ -165,6 +165,7 @@ Begin VB.Form frmMain
       _ExtentX        =   2566
       _ExtentY        =   1508
       _Version        =   393217
+      Enabled         =   -1  'True
       ReadOnly        =   -1  'True
       ScrollBars      =   3
       AutoVerbMenu    =   -1  'True
@@ -189,7 +190,6 @@ Begin VB.Form frmMain
       _ExtentX        =   2143
       _ExtentY        =   3413
       _Version        =   393217
-      Enabled         =   -1  'True
       TextRTF         =   $"frmMain.frx":5F62
    End
    Begin RichTextLib.RichTextBox buffCodeAv 
@@ -202,7 +202,6 @@ Begin VB.Form frmMain
       _ExtentX        =   2990
       _ExtentY        =   2778
       _Version        =   393217
-      Enabled         =   -1  'True
       TextRTF         =   $"frmMain.frx":5FED
    End
    Begin RichTextLib.RichTextBox txtFunctions 
@@ -215,6 +214,7 @@ Begin VB.Form frmMain
       _ExtentX        =   5741
       _ExtentY        =   1085
       _Version        =   393217
+      Enabled         =   -1  'True
       ScrollBars      =   3
       TextRTF         =   $"frmMain.frx":6078
    End
@@ -523,35 +523,25 @@ Begin VB.Form frmMain
       TabCaption(3)   =   "Edit Object"
       TabPicture(3)   =   "frmMain.frx":16B08
       Tab(3).ControlEnabled=   0   'False
-      Tab(3).Control(0)=   "pePropTree"
-      Tab(3).Control(1)=   "cmdColor(0)"
-      Tab(3).Control(2)=   "txtEditArray(0)"
-      Tab(3).Control(3)=   "lblHelpText"
-      Tab(3).Control(4)=   "lblObjectName"
-      Tab(3).Control(5)=   "lblArrayEdit(0)"
+      Tab(3).Control(0)=   "lblArrayEdit(0)"
+      Tab(3).Control(1)=   "lblObjectName"
+      Tab(3).Control(2)=   "lblHelpText"
+      Tab(3).Control(3)=   "txtEditArray(0)"
+      Tab(3).Control(4)=   "cmdColor(0)"
+      Tab(3).Control(5)=   "pePropTree"
       Tab(3).ControlCount=   6
-      Begin pePropertyEditor.pePropertyTree pePropTree 
+      Begin VB.PictureBox pePropTree 
+         Appearance      =   0  'Flat
+         BackColor       =   &H80000004&
+         BorderStyle     =   0  'None
          Height          =   4215
          Left            =   -74760
+         ScaleHeight     =   4215
+         ScaleWidth      =   4095
          TabIndex        =   24
          Top             =   600
          Visible         =   0   'False
          Width           =   4095
-         _ExtentX        =   7223
-         _ExtentY        =   7435
-         BackColor       =   -2147483644
-         BeginProperty Font {0BE35203-8F91-11CE-9DE3-00AA004BB851} 
-            Name            =   "MS Sans Serif"
-            Size            =   8.25
-            Charset         =   0
-            Weight          =   400
-            Underline       =   0   'False
-            Italic          =   0   'False
-            Strikethrough   =   0   'False
-         EndProperty
-         LockWindowUpdate=   0   'False
-         BorderStyle     =   0
-         Appearance      =   0
       End
       Begin VB.CommandButton cmdColor 
          Caption         =   "..."
@@ -593,6 +583,7 @@ Begin VB.Form frmMain
          _ExtentX        =   7223
          _ExtentY        =   9763
          _Version        =   393217
+         Enabled         =   -1  'True
          ReadOnly        =   -1  'True
          ScrollBars      =   3
          AutoVerbMenu    =   -1  'True
@@ -633,6 +624,7 @@ Begin VB.Form frmMain
          _ExtentY        =   1191
          _Version        =   393217
          BackColor       =   12632256
+         Enabled         =   -1  'True
          ReadOnly        =   -1  'True
          ScrollBars      =   2
          Appearance      =   0
@@ -897,16 +889,16 @@ End Sub
 
 Private Sub cmdColor_Click(index As Integer)
     If cmdColor(index).tag = "c" Then
-     CD1.Color = txtEditArray(index).Text
-     CD1.ShowColor
-     txtEditArray(index).Text = CD1.Color
+     Cd1.Color = txtEditArray(index).Text
+     Cd1.ShowColor
+     txtEditArray(index).Text = Cd1.Color
     End If
     If cmdColor(index).tag = "f" Then
     'FontName
     On Error Resume Next
-     CD1.FontName = txtEditArray(index).Text
-     CD1.ShowFont
-     txtEditArray(index).Text = CD1.FontName
+     Cd1.FontName = txtEditArray(index).Text
+     Cd1.ShowFont
+     txtEditArray(index).Text = Cd1.FontName
     End If
     If cmdColor(index).tag = "p" Then
     'Picture property
@@ -1141,16 +1133,16 @@ Private Sub mnuFileAntiDecompiler_Click()
 'Purpose: Show save dialog and encypt the current exe
 '*****************************
 On Error GoTo errHandle
-    CD1.Filename = vbNullString
-    CD1.DialogTitle = "Save File As"
-    CD1.Filter = "Exe Files(*.exe)|*.exe"
+    Cd1.Filename = vbNullString
+    Cd1.DialogTitle = "Save File As"
+    Cd1.Filter = "Exe Files(*.exe)|*.exe"
     
-    CD1.ShowSave
+    Cd1.ShowSave
     
-    If CD1.Filename = vbNullString Then Exit Sub
+    If Cd1.Filename = vbNullString Then Exit Sub
     
     Call modAntiDecompiler.LoadCrypter
-    Call modAntiDecompiler.EncryptExe(SFilePath, CD1.Filename)
+    Call modAntiDecompiler.EncryptExe(SFilePath, Cd1.Filename)
 Exit Sub
 errHandle:
     MsgBox "Error_frmMain_mnuFileAntiDecompiler: " & err.Number & " " & err.Description
@@ -1346,16 +1338,16 @@ Private Sub mnuFileOpen_Click()
 'Purpose: Show Open Dialog and then call OpenVBExe
 '*****************************
 ' On Error GoTo errHandle:
-    CD1.Filename = vbNullString
-    CD1.DialogTitle = "Select VB 4/5/6 file"
-    CD1.Filter = "VB Files(*.exe,*.ocx,*.dll)|*.exe;*.ocx;*.dll|All Files(*.*)|*.*;"
-    CD1.flags = cdlOFNFileMustExist Or cdlOFNHideReadOnly Or cdlOFNPathMustExist
-    CD1.ShowOpen
+    Cd1.Filename = vbNullString
+    Cd1.DialogTitle = "Select VB 4/5/6 file"
+    Cd1.Filter = "VB Files(*.exe,*.ocx,*.dll)|*.exe;*.ocx;*.dll|All Files(*.*)|*.*;"
+    Cd1.flags = cdlOFNFileMustExist Or cdlOFNHideReadOnly Or cdlOFNPathMustExist
+    Cd1.ShowOpen
     
-    If CD1.Filename = vbNullString Then Exit Sub
+    If Cd1.Filename = vbNullString Then Exit Sub
     
-    If FileExists(CD1.Filename) = True Then
-        Call OpenVBExe(CD1.Filename, CD1.FileTitle)
+    If FileExists(Cd1.Filename) = True Then
+        Call OpenVBExe(Cd1.Filename, Cd1.FileTitle)
     Else
         MsgBox "File Does not exist", vbExclamation
     End If
@@ -1882,6 +1874,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                  gControlNameArray(UBound(gControlNameArray)).strControlName = ControlName
                  gControlNameArray(UBound(gControlNameArray)).strParentForm = gObjectNameArray(loopC)
                  gControlNameArray(UBound(gControlNameArray)).strGuid = strGuid
+                 gControlNameArray(UBound(gControlNameArray)).lControlIndex = gControl(i).index
                 End If
             Next
             End If
@@ -2128,12 +2121,12 @@ Private Sub mnuFileSaveExe_Click()
 'Purpose: Save Changes to the Form's Gui
 'And generates a Patch Report
 '#####################################
-    CD1.DialogTitle = "Save As"
-    CD1.Filename = vbNullString
-    CD1.Filter = "VB Files(*.exe,*.ocx,*.dll)|*.exe;*.ocx;*.dll"
-    CD1.ShowSave
+    Cd1.DialogTitle = "Save As"
+    Cd1.Filename = vbNullString
+    Cd1.Filter = "VB Files(*.exe,*.ocx,*.dll)|*.exe;*.ocx;*.dll"
+    Cd1.ShowSave
     
-    If CD1.Filename = vbNullString Then Exit Sub
+    If Cd1.Filename = vbNullString Then Exit Sub
     On Error Resume Next
     'Copy the exe to the temp directory
     Close
@@ -2235,7 +2228,7 @@ Private Sub mnuFileSaveExe_Click()
     Close fFile
     
     'Save the file
-    FileCopy App.Path & "\dump\" & SFile & "\" & SFile, CD1.Filename
+    FileCopy App.Path & "\dump\" & SFile & "\" & SFile, Cd1.Filename
     'Kill the temp file
     Kill App.Path & "\dump\" & SFile & "\" & SFile
     
@@ -2369,13 +2362,13 @@ Private Sub mnuPopUpSaveImage_Click()
 'Purpose: Save an image from the preview picture box
 '*****************************
 On Error GoTo errHandle
-    CD1.Filename = vbNullString
-    CD1.DialogTitle = "Save Image"
-    CD1.Filter = "Image Files(*.*)|*.*;"
-    CD1.ShowSave
-    If CD1.Filename = vbNullString Then Exit Sub
+    Cd1.Filename = vbNullString
+    Cd1.DialogTitle = "Save Image"
+    Cd1.Filter = "Image Files(*.*)|*.*;"
+    Cd1.ShowSave
+    If Cd1.Filename = vbNullString Then Exit Sub
     
-    Call SavePicture(picPreview.Image, CD1.Filename)
+    Call SavePicture(picPreview.Image, Cd1.Filename)
 Exit Sub
 errHandle:
     MsgBox "Error_frmMain_mnuPopupSaveImage: " & err.Number & " " & err.Description
@@ -3252,16 +3245,8 @@ On Error Resume Next
                             End If
                             
                             If VBVersion <> 4 Then
-                                For nApi = 0 To UBound(gProcedureList)
-                                    If UCase$(tblPath(2)) = UCase$(gProcedureList(nApi).strParent) And gProcedureList(nApi).strProcedureName <> "" Then
-                                        If Right$(gProcedureList(nApi).strProcedureName, 1) = ")" Then
-                                            strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & vbCrLf
-                                        Else
-                                            strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & "()" & vbCrLf
-                                        End If
-                                        strBuffer = strBuffer & "End Sub" & vbCrLf
-                                    End If
-                                Next
+                                'Decompiled bodies (native) or signature stubs (P-Code)
+                                strBuffer = strBuffer & modNative.GetNativeObjectCode(tblPath(2))
                             End If
                             txtCode.Text = strBuffer
                             Exit For
@@ -3313,16 +3298,7 @@ On Error Resume Next
                             strBuffer = txtFinal(i).Text
                             strBuffer = strBuffer & "Option Explicit" & vbCrLf
                             strBuffer = strBuffer & "'Generated by Semi VB Decompiler - VisualBasicZone.com" & vbCrLf
-                            For nApi = 0 To UBound(gProcedureList)
-                                If UCase$(tblPath(2)) = UCase$(gProcedureList(nApi).strParent) And gProcedureList(nApi).strProcedureName <> "" Then
-                                    If Right$(gProcedureList(nApi).strProcedureName, 1) = ")" Then
-                                        strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & vbCrLf
-                                    Else
-                                        strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & "()" & vbCrLf
-                                    End If
-                                    strBuffer = strBuffer & "End Sub" & vbCrLf
-                                End If
-                            Next
+                            strBuffer = strBuffer & modNative.GetNativeObjectCode(tblPath(2))
                             txtCode.Text = strBuffer
                             Exit For
                             
@@ -3352,14 +3328,7 @@ On Error Resume Next
                     Else
                         strBuffer = strBuffer & "'This application is compiled to Native refer to Native Procedure Decompile under the Tools Menu" & vbCrLf
                     End If
-                    For nApi = 0 To UBound(gProcedureList)
-                        If UCase$(tblPath(2)) = UCase$(gProcedureList(nApi).strParent) Then
-                            If gProcedureList(nApi).strProcedureName <> "" Then
-                                strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & "()" & vbCrLf
-                                strBuffer = strBuffer & "End Sub" & vbCrLf
-                            End If
-                        End If
-                    Next
+                    strBuffer = strBuffer & modNative.GetNativeObjectCode(tblPath(2))
                     txtCode.Text = strBuffer
                     gUpdateText = True
                     txtCode_Change
@@ -3382,14 +3351,7 @@ On Error Resume Next
                         strBuffer = strBuffer & "'This application is compiled to Native refer to Native Procedure Decompile under the Tools Menu" & vbCrLf
                     End If
                     
-                    For nApi = 0 To UBound(gProcedureList)
-                        If UCase$(tblPath(2)) = UCase$(gProcedureList(nApi).strParent) Then
-                            If gProcedureList(nApi).strProcedureName <> "" Then
-                                strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & "()" & vbCrLf
-                                strBuffer = strBuffer & "End Sub" & vbCrLf
-                            End If
-                        End If
-                    Next
+                    strBuffer = strBuffer & modNative.GetNativeObjectCode(tblPath(2))
                     txtCode.Text = strBuffer
                     gUpdateText = True
                     txtCode_Change

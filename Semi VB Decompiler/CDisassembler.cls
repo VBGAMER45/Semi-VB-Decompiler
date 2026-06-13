@@ -48,6 +48,15 @@ Private Declare Function disasm Lib "olly.dll" Alias "Disasm" ( _
         ByRef src As Byte, ByVal srcsize As Long, ByVal ip As Long, _
         disasm As t_Disasm, dMode As disasmMode) As Long
 
+Private Declare Function LoadLibraryA Lib "kernel32" (ByVal lpLibFileName As String) As Long
+
+Private Sub Class_Initialize()
+    'Make sure olly.dll is found regardless of the current working directory
+    '(in the IDE the CWD is VB6's folder, not the project/app folder).
+    On Error Resume Next
+    If LoadLibraryA(App.Path & "\olly.dll") = 0 Then LoadLibraryA "olly.dll"
+End Sub
+
 
 Function DisasmBytes(b() As Byte, va As Long) As CInstruction
     Dim da As t_Disasm
@@ -92,9 +101,59 @@ Function DisasmBytes(b() As Byte, va As Long) As CInstruction
     x = InStr(dump, Chr(0)) - 1
     ret.dump = Mid$(dump, 1, x)
     'If x < 30 Then dump = dump & Space(30 - x)
-    
+
+    'Capture the analysis data olly.dll already computed (previously discarded).
+    'This is what the native->VB engine works from: instruction class, branch
+    'and call targets, address displacements, immediates and relocation info.
+    ret.va = va
+    ret.cmdType = da.cmdtype
+    ret.jmpConst = da.jmpconst
+    ret.jmpTable = da.jmptable
+    ret.adrConst = da.adrconst
+    ret.immConst = da.immconst
+    ret.fixupOffset = da.fixupoffset
+    ret.fixupSize = da.fixupsize
+    ret.memType = da.memtype
+
     Set DisasmBytes = ret
-    
+
+End Function
+
+'Olly command-type classes (C_xxx) are declared Public in modNativeToVB so they
+'are visible here and to the native->VB engine.
+
+Public Function ClassOf(inst As CInstruction) As Long
+    ClassOf = inst.cmdType And C_TYPEMASK
+End Function
+
+Public Function DisasmProc(b() As Byte, ByVal va As Long, ByVal maxLen As Long) As Collection
+'*****************************
+'Disassemble a procedure linearly from its entry, stopping after the final
+'RET of the body (tracks the furthest forward branch target so the function's
+'tail is not cut off at the first RET, the way DisasmBlock was).
+'*****************************
+    Dim tmp() As Byte, pointer As Long, d As CInstruction
+    Dim ret As New Collection, cls As Long, farTarget As Long, started As Boolean
+    On Error GoTo hell
+    pointer = LBound(b)
+    farTarget = va
+    started = True
+    Do While pointer < UBound(b) + 1 And pointer < maxLen
+        ReDim tmp(UBound(b) - pointer + 1)
+        CopyMemory tmp(0), b(pointer), UBound(tmp)
+        Set d = DisasmBytes(tmp, va)
+        If d.instLen <= 0 Then Exit Do
+        ret.Add d
+        cls = d.cmdType And C_TYPEMASK
+        'Track the furthest forward branch target inside the proc
+        If (cls = C_JMP Or cls = C_JMC) And d.jmpConst > farTarget Then farTarget = d.jmpConst
+        va = va + d.instLen
+        pointer = pointer + d.instLen
+        'Stop once we hit a RET that is at or past every forward branch target
+        If cls = C_RET And va > farTarget Then Exit Do
+    Loop
+hell:
+    Set DisasmProc = ret
 End Function
 
 Function DisasmBlock(b() As Byte, ByVal va As Long) As Collection
@@ -117,11 +176,14 @@ Function DisasmBlock(b() As Byte, ByVal va As Long) As Collection
         CopyMemory tmp(0), b(pointer), UBound(tmp)
         
         Set d = DisasmBytes(tmp, va)
+        'Guard against an undecodable byte (instLen <= 0) which would otherwise
+        'spin this loop forever and hang the UI.
+        If d.instLen <= 0 Then GoTo hell
         ret.Add d
-        
+
         va = va + d.instLen
         pointer = pointer + d.instLen
-        
+
     Wend
     
 hell:
@@ -130,47 +192,46 @@ hell:
  
 End Function
 Public Function GetNativeApi(t As Long)
-    Dim u As String
-            Dim getImportRva As Long
-            Dim a1 As Long
-            Dim J As Integer, F As Long
-            F = FreeFile
-            Open SFilePath For Binary Access Read As F
-                Get F, t + 3 - OptHeader.ImageBase, a1
-                Get #F, a1 + 1 - OptHeader.ImageBase, getImportRva
-    
+    'Resolve the runtime/imported API targeted by an indirect call/mov whose
+    'opcode is "FF15"/"8B1D" style (operand = absolute IAT address at t+2).
+    'Reads the IAT pointer with bounds checks, then defers to GetApiByIatVa.
+    Dim a1 As Long, pos As Long, F As Long
+    On Error Resume Next
+    F = FreeFile
+    Open SFilePath For Binary Access Read As F
+    pos = t + 3 - OptHeader.ImageBase           '1-based -> file byte at t+2
+    If pos >= 1 And pos <= LOF(F) - 3 Then Get F, pos, a1
+    Close F
+    GetNativeApi = GetApiByIatVa(a1)
+End Function
 
-            Close F
-            Dim TDs As String, ouR As String
-            For J = 1 To UBound(exeIMPORT_APINAME)
-                If exeIMPORT_APINAME(J).Address = getImportRva Then
-          
-                    If Left$(exeIMPORT_APINAME(J).ApiName, 8) = "!ordinal" Then
-                        'via ordinal
-                        TDs = VBFunction_Description(Val(Mid$(exeIMPORT_APINAME(J).ApiName, 12)), vbNullString, ouR)
-                        If TDs = "undef" Then
-                            'tvProject.Nodes.Add exeIMPORT_APINAME(j).ApiName, 4, , "Name : " & ouR, 18
-                        Else
-                            'tvProject.Nodes.Add exeIMPORT_APINAME(j).ApiName, 4, , "Name: " & ouR, 18
-                          u = TDs
-                            'tvProject.Nodes.Add exeIMPORT_APINAME(j).ApiName, 4, , TDs, 19
-                        End If
-                        u = TDs
-                    Else
-                        'via directname
-                        'TDs = VBFunction_Description(0, exeIMPORT_APINAME(J).ApiName, ouR)
-                        'If TDs = "undef" Then
-                        'Else
-                        '    u = TDs
-                        'End If
-                        'u = TDs
-                        u = exeIMPORT_APINAME(J).ApiName
-                    End If
-                     GetNativeApi = u
-                    'MsgBox TDs
-                    Exit Function
-                End If
-            Next
+Public Function GetApiByIatVa(ByVal iatVa As Long) As String
+    'Given the virtual address of an IAT slot, return the name of the runtime
+    'helper / imported API it points at.  Fully bounds-checked so a bad or zero
+    'address simply yields "" instead of a 'Bad record number' error.
+    Dim getImportRva As Long, J As Long, F As Long, pos As Long
+    Dim u As String, TDs As String, ouR As String
+    On Error Resume Next
+    If iatVa < OptHeader.ImageBase Then Exit Function
+    F = FreeFile
+    Open SFilePath For Binary Access Read As F
+    pos = iatVa + 1 - OptHeader.ImageBase
+    If pos < 1 Or pos > LOF(F) - 3 Then Close F: Exit Function
+    Get #F, pos, getImportRva
+    Close F
+    If getImportRva = 0 Then Exit Function
+
+    For J = 1 To UBound(exeIMPORT_APINAME)
+        If exeIMPORT_APINAME(J).Address = getImportRva Then
+            If Left$(exeIMPORT_APINAME(J).ApiName, 8) = "!ordinal" Then
+                u = VBFunction_Description(Val(Mid$(exeIMPORT_APINAME(J).ApiName, 12)), vbNullString, ouR)
+            Else
+                u = exeIMPORT_APINAME(J).ApiName
+            End If
+            GetApiByIatVa = u
+            Exit Function
+        End If
+    Next
 End Function
 
  

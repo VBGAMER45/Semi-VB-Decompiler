@@ -605,6 +605,7 @@ Private Type typeControlName
     strControlName As String
     strGuid As String
     bControlImage As Byte
+    lControlIndex As Long   'tControl.index - used to map P-Code VCallAd offsets to controls
 End Type
 Global gControlNameArray() As typeControlName
 

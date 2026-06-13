@@ -93,7 +93,6 @@ Begin VB.Form frmNativeDecompile
    End
    Begin VB.OptionButton optNativeToVB 
       Caption         =   "Native Asm To VB"
-      Enabled         =   0   'False
       Height          =   255
       Left            =   3000
       TabIndex        =   0
@@ -217,8 +216,14 @@ On Error GoTo errHandle
     If lstProcedures.ListIndex = -1 Then Exit Sub
 
     Dim fp As Integer, g As Long
-     
+
     txtView.Text = ""
+
+    'Native Asm -> VB reconstruction path
+    If optNativeToVB.Value = True Then
+        txtView.Text = modNativeToVB.DecompileNativeProcToVB(CLng(lstProcedures.List(lstProcedures.ListIndex)))
+        Exit Sub
+    End If
 
     If lstProcedures.List(lstProcedures.ListIndex) = gVBHeader.aSubMain Then
         txtView.Text = txtView.Text & "Disassembly of SubMain()" & vbCrLf
@@ -303,7 +308,11 @@ MsgBox "Error_frmNativeDecompile_lstProcedures_Click: " & err.Number & " " & err
 End Sub
 
 Private Sub optNativeToVB_Click()
-    MsgBox "Cheater :)"
+    lstProcedures_Click
+End Sub
+
+Private Sub optPCode_Click()
+    lstProcedures_Click
 End Sub
 
 Private Sub txtAddress_Change()
