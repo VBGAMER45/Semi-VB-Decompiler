@@ -382,6 +382,41 @@ Private gNetTypeCS() As String
 Private gNetTypeVB() As String
 Private gNetTypeIL() As String
 Private gNetTypeMethods() As String
+'Per-instruction switch target lists (csv of absolute IL offsets)
+Private gSwitchTargets() As String
+'Exception-handling clauses for the current method body
+Private gEHCount As Long
+Private gEHFlags() As Long
+Private gEHTryOff() As Long
+Private gEHTryLen() As Long
+Private gEHHandOff() As Long
+Private gEHHandLen() As Long
+Private gEHToken() As Long
+'Structured statement list for control-flow reconstruction
+Private Const LT_STMT As Integer = 0
+Private Const LT_CBR As Integer = 1
+Private Const LT_BR As Integer = 2
+Private Const LT_RET As Integer = 3
+Private Const LT_THROW As Integer = 4
+Private Const LT_SWITCH As Integer = 5
+Private Const LT_LABEL As Integer = 6
+Private Const LT_RAW As Integer = 7
+Private Const LT_OPEN As Integer = 8
+Private Const LT_MID As Integer = 9
+Private Const LT_CLOSE As Integer = 10
+Private gLCount As Long
+Private gLType() As Integer
+Private gLText() As String
+Private gLAlt() As String
+Private gLTarget() As Long
+Private gLSwitch() As String
+Private gLOffset() As Long
+Private gLDead() As Boolean
+'Render context for the current language
+Private gLang As Integer
+Private gTerm As String, gThisKw As String, gNullKw As String
+Private gNewKw As String, gRetKw As String, gThrowKw As String, gEqOp As String
+Private gCurOff As Long
 
 'SemiVBDecompilerHelper.dll (.NET) is no longer required - its BitConverter /
 'bit-shift helpers are implemented in pure VB6 further down this module.
@@ -3287,12 +3322,12 @@ On Error GoTo skip
         'C# body
         csOut.WriteLine csSig
         csOut.WriteLine "    {"
-        csOut.WriteA ReconstructBody(mi, hasThis, pc, pName, retIL, LANG_CS)
+        csOut.WriteA ReconstructBody(mi, hasThis, pc, pName, retIL, localTok, LANG_CS)
         csOut.WriteLine "    }"
         csOut.WriteLine ""
         'VB body
         vbOut.WriteLine vbSig
-        vbOut.WriteA ReconstructBody(mi, hasThis, pc, pName, retIL, LANG_VB)
+        vbOut.WriteA ReconstructBody(mi, hasThis, pc, pName, retIL, localTok, LANG_VB)
         vbOut.WriteLine "    End " & IIf(vbIsSub, "Sub", "Function")
         vbOut.WriteLine ""
     Else
@@ -3598,8 +3633,11 @@ Private Function ReadMethodBodyBytes(f As Integer, rva As Long, ByRef ilBytes() 
     On Error GoTo bad
     localSigTok = 0
     codeSize = 0
+    gEHCount = 0
     If rva = 0 Then Exit Function
     Dim foff As Long
+    Dim moreSects As Boolean
+    moreSects = False
     foff = GetPtrFromRVA2(rva)
     Seek #f, foff + 1
     Dim b0 As Byte
@@ -3608,7 +3646,8 @@ Private Function ReadMethodBodyBytes(f As Integer, rva As Long, ByRef ilBytes() 
         'Tiny format: code size is in the top 6 bits, IL follows immediately.
         codeSize = b0 \ 4
     ElseIf (b0 And 3) = 3 Then
-        'Fat format: 12-byte header.
+        'Fat format: 12-byte header.  Bit 3 of the flags = more sections (EH).
+        moreSects = (b0 And &H8) <> 0
         Dim b1 As Byte
         Get #f, , b1
         Dim maxStack As Integer
@@ -3627,6 +3666,7 @@ Private Function ReadMethodBodyBytes(f As Integer, rva As Long, ByRef ilBytes() 
     End If
     ReDim ilBytes(codeSize - 1)
     Get #f, , ilBytes
+    If moreSects Then Call ReadEHClauses(f, foff, codeSize)
     ReadMethodBodyBytes = True
     Exit Function
 bad:
@@ -3640,6 +3680,7 @@ Private Sub DecodeInstructions(il() As Byte, codeSize As Long)
     ReDim gInsName(255)
     ReDim gInsText(255)
     ReDim gInsVal(255)
+    ReDim gSwitchTargets(255)
     Dim p As Long
     p = 0
     Do While p < codeSize
@@ -3648,8 +3689,11 @@ Private Sub DecodeInstructions(il() As Byte, codeSize As Long)
             ReDim Preserve gInsName(gInsCount + 256)
             ReDim Preserve gInsText(gInsCount + 256)
             ReDim Preserve gInsVal(gInsCount + 256)
+            ReDim Preserve gSwitchTargets(gInsCount + 256)
         End If
         Dim startP As Long
+        Dim curSwitch As String
+        curSwitch = ""
         startP = p
         Dim full As Integer
         Dim b As Integer
@@ -3692,17 +3736,23 @@ Private Sub DecodeInstructions(il() As Byte, codeSize As Long)
             Case OK_STR
                 val = BitConverterToInt32(il, p): p = p + 4: txt = GetUserStringByToken(val)
             Case OK_SWITCH
-                Dim n As Long, s As Long
+                Dim n As Long, s As Long, afterSw As Long, tgt As Long
                 n = BitConverterToInt32(il, p): p = p + 4
-                For s = 1 To n
+                afterSw = p + n * 4
+                For s = 0 To n - 1
+                    tgt = afterSw + BitConverterToInt32(il, p)
                     p = p + 4
+                    If s > 0 Then curSwitch = curSwitch & ","
+                    curSwitch = curSwitch & tgt
                 Next
+                val = n
                 txt = "(" & n & " targets)"
         End Select
         gInsPos(gInsCount) = startP
         gInsName(gInsCount) = nm
         gInsText(gInsCount) = txt
         gInsVal(gInsCount) = val
+        gSwitchTargets(gInsCount) = curSwitch
         gInsCount = gInsCount + 1
     Loop
 End Sub
@@ -4126,34 +4176,65 @@ End Function
 'A tiny string-valued stack machine.  It models the common load/store/call
 'patterns; the first time it meets real control flow (a branch/switch) or an
 'opcode it does not model, it stops and leaves a note pointing at the IL.
-Private Function ReconstructBody(mi As Long, hasThis As Boolean, pc As Long, pName() As String, retIL As String, lang As Integer) As String
+Private Function ReconstructBody(mi As Long, hasThis As Boolean, pc As Long, pName() As String, retIL As String, ByVal localTok As Long, lang As Integer) As String
     On Error GoTo bad
-    Dim sb As String
+    gLang = lang
+    If lang = LANG_CS Then
+        gTerm = ";": gThisKw = "this": gNullKw = "null": gNewKw = "new ": gRetKw = "return": gThrowKw = "throw": gEqOp = " == "
+    Else
+        gTerm = "": gThisKw = "Me": gNullKw = "Nothing": gNewKw = "New ": gRetKw = "Return": gThrowKw = "Throw": gEqOp = " = "
+    End If
+
+    'Collect every branch / switch / leave target offset so we know which
+    'instructions need a label.
+    Dim targets() As Long, tCount As Long
+    ReDim targets(gInsCount + 8)
+    tCount = 0
+    Dim j As Long
+    For j = 0 To gInsCount - 1
+        Select Case gInsName(j)
+            Case "br", "br.s", "brtrue", "brtrue.s", "brfalse", "brfalse.s", _
+                 "beq", "beq.s", "bne.un", "bne.un.s", "bge", "bge.s", "bge.un", "bge.un.s", _
+                 "bgt", "bgt.s", "bgt.un", "bgt.un.s", "ble", "ble.s", "ble.un", "ble.un.s", _
+                 "blt", "blt.s", "blt.un", "blt.un.s", "leave", "leave.s"
+                targets(tCount) = gInsVal(j): tCount = tCount + 1
+            Case "switch"
+                If Len(gSwitchTargets(j)) > 0 Then
+                    Dim sw() As String, q As Long
+                    sw = Split(gSwitchTargets(j), ",")
+                    For q = 0 To UBound(sw)
+                        If tCount > UBound(targets) - 2 Then ReDim Preserve targets(tCount + 16)
+                        targets(tCount) = CLng(sw(q)): tCount = tCount + 1
+                    Next
+                End If
+        End Select
+        If tCount > UBound(targets) - 2 Then ReDim Preserve targets(tCount + 16)
+    Next
+
+    'Reset the structured statement list.
+    gLCount = 0
+    ReDim gLType(64): ReDim gLText(64): ReDim gLAlt(64)
+    ReDim gLTarget(64): ReDim gLSwitch(64): ReDim gLOffset(64): ReDim gLDead(64)
+
     Dim stack() As String
     ReDim stack(512)
     Dim sp As Long
     sp = 0
-    Dim term As String, thisKw As String, nullKw As String, newKw As String, retKw As String, throwKw As String, eqOp As String
-    If lang = LANG_CS Then
-        term = ";": thisKw = "this": nullKw = "null": newKw = "new ": retKw = "return": throwKw = "throw": eqOp = " == "
-    Else
-        term = "": thisKw = "Me": nullKw = "Nothing": newKw = "New ": retKw = "Return": throwKw = "Throw": eqOp = " = "
-    End If
-    Dim indent As String
-    indent = "        "
-    Dim complex As Boolean
-    Dim j As Long
+
     For j = 0 To gInsCount - 1
+        If OffsetInTargets(targets, tCount, gInsPos(j)) Then
+            sp = 0
+            Call LAppend(LT_LABEL, "IL_" & Hex4(gInsPos(j)), "", 0, "", gInsPos(j))
+        End If
+        gCurOff = gInsPos(j)
         Dim op As String
         op = gInsName(j)
-        Dim a1 As String, a2 As String, e As String
+        Dim a1 As String, a2 As String
         Select Case op
             Case "nop", "break", "volatile.", "readonly.", "tail.", "constrained.", "unaligned."
-                'ignore prefixes / nops
-            Case "ldstr"
-                sp = sp + 1: stack(sp) = gInsText(j)
-            Case "ldnull"
-                sp = sp + 1: stack(sp) = nullKw
+                'prefixes / nops
+            Case "ldstr": sp = sp + 1: stack(sp) = gInsText(j)
+            Case "ldnull": sp = sp + 1: stack(sp) = gNullKw
             Case "ldc.i4.m1": sp = sp + 1: stack(sp) = "-1"
             Case "ldc.i4.0": sp = sp + 1: stack(sp) = "0"
             Case "ldc.i4.1": sp = sp + 1: stack(sp) = "1"
@@ -4164,53 +4245,41 @@ Private Function ReconstructBody(mi As Long, hasThis As Boolean, pc As Long, pNa
             Case "ldc.i4.6": sp = sp + 1: stack(sp) = "6"
             Case "ldc.i4.7": sp = sp + 1: stack(sp) = "7"
             Case "ldc.i4.8": sp = sp + 1: stack(sp) = "8"
-            Case "ldc.i4.s", "ldc.i4", "ldc.i8"
-                sp = sp + 1: stack(sp) = CStr(gInsVal(j))
-            Case "ldc.r4", "ldc.r8"
-                sp = sp + 1: stack(sp) = gInsText(j)
-            Case "ldarg.0"
-                sp = sp + 1: stack(sp) = ArgName(0, hasThis, pc, pName, thisKw)
-            Case "ldarg.1"
-                sp = sp + 1: stack(sp) = ArgName(1, hasThis, pc, pName, thisKw)
-            Case "ldarg.2"
-                sp = sp + 1: stack(sp) = ArgName(2, hasThis, pc, pName, thisKw)
-            Case "ldarg.3"
-                sp = sp + 1: stack(sp) = ArgName(3, hasThis, pc, pName, thisKw)
+            Case "ldc.i4.s", "ldc.i4", "ldc.i8": sp = sp + 1: stack(sp) = CStr(gInsVal(j))
+            Case "ldc.r4", "ldc.r8": sp = sp + 1: stack(sp) = gInsText(j)
+            Case "ldarg.0": sp = sp + 1: stack(sp) = ArgName(0, hasThis, pc, pName, gThisKw)
+            Case "ldarg.1": sp = sp + 1: stack(sp) = ArgName(1, hasThis, pc, pName, gThisKw)
+            Case "ldarg.2": sp = sp + 1: stack(sp) = ArgName(2, hasThis, pc, pName, gThisKw)
+            Case "ldarg.3": sp = sp + 1: stack(sp) = ArgName(3, hasThis, pc, pName, gThisKw)
             Case "ldarg.s", "ldarg", "ldarga.s", "ldarga"
-                sp = sp + 1: stack(sp) = ArgName(gInsVal(j), hasThis, pc, pName, thisKw)
+                sp = sp + 1: stack(sp) = ArgName(gInsVal(j), hasThis, pc, pName, gThisKw)
             Case "ldloc.0": sp = sp + 1: stack(sp) = "V_0"
             Case "ldloc.1": sp = sp + 1: stack(sp) = "V_1"
             Case "ldloc.2": sp = sp + 1: stack(sp) = "V_2"
             Case "ldloc.3": sp = sp + 1: stack(sp) = "V_3"
             Case "ldloc.s", "ldloc", "ldloca.s", "ldloca"
                 sp = sp + 1: stack(sp) = "V_" & gInsVal(j)
-            Case "stloc.0": sb = sb & indent & "V_0 = " & PopX(stack, sp) & term & vbCrLf
-            Case "stloc.1": sb = sb & indent & "V_1 = " & PopX(stack, sp) & term & vbCrLf
-            Case "stloc.2": sb = sb & indent & "V_2 = " & PopX(stack, sp) & term & vbCrLf
-            Case "stloc.3": sb = sb & indent & "V_3 = " & PopX(stack, sp) & term & vbCrLf
-            Case "stloc.s", "stloc"
-                sb = sb & indent & "V_" & gInsVal(j) & " = " & PopX(stack, sp) & term & vbCrLf
+            Case "stloc.0": Call AppendStmt("V_0 = " & PopX(stack, sp))
+            Case "stloc.1": Call AppendStmt("V_1 = " & PopX(stack, sp))
+            Case "stloc.2": Call AppendStmt("V_2 = " & PopX(stack, sp))
+            Case "stloc.3": Call AppendStmt("V_3 = " & PopX(stack, sp))
+            Case "stloc.s", "stloc": Call AppendStmt("V_" & gInsVal(j) & " = " & PopX(stack, sp))
             Case "starg.s", "starg"
-                sb = sb & indent & ArgName(gInsVal(j), hasThis, pc, pName, thisKw) & " = " & PopX(stack, sp) & term & vbCrLf
-            Case "dup"
-                If sp > 0 Then sp = sp + 1: stack(sp) = stack(sp - 1)
-            Case "pop"
-                sb = sb & indent & PopX(stack, sp) & term & vbCrLf
+                Call AppendStmt(ArgName(gInsVal(j), hasThis, pc, pName, gThisKw) & " = " & PopX(stack, sp))
+            Case "dup": If sp > 0 Then sp = sp + 1: stack(sp) = stack(sp - 1)
+            Case "pop": Call AppendStmt(PopX(stack, sp))
             Case "ldfld", "ldflda"
                 a1 = PopX(stack, sp)
                 sp = sp + 1: stack(sp) = a1 & "." & FieldNameOnly(gInsVal(j))
-            Case "ldsfld", "ldsflda"
-                sp = sp + 1: stack(sp) = FieldFullName(gInsVal(j), lang)
+            Case "ldsfld", "ldsflda": sp = sp + 1: stack(sp) = FieldFullName(gInsVal(j), lang)
             Case "stfld"
                 a2 = PopX(stack, sp): a1 = PopX(stack, sp)
-                sb = sb & indent & a1 & "." & FieldNameOnly(gInsVal(j)) & " = " & a2 & term & vbCrLf
+                Call AppendStmt(a1 & "." & FieldNameOnly(gInsVal(j)) & " = " & a2)
             Case "stsfld"
                 a2 = PopX(stack, sp)
-                sb = sb & indent & FieldFullName(gInsVal(j), lang) & " = " & a2 & term & vbCrLf
-            Case "call", "callvirt"
-                If Not EmitCall(gInsVal(j), stack, sp, sb, indent, term, lang) Then complex = True
-            Case "newobj"
-                Call EmitNewObj(gInsVal(j), stack, sp, newKw, lang)
+                Call AppendStmt(FieldFullName(gInsVal(j), lang) & " = " & a2)
+            Case "call", "callvirt": Call EmitCall(gInsVal(j), stack, sp, lang)
+            Case "newobj": Call EmitNewObj(gInsVal(j), stack, sp, gNewKw, lang)
             Case "castclass"
                 a1 = PopX(stack, sp)
                 If lang = LANG_CS Then
@@ -4225,8 +4294,8 @@ Private Function ReconstructBody(mi As Long, hasThis As Boolean, pc As Long, pNa
                 Else
                     sp = sp + 1: stack(sp) = "TryCast(" & a1 & ", " & gInsText(j) & ")"
                 End If
-            Case "box", "unbox.any", "unbox", "conv.i1", "conv.i2", "conv.i4", "conv.i8", "conv.r4", "conv.r8", "conv.u1", "conv.u2", "conv.u4", "conv.u8", "conv.i", "conv.u"
-                'leave the value on the stack unchanged
+            Case "box", "unbox.any", "unbox", "conv.i1", "conv.i2", "conv.i4", "conv.i8", "conv.r4", "conv.r8", "conv.u1", "conv.u2", "conv.u4", "conv.u8", "conv.i", "conv.u", "conv.r.un", "ckfinite"
+                'value left on the stack unchanged
             Case "add", "add.ovf", "add.ovf.un": Call BinOp(stack, sp, " + ")
             Case "sub", "sub.ovf", "sub.ovf.un": Call BinOp(stack, sp, " - ")
             Case "mul", "mul.ovf", "mul.ovf.un": Call BinOp(stack, sp, " * ")
@@ -4237,32 +4306,72 @@ Private Function ReconstructBody(mi As Long, hasThis As Boolean, pc As Long, pNa
             Case "xor": Call BinOp(stack, sp, IIf(lang = LANG_VB, " Xor ", " ^ "))
             Case "shl": Call BinOp(stack, sp, " << ")
             Case "shr", "shr.un": Call BinOp(stack, sp, " >> ")
-            Case "ceq": Call BinOp(stack, sp, eqOp)
+            Case "ceq": Call BinOp(stack, sp, gEqOp)
             Case "cgt", "cgt.un": Call BinOp(stack, sp, " > ")
             Case "clt", "clt.un": Call BinOp(stack, sp, " < ")
-            Case "neg"
-                a1 = PopX(stack, sp): sp = sp + 1: stack(sp) = "(-" & a1 & ")"
-            Case "not"
-                a1 = PopX(stack, sp): sp = sp + 1: stack(sp) = IIf(lang = LANG_VB, "(Not " & a1 & ")", "(~" & a1 & ")")
-            Case "throw"
+            Case "neg": a1 = PopX(stack, sp): sp = sp + 1: stack(sp) = "(-" & a1 & ")"
+            Case "not": a1 = PopX(stack, sp): sp = sp + 1: stack(sp) = IIf(lang = LANG_VB, "(Not " & a1 & ")", "(~" & a1 & ")")
+            Case "ldlen": a1 = PopX(stack, sp): sp = sp + 1: stack(sp) = a1 & IIf(lang = LANG_VB, ".Length", ".Length")
+            Case "newarr"
                 a1 = PopX(stack, sp)
-                sb = sb & indent & throwKw & " " & a1 & term & vbCrLf
+                If lang = LANG_CS Then
+                    sp = sp + 1: stack(sp) = "new " & gInsText(j) & "[" & a1 & "]"
+                Else
+                    sp = sp + 1: stack(sp) = "New " & gInsText(j) & "(" & a1 & " - 1) {}"
+                End If
+            Case "ldelem.i1", "ldelem.u1", "ldelem.i2", "ldelem.u2", "ldelem.i4", "ldelem.u4", "ldelem.i8", "ldelem.i", "ldelem.r4", "ldelem.r8", "ldelem.ref", "ldelem", "ldelema"
+                a2 = PopX(stack, sp): a1 = PopX(stack, sp)
+                sp = sp + 1: stack(sp) = a1 & IIf(lang = LANG_VB, "(" & a2 & ")", "[" & a2 & "]")
+            Case "stelem.i", "stelem.i1", "stelem.i2", "stelem.i4", "stelem.i8", "stelem.r4", "stelem.r8", "stelem.ref", "stelem"
+                Dim ev As String, ei As String, ea As String
+                ev = PopX(stack, sp): ei = PopX(stack, sp): ea = PopX(stack, sp)
+                Call AppendStmt(ea & IIf(lang = LANG_VB, "(" & ei & ")", "[" & ei & "]") & " = " & ev)
+            Case "ldind.i1", "ldind.u1", "ldind.i2", "ldind.u2", "ldind.i4", "ldind.u4", "ldind.i8", "ldind.i", "ldind.r4", "ldind.r8", "ldind.ref"
+                'dereference - approximate by leaving the address expression
+            Case "stind.i1", "stind.i2", "stind.i4", "stind.i8", "stind.r4", "stind.r8", "stind.i", "stind.ref"
+                a2 = PopX(stack, sp): a1 = PopX(stack, sp): Call AppendStmt(a1 & " = " & a2)
+            Case "ldtoken": sp = sp + 1: stack(sp) = IIf(lang = LANG_VB, "GetType(" & gInsText(j) & ")", "typeof(" & gInsText(j) & ")")
+            Case "ldftn", "ldvirtftn": sp = sp + 1: stack(sp) = gInsText(j)
+            Case "br", "br.s", "leave", "leave.s"
+                Call LAppend(LT_BR, "", "", gInsVal(j), "", gCurOff): sp = 0
+            Case "brtrue", "brtrue.s"
+                a1 = PopX(stack, sp)
+                Call LAppend(LT_CBR, a1, NegateCond(a1), gInsVal(j), "", gCurOff): sp = 0
+            Case "brfalse", "brfalse.s"
+                a1 = PopX(stack, sp)
+                Call LAppend(LT_CBR, NegateCond(a1), a1, gInsVal(j), "", gCurOff): sp = 0
+            Case "beq", "beq.s": Call EmitCBR(stack, sp, "==", "!=", "=", "<>", gInsVal(j))
+            Case "bne.un", "bne.un.s": Call EmitCBR(stack, sp, "!=", "==", "<>", "=", gInsVal(j))
+            Case "bge", "bge.s", "bge.un", "bge.un.s": Call EmitCBR(stack, sp, ">=", "<", ">=", "<", gInsVal(j))
+            Case "bgt", "bgt.s", "bgt.un", "bgt.un.s": Call EmitCBR(stack, sp, ">", "<=", ">", "<=", gInsVal(j))
+            Case "ble", "ble.s", "ble.un", "ble.un.s": Call EmitCBR(stack, sp, "<=", ">", "<=", ">", gInsVal(j))
+            Case "blt", "blt.s", "blt.un", "blt.un.s": Call EmitCBR(stack, sp, "<", ">=", "<", ">=", gInsVal(j))
+            Case "switch"
+                a1 = PopX(stack, sp)
+                Call LAppend(LT_SWITCH, a1, "", 0, gSwitchTargets(j), gCurOff): sp = 0
             Case "ret"
                 If retIL <> "void" And sp > 0 Then
-                    sb = sb & indent & retKw & " " & PopX(stack, sp) & term & vbCrLf
-                ElseIf j < gInsCount - 1 Then
-                    sb = sb & indent & retKw & term & vbCrLf
+                    Call LAppend(LT_RET, PopX(stack, sp), "", 0, "", gCurOff)
+                Else
+                    Call LAppend(LT_RET, "", "", 0, "", gCurOff)
                 End If
+                sp = 0
+            Case "throw"
+                a1 = PopX(stack, sp): Call LAppend(LT_THROW, a1, "", 0, "", gCurOff): sp = 0
+            Case "rethrow"
+                Call LAppend(LT_RAW, IIf(lang = LANG_CS, "throw;", "Throw"), "", 0, "", gCurOff)
+            Case "endfinally", "endfilter"
+                'implicit in the finally / filter block
             Case Else
-                'branches, switch, leave, endfinally, unknown -> real control flow
-                complex = True
-                Exit For
+                Call LAppend(LT_RAW, IIf(lang = LANG_CS, "// il: ", "' il: ") & op, "", 0, "", gCurOff)
         End Select
     Next
-    If complex Then
-        sb = sb & indent & IIf(lang = LANG_CS, "// ", "' ") & "... method contains control flow; see decompiled.il for the full IL." & vbCrLf
-    End If
-    ReconstructBody = sb
+
+    'Wrap try/catch/finally regions, then fold structured control flow.
+    Call WrapExceptionHandlers
+    Call StructureFlow
+
+    ReconstructBody = GetLocalDecls(localTok, lang) & RenderList()
     Exit Function
 bad:
     ReconstructBody = "        " & IIf(lang = LANG_CS, "// ", "' ") & "reconstruction failed; see decompiled.il" & vbCrLf
@@ -4317,12 +4426,12 @@ Private Function FieldFullName(token As Long, lang As Integer) As String
     End If
 End Function
 
-Private Function EmitCall(token As Long, ByRef stack() As String, ByRef sp As Long, ByRef sb As String, indent As String, term As String, lang As Integer) As Boolean
+Private Sub EmitCall(token As Long, ByRef stack() As String, ByRef sp As Long, lang As Integer)
     Dim name As String, owner As String
     Dim argc As Long, hasThisC As Boolean, returnsVal As Boolean
     If Not CallInfoFromToken(token, name, owner, argc, hasThisC, returnsVal, lang) Then
-        EmitCall = False
-        Exit Function
+        Call AppendStmt(IIf(lang = LANG_CS, "/* call */", "' call"))
+        Exit Sub
     End If
     Dim a() As String
     ReDim a(argc + 1)
@@ -4345,21 +4454,18 @@ Private Function EmitCall(token As Long, ByRef stack() As String, ByRef sp As Lo
     'Property accessors read nicer as member access.
     If hasThisC And Left$(name, 4) = "get_" And argc = 0 Then
         sp = sp + 1: stack(sp) = target & "." & Mid$(name, 5)
-        EmitCall = True
-        Exit Function
+        Exit Sub
     ElseIf hasThisC And Left$(name, 4) = "set_" And argc = 1 Then
-        sb = sb & indent & target & "." & Mid$(name, 5) & " = " & a(1) & term & vbCrLf
-        EmitCall = True
-        Exit Function
+        Call AppendStmt(target & "." & Mid$(name, 5) & " = " & a(1))
+        Exit Sub
     End If
 
-    Dim callee As String
     If name = ".ctor" Then
         'base/this constructor call - note it but keep going
-        sb = sb & indent & IIf(lang = LANG_CS, "// ", "' ") & "base constructor " & owner & "(" & argstr & ")" & vbCrLf
-        EmitCall = True
-        Exit Function
+        Call AppendStmt(IIf(lang = LANG_CS, "// base ctor ", "' base ctor ") & owner & "(" & argstr & ")")
+        Exit Sub
     End If
+    Dim callee As String
     If hasThisC Then
         callee = target & "." & name
     Else
@@ -4370,10 +4476,9 @@ Private Function EmitCall(token As Long, ByRef stack() As String, ByRef sp As Lo
     If returnsVal Then
         sp = sp + 1: stack(sp) = expr
     Else
-        sb = sb & indent & expr & term & vbCrLf
+        Call AppendStmt(expr)
     End If
-    EmitCall = True
-End Function
+End Sub
 
 Private Sub EmitNewObj(token As Long, ByRef stack() As String, ByRef sp As Long, newKw As String, lang As Integer)
     Dim name As String, owner As String
@@ -4593,4 +4698,569 @@ Private Function ReadmeText() As String
         "Class structure, fields and method signatures are accurate; method" & vbCrLf & _
         "bodies are simple stack-machine reconstructions and may need edits to" & vbCrLf & _
         "compile.  See the per-class IL listing for the authoritative output." & vbCrLf
+End Function
+
+'==========================================================================
+'  Control-flow reconstruction support
+'==========================================================================
+Private Sub LAppend(ty As Integer, txt As String, alt As String, tgt As Long, sw As String, off As Long)
+    If gLCount > UBound(gLType) Then
+        ReDim Preserve gLType(gLCount + 64)
+        ReDim Preserve gLText(gLCount + 64)
+        ReDim Preserve gLAlt(gLCount + 64)
+        ReDim Preserve gLTarget(gLCount + 64)
+        ReDim Preserve gLSwitch(gLCount + 64)
+        ReDim Preserve gLOffset(gLCount + 64)
+        ReDim Preserve gLDead(gLCount + 64)
+    End If
+    gLType(gLCount) = ty
+    gLText(gLCount) = txt
+    gLAlt(gLCount) = alt
+    gLTarget(gLCount) = tgt
+    gLSwitch(gLCount) = sw
+    gLOffset(gLCount) = off
+    gLDead(gLCount) = False
+    gLCount = gLCount + 1
+End Sub
+
+Private Sub AppendStmt(txt As String)
+    Call LAppend(LT_STMT, txt & gTerm, "", 0, "", gCurOff)
+End Sub
+
+Private Function OffsetInTargets(targets() As Long, count As Long, off As Long) As Boolean
+    Dim i As Long
+    For i = 0 To count - 1
+        If targets(i) = off Then OffsetInTargets = True: Exit Function
+    Next
+End Function
+
+Private Function NegateCond(c As String) As String
+    If gLang = LANG_VB Then
+        NegateCond = "Not (" & c & ")"
+    Else
+        NegateCond = "!(" & c & ")"
+    End If
+End Function
+
+Private Sub EmitCBR(ByRef stack() As String, ByRef sp As Long, csT As String, csN As String, vbT As String, vbN As String, tgt As Long)
+    Dim b As String, a As String
+    b = PopX(stack, sp)
+    a = PopX(stack, sp)
+    Dim taken As String, nottaken As String
+    If gLang = LANG_CS Then
+        taken = "(" & a & " " & csT & " " & b & ")"
+        nottaken = "(" & a & " " & csN & " " & b & ")"
+    Else
+        taken = "(" & a & " " & vbT & " " & b & ")"
+        nottaken = "(" & a & " " & vbN & " " & b & ")"
+    End If
+    Call LAppend(LT_CBR, taken, nottaken, tgt, "", gCurOff)
+    sp = 0
+End Sub
+
+'--- Exception-handling clauses (ECMA-335 II.25.4.6) ---------------------
+Private Sub ReadEHClauses(f As Integer, foff As Long, codeSize As Long)
+    On Error GoTo done
+    Dim secStart As Long
+    secStart = ((foff + 12 + codeSize + 3) \ 4) * 4
+    Seek #f, secStart + 1
+    Dim more As Boolean
+    more = True
+    Do While more
+        Dim kind As Long
+        kind = GetByteByFile(f)
+        more = (kind And &H80) <> 0
+        If (kind And &H1) = 0 Then Exit Sub      'not an EH table
+        Dim clauses As Long, c As Long
+        If (kind And &H40) <> 0 Then
+            'Fat: 3-byte data size, 24-byte clauses.
+            Dim s1 As Long, s2 As Long, s3 As Long
+            s1 = GetByteByFile(f): s2 = GetByteByFile(f): s3 = GetByteByFile(f)
+            clauses = ((s1 + s2 * 256 + s3 * 65536) - 4) \ 24
+            For c = 0 To clauses - 1
+                Call StoreEH(GetDWordByFile(f), GetDWordByFile(f), GetDWordByFile(f), GetDWordByFile(f), GetDWordByFile(f), GetDWordByFile(f))
+            Next
+        Else
+            'Small: 1-byte data size + 2 padding, 12-byte clauses.
+            Dim ds As Long
+            ds = GetByteByFile(f)
+            Call GetWordByFile(f)
+            clauses = (ds - 4) \ 12
+            For c = 0 To clauses - 1
+                Dim fl As Long, t0 As Long, tl As Long, h0 As Long, hl As Long, tk As Long
+                fl = GetWordByFile(f)
+                t0 = GetWordByFile(f)
+                tl = GetByteByFile(f)
+                h0 = GetWordByFile(f)
+                hl = GetByteByFile(f)
+                tk = GetDWordByFile(f)
+                Call StoreEH(fl, t0, tl, h0, hl, tk)
+            Next
+        End If
+    Loop
+    Exit Sub
+done:
+End Sub
+
+Private Sub StoreEH(ByVal fl As Long, ByVal t0 As Long, ByVal tl As Long, ByVal h0 As Long, ByVal hl As Long, ByVal tk As Long)
+    If gEHCount = 0 Then
+        ReDim gEHFlags(16): ReDim gEHTryOff(16): ReDim gEHTryLen(16)
+        ReDim gEHHandOff(16): ReDim gEHHandLen(16): ReDim gEHToken(16)
+    ElseIf gEHCount > UBound(gEHFlags) Then
+        ReDim Preserve gEHFlags(gEHCount + 16)
+        ReDim Preserve gEHTryOff(gEHCount + 16)
+        ReDim Preserve gEHTryLen(gEHCount + 16)
+        ReDim Preserve gEHHandOff(gEHCount + 16)
+        ReDim Preserve gEHHandLen(gEHCount + 16)
+        ReDim Preserve gEHToken(gEHCount + 16)
+    End If
+    gEHFlags(gEHCount) = fl
+    gEHTryOff(gEHCount) = t0
+    gEHTryLen(gEHCount) = tl
+    gEHHandOff(gEHCount) = h0
+    gEHHandLen(gEHCount) = hl
+    gEHToken(gEHCount) = tk
+    gEHCount = gEHCount + 1
+End Sub
+
+Private Sub WrapExceptionHandlers()
+    On Error Resume Next
+    If gEHCount = 0 Then Exit Sub
+    Dim handled() As Boolean
+    ReDim handled(gEHCount)
+    Dim c As Long
+    For c = 0 To gEHCount - 1
+        If Not handled(c) Then
+            Dim tOff As Long, tLen As Long
+            tOff = gEHTryOff(c): tLen = gEHTryLen(c)
+            Dim mem() As Long, mc As Long
+            ReDim mem(gEHCount)
+            mc = 0
+            Dim d As Long
+            For d = 0 To gEHCount - 1
+                If gEHTryOff(d) = tOff And gEHTryLen(d) = tLen Then
+                    mem(mc) = d: mc = mc + 1: handled(d) = True
+                End If
+            Next
+            Call InsertStructBefore(FirstIdxAtOffset(tOff), LT_OPEN, IIf(gLang = LANG_CS, "try {", "Try"), tOff)
+            Dim hm As Long
+            For hm = 0 To mc - 1
+                Call InsertStructBefore(FirstIdxAtOffset(gEHHandOff(mem(hm))), LT_MID, HandlerHeader(mem(hm)), gEHHandOff(mem(hm)))
+            Next
+            Dim lastEnd As Long
+            lastEnd = gEHHandOff(mem(mc - 1)) + gEHHandLen(mem(mc - 1))
+            Call InsertStructBefore(FirstIdxAtOffset(lastEnd), LT_CLOSE, IIf(gLang = LANG_CS, "}", "End Try"), lastEnd)
+        End If
+    Next
+End Sub
+
+Private Function HandlerHeader(c As Long) As String
+    Dim fl As Long
+    fl = gEHFlags(c)
+    If (fl And 2) <> 0 Then
+        HandlerHeader = IIf(gLang = LANG_CS, "} finally {", "Finally")
+    ElseIf (fl And 1) <> 0 Then
+        HandlerHeader = IIf(gLang = LANG_CS, "} catch /* filter */ {", "Catch ' filter")
+    ElseIf (fl And 4) <> 0 Then
+        HandlerHeader = IIf(gLang = LANG_CS, "} catch /* fault */ {", "Catch ' fault")
+    Else
+        Dim tn As String
+        tn = GetTokenDisplay(gEHToken(c), gLang)
+        If gLang = LANG_CS Then
+            HandlerHeader = "} catch (" & tn & " ex) {"
+        Else
+            HandlerHeader = "Catch ex As " & tn
+        End If
+    End If
+End Function
+
+Private Function FirstIdxAtOffset(off As Long) As Long
+    Dim i As Long
+    For i = 0 To gLCount - 1
+        If Not gLDead(i) Then
+            If gLOffset(i) >= off Then FirstIdxAtOffset = i: Exit Function
+        End If
+    Next
+    FirstIdxAtOffset = gLCount
+End Function
+
+Private Sub InsertStructBefore(atIdx As Long, ty As Integer, txt As String, off As Long)
+    If gLCount > UBound(gLType) Then
+        ReDim Preserve gLType(gLCount + 64)
+        ReDim Preserve gLText(gLCount + 64)
+        ReDim Preserve gLAlt(gLCount + 64)
+        ReDim Preserve gLTarget(gLCount + 64)
+        ReDim Preserve gLSwitch(gLCount + 64)
+        ReDim Preserve gLOffset(gLCount + 64)
+        ReDim Preserve gLDead(gLCount + 64)
+    End If
+    Dim k As Long
+    For k = gLCount To atIdx + 1 Step -1
+        gLType(k) = gLType(k - 1)
+        gLText(k) = gLText(k - 1)
+        gLAlt(k) = gLAlt(k - 1)
+        gLTarget(k) = gLTarget(k - 1)
+        gLSwitch(k) = gLSwitch(k - 1)
+        gLOffset(k) = gLOffset(k - 1)
+        gLDead(k) = gLDead(k - 1)
+    Next
+    gLType(atIdx) = ty
+    gLText(atIdx) = txt
+    gLAlt(atIdx) = ""
+    gLTarget(atIdx) = 0
+    gLSwitch(atIdx) = ""
+    gLOffset(atIdx) = off
+    gLDead(atIdx) = False
+    gLCount = gLCount + 1
+End Sub
+
+'--- Structuring: fold goto/label spaghetti into if/else/loops ------------
+Private Sub StructureFlow()
+    On Error Resume Next
+    Dim changed As Boolean, iter As Long
+    Do
+        changed = False
+        iter = iter + 1
+        If FoldIfElse() Then
+            changed = True
+        ElseIf FoldIf() Then
+            changed = True
+        ElseIf FoldDoWhile() Then
+            changed = True
+        ElseIf FoldWhile() Then
+            changed = True
+        ElseIf FoldGotoNext() Then
+            changed = True
+        End If
+    Loop While changed And iter < 2000
+    Call RemoveUnusedLabels
+End Sub
+
+Private Function NextNonDead(i As Long) As Long
+    Dim k As Long
+    For k = i + 1 To gLCount - 1
+        If Not gLDead(k) Then NextNonDead = k: Exit Function
+    Next
+    NextNonDead = gLCount
+End Function
+
+Private Function PrevNonDead(i As Long) As Long
+    Dim k As Long
+    For k = i - 1 To 0 Step -1
+        If Not gLDead(k) Then PrevNonDead = k: Exit Function
+    Next
+    PrevNonDead = -1
+End Function
+
+Private Function FindLabelIdx(off As Long) As Long
+    Dim k As Long
+    For k = 0 To gLCount - 1
+        If Not gLDead(k) Then
+            If gLType(k) = LT_LABEL And gLOffset(k) = off Then FindLabelIdx = k: Exit Function
+        End If
+    Next
+    FindLabelIdx = -1
+End Function
+
+Private Function RefCount(off As Long) As Long
+    Dim k As Long, n As Long
+    For k = 0 To gLCount - 1
+        If Not gLDead(k) Then
+            If (gLType(k) = LT_CBR Or gLType(k) = LT_BR) And gLTarget(k) = off Then n = n + 1
+            If gLType(k) = LT_SWITCH And Len(gLSwitch(k)) > 0 Then
+                Dim sw() As String, q As Long
+                sw = Split(gLSwitch(k), ",")
+                For q = 0 To UBound(sw)
+                    If CLng(sw(q)) = off Then n = n + 1
+                Next
+            End If
+        End If
+    Next
+    RefCount = n
+End Function
+
+'A region is "straight-line" if it has no labels, gotos or switches - only
+'plain statements plus optional early return/throw.  Such a region is a
+'single-entry / single-exit block and is safe to wrap in if/while.
+Private Function StraightLine(a As Long, b As Long) As Boolean
+    Dim k As Long
+    StraightLine = True
+    For k = a To b
+        If k >= 0 And k < gLCount Then
+            If Not gLDead(k) Then
+                Select Case gLType(k)
+                    Case LT_STMT, LT_RAW, LT_RET, LT_THROW
+                        'allowed
+                    Case Else
+                        StraightLine = False: Exit Function
+                End Select
+            End If
+        End If
+    Next
+End Function
+
+Private Function FoldIf() As Boolean
+    Dim i As Long
+    For i = 0 To gLCount - 1
+        If Not gLDead(i) And gLType(i) = LT_CBR Then
+            Dim L As Long
+            L = FindLabelIdx(gLTarget(i))
+            If L > i Then
+                If StraightLine(i + 1, L - 1) Then
+                    If NextNonDead(i) < L Then
+                        Dim altc As String
+                        altc = gLAlt(i)
+                        gLType(i) = LT_OPEN
+                        gLText(i) = IIf(gLang = LANG_CS, "if (" & altc & ") {", "If " & altc & " Then")
+                        Call InsertStructBefore(L, LT_CLOSE, IIf(gLang = LANG_CS, "}", "End If"), gLOffset(L))
+                        FoldIf = True
+                        Exit Function
+                    End If
+                End If
+            End If
+        End If
+    Next
+End Function
+
+Private Function FoldIfElse() As Boolean
+    Dim i As Long
+    For i = 0 To gLCount - 1
+        If Not gLDead(i) And gLType(i) = LT_CBR Then
+            Dim L As Long
+            L = FindLabelIdx(gLTarget(i))
+            If L > i Then
+                Dim k As Long
+                k = PrevNonDead(L)
+                If k > i Then
+                    If gLType(k) = LT_BR Then
+                        Dim Eoff As Long, m As Long
+                        Eoff = gLTarget(k)
+                        m = FindLabelIdx(Eoff)
+                        If m > L Then
+                            If StraightLine(i + 1, k - 1) And StraightLine(L + 1, m - 1) Then
+                                If RefCount(gLTarget(i)) = 1 Then
+                                    Dim altc As String
+                                    altc = gLAlt(i)
+                                    gLType(i) = LT_OPEN
+                                    gLText(i) = IIf(gLang = LANG_CS, "if (" & altc & ") {", "If " & altc & " Then")
+                                    gLType(k) = LT_MID
+                                    gLText(k) = IIf(gLang = LANG_CS, "} else {", "Else")
+                                    gLDead(L) = True
+                                    Call InsertStructBefore(m, LT_CLOSE, IIf(gLang = LANG_CS, "}", "End If"), gLOffset(m))
+                                    FoldIfElse = True
+                                    Exit Function
+                                End If
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next
+End Function
+
+Private Function FoldDoWhile() As Boolean
+    Dim i As Long
+    For i = 0 To gLCount - 1
+        If Not gLDead(i) And gLType(i) = LT_CBR Then
+            Dim H As Long
+            H = FindLabelIdx(gLTarget(i))
+            If H >= 0 And H < i Then
+                If StraightLine(H + 1, i - 1) Then
+                    If RefCount(gLTarget(i)) = 1 Then
+                        gLType(H) = LT_OPEN
+                        gLText(H) = IIf(gLang = LANG_CS, "do {", "Do")
+                        gLType(i) = LT_CLOSE
+                        If gLang = LANG_CS Then
+                            gLText(i) = "} while (" & gLText(i) & ");"
+                        Else
+                            gLText(i) = "Loop While " & gLText(i)
+                        End If
+                        FoldDoWhile = True
+                        Exit Function
+                    End If
+                End If
+            End If
+        End If
+    Next
+End Function
+
+Private Function FoldWhile() As Boolean
+    Dim i As Long
+    For i = 0 To gLCount - 1
+        If Not gLDead(i) And gLType(i) = LT_BR Then
+            Dim Toff As Long, Tidx As Long
+            Toff = gLTarget(i)
+            Tidx = FindLabelIdx(Toff)
+            If Tidx > i Then
+                Dim Bidx As Long
+                Bidx = NextNonDead(i)
+                If Bidx < gLCount Then
+                    If gLType(Bidx) = LT_LABEL Then
+                        Dim Boff As Long
+                        Boff = gLOffset(Bidx)
+                        Dim cbrIdx As Long
+                        cbrIdx = NextNonDead(Tidx)
+                        If cbrIdx < gLCount Then
+                            If gLType(cbrIdx) = LT_CBR And gLTarget(cbrIdx) = Boff Then
+                                If StraightLine(Bidx + 1, Tidx - 1) Then
+                                    If RefCount(Boff) = 1 And RefCount(Toff) = 1 Then
+                                        gLDead(i) = True
+                                        gLType(Bidx) = LT_OPEN
+                                        If gLang = LANG_CS Then
+                                            gLText(Bidx) = "while (" & gLText(cbrIdx) & ") {"
+                                        Else
+                                            gLText(Bidx) = "While " & gLText(cbrIdx)
+                                        End If
+                                        gLDead(Tidx) = True
+                                        gLType(cbrIdx) = LT_CLOSE
+                                        gLText(cbrIdx) = IIf(gLang = LANG_CS, "}", "End While")
+                                        FoldWhile = True
+                                        Exit Function
+                                    End If
+                                End If
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next
+End Function
+
+Private Function FoldGotoNext() As Boolean
+    Dim i As Long
+    For i = 0 To gLCount - 1
+        If Not gLDead(i) And gLType(i) = LT_BR Then
+            Dim nx As Long
+            nx = NextNonDead(i)
+            If nx < gLCount Then
+                If gLType(nx) = LT_LABEL And gLOffset(nx) = gLTarget(i) Then
+                    gLDead(i) = True
+                    FoldGotoNext = True
+                    Exit Function
+                End If
+            End If
+        End If
+    Next
+End Function
+
+Private Sub RemoveUnusedLabels()
+    Dim i As Long
+    For i = 0 To gLCount - 1
+        If Not gLDead(i) And gLType(i) = LT_LABEL Then
+            If RefCount(gLOffset(i)) = 0 Then gLDead(i) = True
+        End If
+    Next
+End Sub
+
+'--- Render the structured list to source text ---------------------------
+Private Function RenderList() As String
+    Dim s As String, i As Long, lvl As Long
+    lvl = 2
+    For i = 0 To gLCount - 1
+        If Not gLDead(i) Then
+            Select Case gLType(i)
+                Case LT_OPEN
+                    s = s & Space$(lvl * 4) & gLText(i) & vbCrLf
+                    lvl = lvl + 1
+                Case LT_MID
+                    s = s & Space$((lvl - 1) * 4) & gLText(i) & vbCrLf
+                Case LT_CLOSE
+                    lvl = lvl - 1
+                    If lvl < 0 Then lvl = 0
+                    s = s & Space$(lvl * 4) & gLText(i) & vbCrLf
+                Case LT_LABEL
+                    If gLang = LANG_CS Then
+                        s = s & Space$(lvl * 4) & gLText(i) & ": ;" & vbCrLf
+                    Else
+                        s = s & Space$(lvl * 4) & gLText(i) & ":" & vbCrLf
+                    End If
+                Case LT_BR
+                    s = s & Space$(lvl * 4) & RenderGoto(gLTarget(i)) & vbCrLf
+                Case LT_CBR
+                    s = s & Space$(lvl * 4) & RenderIfGoto(gLText(i), gLTarget(i)) & vbCrLf
+                Case LT_RET
+                    s = s & Space$(lvl * 4) & RenderRet(gLText(i)) & vbCrLf
+                Case LT_THROW
+                    s = s & Space$(lvl * 4) & gThrowKw & " " & gLText(i) & gTerm & vbCrLf
+                Case LT_SWITCH
+                    s = s & RenderSwitch(gLText(i), gLSwitch(i), lvl)
+                Case Else
+                    s = s & Space$(lvl * 4) & gLText(i) & vbCrLf
+            End Select
+        End If
+    Next
+    RenderList = s
+End Function
+
+Private Function RenderGoto(t As Long) As String
+    If gLang = LANG_CS Then
+        RenderGoto = "goto IL_" & Hex4(t) & ";"
+    Else
+        RenderGoto = "GoTo IL_" & Hex4(t)
+    End If
+End Function
+
+Private Function RenderIfGoto(cond As String, t As Long) As String
+    If gLang = LANG_CS Then
+        RenderIfGoto = "if (" & cond & ") goto IL_" & Hex4(t) & ";"
+    Else
+        RenderIfGoto = "If " & cond & " Then GoTo IL_" & Hex4(t)
+    End If
+End Function
+
+Private Function RenderRet(txt As String) As String
+    If Len(txt) = 0 Then
+        RenderRet = IIf(gLang = LANG_CS, "return;", "Return")
+    Else
+        RenderRet = IIf(gLang = LANG_CS, "return " & txt & ";", "Return " & txt)
+    End If
+End Function
+
+Private Function RenderSwitch(val As String, csv As String, lvl As Long) As String
+    If Len(csv) = 0 Then Exit Function
+    Dim s As String, sw() As String, k As Long
+    sw = Split(csv, ",")
+    For k = 0 To UBound(sw)
+        Dim lbl As String
+        lbl = "IL_" & Hex4(CLng(sw(k)))
+        If gLang = LANG_CS Then
+            s = s & Space$(lvl * 4) & "if (" & val & " == " & k & ") goto " & lbl & ";" & vbCrLf
+        Else
+            s = s & Space$(lvl * 4) & "If " & val & " = " & k & " Then GoTo " & lbl & vbCrLf
+        End If
+    Next
+    RenderSwitch = s
+End Function
+
+'--- Local variable declarations from the method's LocalVarSig ------------
+Private Function GetLocalDecls(localTok As Long, lang As Integer) As String
+    On Error GoTo none
+    If localTok = 0 Then Exit Function
+    Dim table As Long, row As Long
+    table = (localTok \ &H1000000) And &HFF
+    If table <> &H11 Then Exit Function          'StandAloneSig
+    row = localTok And &HFFFFFF
+    If row < 1 Or row > iRows(&H11) Then Exit Function
+    Dim pos As Long
+    If Not BlobDataStart(StandAloneSigStruct(row).index, pos) Then Exit Function
+    Dim first As Long
+    first = BlobByteArray(pos): pos = pos + 1
+    If first <> &H7 Then Exit Function            'LOCAL_SIG
+    Dim cnt As Long
+    cnt = ReadCompressedUInt(BlobByteArray, pos)
+    Dim s As String, k As Long
+    For k = 0 To cnt - 1
+        Dim ty As String
+        ty = ParseTypeSig(BlobByteArray, pos, lang)
+        If lang = LANG_CS Then
+            s = s & "        " & ty & " V_" & k & ";" & vbCrLf
+        Else
+            s = s & "        Dim V_" & k & " As " & ty & vbCrLf
+        End If
+    Next
+    GetLocalDecls = s
+    Exit Function
+none:
 End Function
