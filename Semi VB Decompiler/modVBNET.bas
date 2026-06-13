@@ -23,7 +23,7 @@ Private Type VBNETCORE2
 End Type
 
 Private Type MetadataStorageSignatureType
-    lSignature As Double 'DWORD  “Magic” signature for physical metadata, currently 0x424A5342   - BSJB
+    lSignature As Double 'DWORD  ï¿½Magicï¿½ signature for physical metadata, currently 0x424A5342   - BSJB
     iMajorVersion As Double 'WORD Major version (1 for the first release of the common language runtime)
     iMinorVersion As Double 'WORD Minor version (1 for the first release of the common language runtime)
     iExtraData As Double 'DWORD Reserved; set to 0
@@ -351,7 +351,8 @@ Dim Notprototype As Boolean
 Dim Writenamespace As Boolean
 Dim lasttypedisplayed As Long
 
-'Private MyDotNet As SemiVBHelper
+'SemiVBDecompilerHelper.dll (.NET) is no longer required - its BitConverter /
+'bit-shift helpers are implemented in pure VB6 further down this module.
 'Used to check if .Net is installed
 Private Declare Function LoadLibrary Lib "kernel32" Alias "LoadLibraryA" (ByVal lpLibFileName As String) As Long
 Private Sub InitDotNet()
@@ -465,8 +466,6 @@ Sub ProccessVBNETFile(lOffsetVBNETHEADER As Long, FileNum As Integer)
     
     'Get MetaData Infomation
     Seek F, GetPtrFromRVA2(gVBNETHeader.MetaData.VirtualAddress) + 1
-    
-    Set MyDotNet = New SemiVBHelper
     
     Call GetMetaData(F)
     Call FillTableSizes
@@ -593,7 +592,7 @@ Private Sub GetMetaData(FileNum As Integer)
     'valid = BitConverter.ToInt64 (metadata, 8);
     '#TODO
     'Valid = modVBNET.BitConverterToInt64(MetaDataByteArray, 8)
-    Valid = MyDotNet.BConverterToInt64(MetaDataByteArray, 8)
+    Valid = BitConverterToInt64(MetaDataByteArray, 8)
     'Debug.Print "VAILD: " & Valid
     ReDim iRows(64)
     
@@ -603,14 +602,14 @@ Private Sub GetMetaData(FileNum As Integer)
         '#DONE
         'int tablepresent = (int)(valid >> k ) & 1;
         ''lTablepresent = HiLo.DWordShiftR(Valid, k) And 1
-        lTablepresent = MyDotNet.isTablePresent(MetaDataByteArray, k)
+        lTablepresent = isTablePresent(MetaDataByteArray, k)
         'lTablepresent = HiLo.INT64ShiftR(Valid, k) And 1
         If lTablepresent = 1 Then
             '
             '#DONE
             'rows[k] = BitConverter.ToInt32(metadata , tableoffset);
             'iRows(k) = modVBNET.BitConverterToInt32(MetaDataByteArray, TableOffset)
-            iRows(k) = MyDotNet.BConverterToInt32(MetaDataByteArray, TableOffset)
+            iRows(k) = BitConverterToInt32(MetaDataByteArray, TableOffset)
             'MsgBox strTableNames(k) & " R: " & iRows(k)
             Console.WriteLine (strTableNames(k) & " " & iRows(k))
             'MsgBox iRows(k)
@@ -769,23 +768,81 @@ Public Sub ShowBlobHeap(fxgEXEInfo As MSFlexGrid)
     Close #F
 End Sub
 
-Public Function BitConverterToInt16(bArray() As Byte, offset As Long) As Long
-    BitConverterToInt16 = MyDotNet.BConverterToInt16(bArray, offset)
+'*****************************
+'Pure VB6 replacements for the old SemiVBDecompilerHelper.dll (.NET) wrappers.
+'These are just little-endian byte -> integer conversions, exactly what
+'System.BitConverter did, so the .NET helper and its COM reference are no
+'longer needed.
+'*****************************
 
+'Build a signed 32-bit Long from 4 little-endian bytes without overflowing
+'(the high byte's top bit becomes the Long's sign bit).  This matches both
+'.NET BitConverter.ToInt32 and ToUInt32 marshaled into a VB6 Long (same bits).
+Private Function BytesToLong32(bArray() As Byte, ByVal offset As Long) As Long
+    Dim v As Long
+    v = bArray(offset) + bArray(offset + 1) * 256& + bArray(offset + 2) * 65536
+    If bArray(offset + 3) < 128 Then
+        v = v + bArray(offset + 3) * 16777216
+    Else
+        v = v + (CLng(bArray(offset + 3)) - 256) * 16777216
+    End If
+    BytesToLong32 = v
+End Function
+
+Public Function BitConverterToInt16(bArray() As Byte, offset As Long) As Long
+    Dim v As Long
+    v = bArray(offset) + bArray(offset + 1) * 256&
+    If v >= 32768 Then v = v - 65536        'sign-extend
+    BitConverterToInt16 = v
 End Function
 Public Function BitConverterToUInt16(bArray() As Byte, offset As Long) As Long
-    BitConverterToUInt16 = MyDotNet.BConverterToUInt16(bArray, offset)
-
+    BitConverterToUInt16 = bArray(offset) + bArray(offset + 1) * 256&
 End Function
 Public Function BitConverterToUInt32(bArray() As Byte, offset As Long) As Long
-    BitConverterToUInt32 = MyDotNet.BConverterToUInt32(bArray, offset)
-
+    BitConverterToUInt32 = BytesToLong32(bArray, offset)
 End Function
 Public Function BitConverterToInt32(bArray() As Byte, offset As Long) As Long
-    BitConverterToInt32 = MyDotNet.BConverterToInt32(bArray, offset)
+    BitConverterToInt32 = BytesToLong32(bArray, offset)
 End Function
 Public Function BitConverterToInt64(bArray() As Byte, offset As Long) As Currency
-    BitConverterToInt64 = MyDotNet.BConverterToInt64(bArray, offset)
+    'Combine two 32-bit halves into a Currency.  Currency comfortably holds the
+    'values this decompiler reads (metadata offsets / the table-valid mask);
+    'genuinely huge 64-bit values would overflow, so guard and return 0.
+    On Error GoTo overflow
+    Dim lo As Long, hi As Long
+    Dim loC As Currency, hiC As Currency
+    lo = BytesToLong32(bArray, offset)
+    hi = BytesToLong32(bArray, offset + 4)
+    loC = lo: If lo < 0 Then loC = loC + 4294967296@
+    hiC = hi: If hi < 0 Then hiC = hiC + 4294967296@
+    BitConverterToInt64 = loC + hiC * 4294967296@
+    Exit Function
+overflow:
+    BitConverterToInt64 = 0
+End Function
+
+'Bit k of the 64-bit "Valid" table mask stored at metadata offset 8 - i.e.
+'(BitConverterToInt64(metadata, 8) >> k) And 1.  Tested directly on the bytes
+'to avoid any 64-bit arithmetic.
+Public Function isTablePresent(metadata() As Byte, ByVal k As Long) As Long
+    Dim byteIndex As Long, bitInByte As Long, b As Long
+    byteIndex = 8 + (k \ 8)
+    bitInByte = k Mod 8
+    b = metadata(byteIndex)
+    isTablePresent = (b \ (2 ^ bitInByte)) And 1
+End Function
+
+'Logical (unsigned) right shift, replacing the old .NET helper.
+Public Function DoRightBitShift(ByVal value As Long, ByVal count As Long) As Long
+    If count <= 0 Then DoRightBitShift = value: Exit Function
+    If count >= 32 Then DoRightBitShift = 0: Exit Function
+    If value >= 0 Then
+        DoRightBitShift = value \ (2 ^ count)
+    Else
+        Dim c As Currency
+        c = CCur(value) + 4294967296@           'treat as unsigned 32-bit
+        DoRightBitShift = CLng(Int(c / (2 ^ count)))
+    End If
 End Function
 Private Function GetCodedIndexSize(strTableName As String) As Long
     If strTableName = "Implementation" Then
@@ -1577,7 +1634,7 @@ End Sub
 Public Function tablepresent(tableindex As Byte) As Boolean
     Dim tablebit As Long
     'tablebit = HiLo.DWordShiftR(Valid, tableindex) And 1
-    tablebit = MyDotNet.isTablePresent(MetaDataByteArray, tableindex)
+    tablebit = isTablePresent(MetaDataByteArray, tableindex)
     Dim J As Integer
     'For j = 0 To tableindex
     Do While J < tableindex
@@ -1694,7 +1751,7 @@ Private Function GetString(starting As Long) As String
 End Function
 
 Private Function GetResolutionScopeValue(rvalue As Long) As Long
-    GetResolutionScopeValue = MyDotNet.DoRightBitShift(rvalue, 2)
+    GetResolutionScopeValue = DoRightBitShift(rvalue, 2)
 End Function
 Private Function CreateSpaces(lNumber As Long) As String
     CreateSpaces = Space$(lNumber)
@@ -1781,7 +1838,7 @@ Private Function GetTypeAttributeFlagsForClassExtern(typeattributeflags As Long)
 End Function
 Private Function GetManifestResourceValue(manifiestvalue As Long) As Long
 '#TODO return manifiestvalue>> 2
-GetManifestResourceValue = MyDotNet.DoRightBitShift(manifiestvalue, 2)
+GetManifestResourceValue = DoRightBitShift(manifiestvalue, 2)
     
 End Function
 Private Function GetManifestResourceTable(manifiestvalue As Long) As String
@@ -2099,7 +2156,9 @@ Public Sub DisplayFileTable()
         Console.WriteLine (".file " & GetFileAttributes(FileStruct(i).flags) & NameReserved(GetString(FileStruct(i).name)))
     
         Dim table As Long
-        table = MyDotNet.isTablePresent(gVBNETHeader.EntryPointToken, 24)
+        'High byte of the metadata token is the table id (token = table<<24 | row);
+        'the old code mistakenly called isTablePresent here.
+        table = DoRightBitShift(gVBNETHeader.EntryPointToken, 24)
         If table = &H26 Then
             Dim row As Long
             row = gVBNETHeader.EntryPointToken And &HFFFFFF
@@ -2568,7 +2627,7 @@ Private Function DisplayTypeRefExtends(typerefindex As Long) As String
     DisplayTypeRefExtends = returnstring
 End Function
 Private Function GetTypeDefOrRefValue(codedvalue As Long) As Long
-    GetTypeDefOrRefValue = MyDotNet.DoRightBitShift(codedvalue, 2)
+    GetTypeDefOrRefValue = DoRightBitShift(codedvalue, 2)
 End Function
 
 Private Function DecodeFirstByteofMethodSignature(firstbyte As Long, methodrow As Long) As String
