@@ -1711,9 +1711,13 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
          'Get Optional Object Info
         Seek F, gObject(loopC).aObjectInfo + 57 - OptHeader.ImageBase
         
-        'Decide if to get Optional Info or not
-        If ((gObject(loopC).ObjectType And &H80) = &H80) Then
-            
+        'Read the optional object info for every object that has one.  The old
+        'test (ObjectType And &H80) is only true for forms, so classes and
+        'modules were skipped and never got their native procedure offsets.
+        'The inner iEventCount / aEventLinkArray guards already handle objects
+        'that have no event-link table.
+        If gObject(loopC).aObjectInfo <> 0 Then
+
             Get #F, , gOptionalObjectInfo
             'Dim testLink() As tEventLink
             Dim LinkPCode() As MethodLinkPCode
@@ -1757,20 +1761,24 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                             Next i
                             For i = 0 To UBound(lNative)
                             On Error Resume Next
-                                'MsgBox lNative(i) - OptHeader.ImageBase
-                                Get F, lNative(i) + 1 - OptHeader.ImageBase, LinkNative
-                                'MsgBox LinkNative.jmpOpCode
-                                'MsgBox LinkNative.jmpOffset + Loc(f) + 5
-                                 'jmp rel32 thunk: target VA = thunk_VA + 5 + jmpOffset.
-                                 'After the Get, Loc(F) = lNative(i) - ImageBase + 5, so adding
-                                 'jmpOffset + ImageBase yields the procedure's virtual address.
-                                 currPos = Loc(F) + LinkNative.jmpoffset + OptHeader.ImageBase
+                                'Skip empty event slots (null pointers in the link array -
+                                'common for interface/IUnknown slots on classes).
+                                If lNative(i) <> 0 Then
+                                    Get F, lNative(i) + 1 - OptHeader.ImageBase, LinkNative
+                                    'Only E9 (jmp rel32) entries are real procedure thunks.
+                                    'Other slots (push/sub stubs, padding) resolve to junk
+                                    'addresses outside the image, so ignore them.
+                                    If LinkNative.jmpOpCode = &HE9 Then
+                                        'jmp rel32 thunk: target VA = thunk_VA + 5 + jmpOffset.
+                                        'After the Get, Loc(F) = lNative(i) - ImageBase + 5, so
+                                        'adding jmpOffset + ImageBase yields the procedure VA.
+                                        currPos = Loc(F) + LinkNative.jmpoffset + OptHeader.ImageBase
 
-                                 gNativeProcArray(UBound(gNativeProcArray)).sName = gObjectNameArray(loopC) & ".proc_" & Hex$(currPos)
-                                 'Debug.Print gNativeProcArray(UBound(gNativeProcArray)).sName
-                                 gNativeProcArray(UBound(gNativeProcArray)).offset = currPos
-                                 ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
-                                 'frmNativeDecompile.lstProcedures.AddItem LinkNative.jmpOffset + 5 + currPos + 5 + OptHeader.ImageBase
+                                        gNativeProcArray(UBound(gNativeProcArray)).sName = gObjectNameArray(loopC) & ".proc_" & Hex$(currPos)
+                                        gNativeProcArray(UBound(gNativeProcArray)).offset = currPos
+                                        ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
+                                    End If
+                                End If
                             Next i
                         End If
                     
