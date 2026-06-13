@@ -113,7 +113,6 @@ Begin VB.Form frmMain
       _ExtentX        =   3625
       _ExtentY        =   2990
       _Version        =   393217
-      Enabled         =   -1  'True
       TextRTF         =   $"frmMain.frx":5E5E
    End
    Begin VB.Frame FrameStatus 
@@ -165,7 +164,6 @@ Begin VB.Form frmMain
       _ExtentX        =   2566
       _ExtentY        =   1508
       _Version        =   393217
-      Enabled         =   -1  'True
       ReadOnly        =   -1  'True
       ScrollBars      =   3
       AutoVerbMenu    =   -1  'True
@@ -190,6 +188,7 @@ Begin VB.Form frmMain
       _ExtentX        =   2143
       _ExtentY        =   3413
       _Version        =   393217
+      Enabled         =   -1  'True
       TextRTF         =   $"frmMain.frx":5F62
    End
    Begin RichTextLib.RichTextBox buffCodeAv 
@@ -202,6 +201,7 @@ Begin VB.Form frmMain
       _ExtentX        =   2990
       _ExtentY        =   2778
       _Version        =   393217
+      Enabled         =   -1  'True
       TextRTF         =   $"frmMain.frx":5FED
    End
    Begin RichTextLib.RichTextBox txtFunctions 
@@ -214,7 +214,6 @@ Begin VB.Form frmMain
       _ExtentX        =   5741
       _ExtentY        =   1085
       _Version        =   393217
-      Enabled         =   -1  'True
       ScrollBars      =   3
       TextRTF         =   $"frmMain.frx":6078
    End
@@ -490,8 +489,8 @@ Begin VB.Form frmMain
       _ExtentY        =   10716
       _Version        =   393216
       Style           =   1
-      Tabs            =   4
-      TabsPerRow      =   4
+      Tabs            =   5
+      TabsPerRow      =   5
       TabHeight       =   520
       WordWrap        =   0   'False
       ShowFocusRect   =   0   'False
@@ -514,22 +513,36 @@ Begin VB.Form frmMain
       TabPicture(1)   =   "frmMain.frx":16AD0
       Tab(1).ControlEnabled=   0   'False
       Tab(1).Control(0)=   "fxgEXEInfo"
+      Tab(1).Control(0).Enabled=   0   'False
       Tab(1).ControlCount=   1
       TabCaption(2)   =   "Preview"
       TabPicture(2)   =   "frmMain.frx":16AEC
       Tab(2).ControlEnabled=   0   'False
       Tab(2).Control(0)=   "picPreview"
+      Tab(2).Control(0).Enabled=   0   'False
       Tab(2).ControlCount=   1
       TabCaption(3)   =   "Edit Object"
       TabPicture(3)   =   "frmMain.frx":16B08
       Tab(3).ControlEnabled=   0   'False
       Tab(3).Control(0)=   "lblArrayEdit(0)"
+      Tab(3).Control(0).Enabled=   0   'False
       Tab(3).Control(1)=   "lblObjectName"
+      Tab(3).Control(1).Enabled=   0   'False
       Tab(3).Control(2)=   "lblHelpText"
+      Tab(3).Control(2).Enabled=   0   'False
       Tab(3).Control(3)=   "txtEditArray(0)"
+      Tab(3).Control(3).Enabled=   0   'False
       Tab(3).Control(4)=   "cmdColor(0)"
+      Tab(3).Control(4).Enabled=   0   'False
       Tab(3).Control(5)=   "pePropTree"
+      Tab(3).Control(5).Enabled=   0   'False
       Tab(3).ControlCount=   6
+      TabCaption(4)   =   "Dism"
+      TabPicture(4)   =   "frmMain.frx":16B24
+      Tab(4).ControlEnabled=   0   'False
+      Tab(4).Control(0)=   "txtDism"
+      Tab(4).Control(0).Enabled=   0   'False
+      Tab(4).ControlCount=   1
       Begin VB.PictureBox pePropTree 
          Appearance      =   0  'Flat
          BackColor       =   &H80000004&
@@ -583,11 +596,10 @@ Begin VB.Form frmMain
          _ExtentX        =   7223
          _ExtentY        =   9763
          _Version        =   393217
-         Enabled         =   -1  'True
          ReadOnly        =   -1  'True
          ScrollBars      =   3
          AutoVerbMenu    =   -1  'True
-         TextRTF         =   $"frmMain.frx":16B24
+         TextRTF         =   $"frmMain.frx":16B40
       End
       Begin MSFlexGridLib.MSFlexGrid fxgEXEInfo 
          Height          =   5535
@@ -624,11 +636,24 @@ Begin VB.Form frmMain
          _ExtentY        =   1191
          _Version        =   393217
          BackColor       =   12632256
-         Enabled         =   -1  'True
          ReadOnly        =   -1  'True
          ScrollBars      =   2
          Appearance      =   0
-         TextRTF         =   $"frmMain.frx":16BA6
+         TextRTF         =   $"frmMain.frx":16BC2
+      End
+      Begin RichTextLib.RichTextBox txtDism 
+         Height          =   5535
+         Left            =   -74880
+         TabIndex        =   26
+         Top             =   360
+         Width           =   4095
+         _ExtentX        =   7223
+         _ExtentY        =   9763
+         _Version        =   393217
+         ReadOnly        =   -1  'True
+         ScrollBars      =   3
+         AutoVerbMenu    =   -1  'True
+         TextRTF         =   $"frmMain.frx":16C44
       End
       Begin VB.Label lblHelpText 
          Height          =   615
@@ -889,16 +914,16 @@ End Sub
 
 Private Sub cmdColor_Click(index As Integer)
     If cmdColor(index).tag = "c" Then
-     Cd1.Color = txtEditArray(index).Text
-     Cd1.ShowColor
-     txtEditArray(index).Text = Cd1.Color
+     CD1.Color = txtEditArray(index).Text
+     CD1.ShowColor
+     txtEditArray(index).Text = CD1.Color
     End If
     If cmdColor(index).tag = "f" Then
     'FontName
     On Error Resume Next
-     Cd1.FontName = txtEditArray(index).Text
-     Cd1.ShowFont
-     txtEditArray(index).Text = Cd1.FontName
+     CD1.FontName = txtEditArray(index).Text
+     CD1.ShowFont
+     txtEditArray(index).Text = CD1.FontName
     End If
     If cmdColor(index).tag = "p" Then
     'Picture property
@@ -1133,16 +1158,16 @@ Private Sub mnuFileAntiDecompiler_Click()
 'Purpose: Show save dialog and encypt the current exe
 '*****************************
 On Error GoTo errHandle
-    Cd1.Filename = vbNullString
-    Cd1.DialogTitle = "Save File As"
-    Cd1.Filter = "Exe Files(*.exe)|*.exe"
+    CD1.Filename = vbNullString
+    CD1.DialogTitle = "Save File As"
+    CD1.Filter = "Exe Files(*.exe)|*.exe"
     
-    Cd1.ShowSave
+    CD1.ShowSave
     
-    If Cd1.Filename = vbNullString Then Exit Sub
+    If CD1.Filename = vbNullString Then Exit Sub
     
     Call modAntiDecompiler.LoadCrypter
-    Call modAntiDecompiler.EncryptExe(SFilePath, Cd1.Filename)
+    Call modAntiDecompiler.EncryptExe(SFilePath, CD1.Filename)
 Exit Sub
 errHandle:
     MsgBox "Error_frmMain_mnuFileAntiDecompiler: " & err.Number & " " & err.Description
@@ -1338,16 +1363,16 @@ Private Sub mnuFileOpen_Click()
 'Purpose: Show Open Dialog and then call OpenVBExe
 '*****************************
 ' On Error GoTo errHandle:
-    Cd1.Filename = vbNullString
-    Cd1.DialogTitle = "Select VB 4/5/6 file"
-    Cd1.Filter = "VB Files(*.exe,*.ocx,*.dll)|*.exe;*.ocx;*.dll|All Files(*.*)|*.*;"
-    Cd1.flags = cdlOFNFileMustExist Or cdlOFNHideReadOnly Or cdlOFNPathMustExist
-    Cd1.ShowOpen
+    CD1.Filename = vbNullString
+    CD1.DialogTitle = "Select VB 4/5/6 file"
+    CD1.Filter = "VB Files(*.exe,*.ocx,*.dll)|*.exe;*.ocx;*.dll|All Files(*.*)|*.*;"
+    CD1.flags = cdlOFNFileMustExist Or cdlOFNHideReadOnly Or cdlOFNPathMustExist
+    CD1.ShowOpen
     
-    If Cd1.Filename = vbNullString Then Exit Sub
+    If CD1.Filename = vbNullString Then Exit Sub
     
-    If FileExists(Cd1.Filename) = True Then
-        Call OpenVBExe(Cd1.Filename, Cd1.FileTitle)
+    If FileExists(CD1.Filename) = True Then
+        Call OpenVBExe(CD1.Filename, CD1.FileTitle)
     Else
         MsgBox "File Does not exist", vbExclamation
     End If
@@ -1711,12 +1736,15 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
          'Get Optional Object Info
         Seek F, gObject(loopC).aObjectInfo + 57 - OptHeader.ImageBase
         
-        'Read the optional object info for every object that has one.  The old
-        'test (ObjectType And &H80) is only true for forms, so classes and
-        'modules were skipped and never got their native procedure offsets.
-        'The inner iEventCount / aEventLinkArray guards already handle objects
-        'that have no event-link table.
-        If gObject(loopC).aObjectInfo <> 0 Then
+        'Read the optional object info only for objects that actually have one.
+        'Forms and classes have it (ObjectType bit &H2 set); .bas modules do NOT
+        '- their ObjectInfo is not followed by an optional block, so reading it
+        'returns garbage (e.g. a bogus iEventCount of 9782) and would make us
+        'walk thousands of fake event entries.  The old (... And &H80) test was
+        'too narrow (forms only) and skipped classes; bit &H2 covers forms,
+        'classes, user controls and property pages while excluding modules.
+        'Module procedures are recovered later by ScanNativeProcsByPrologue.
+        If gObject(loopC).aObjectInfo <> 0 And (gObject(loopC).ObjectType And &H2) = &H2 Then
 
             Get #F, , gOptionalObjectInfo
             'Dim testLink() As tEventLink
@@ -2139,12 +2167,12 @@ Private Sub mnuFileSaveExe_Click()
 'Purpose: Save Changes to the Form's Gui
 'And generates a Patch Report
 '#####################################
-    Cd1.DialogTitle = "Save As"
-    Cd1.Filename = vbNullString
-    Cd1.Filter = "VB Files(*.exe,*.ocx,*.dll)|*.exe;*.ocx;*.dll"
-    Cd1.ShowSave
+    CD1.DialogTitle = "Save As"
+    CD1.Filename = vbNullString
+    CD1.Filter = "VB Files(*.exe,*.ocx,*.dll)|*.exe;*.ocx;*.dll"
+    CD1.ShowSave
     
-    If Cd1.Filename = vbNullString Then Exit Sub
+    If CD1.Filename = vbNullString Then Exit Sub
     On Error Resume Next
     'Copy the exe to the temp directory
     Close
@@ -2246,7 +2274,7 @@ Private Sub mnuFileSaveExe_Click()
     Close fFile
     
     'Save the file
-    FileCopy App.Path & "\dump\" & SFile & "\" & SFile, Cd1.Filename
+    FileCopy App.Path & "\dump\" & SFile & "\" & SFile, CD1.Filename
     'Kill the temp file
     Kill App.Path & "\dump\" & SFile & "\" & SFile
     
@@ -2380,13 +2408,13 @@ Private Sub mnuPopUpSaveImage_Click()
 'Purpose: Save an image from the preview picture box
 '*****************************
 On Error GoTo errHandle
-    Cd1.Filename = vbNullString
-    Cd1.DialogTitle = "Save Image"
-    Cd1.Filter = "Image Files(*.*)|*.*;"
-    Cd1.ShowSave
-    If Cd1.Filename = vbNullString Then Exit Sub
+    CD1.Filename = vbNullString
+    CD1.DialogTitle = "Save Image"
+    CD1.Filter = "Image Files(*.*)|*.*;"
+    CD1.ShowSave
+    If CD1.Filename = vbNullString Then Exit Sub
     
-    Call SavePicture(picPreview.Image, Cd1.Filename)
+    Call SavePicture(picPreview.Image, CD1.Filename)
 Exit Sub
 errHandle:
     MsgBox "Error_frmMain_mnuPopupSaveImage: " & err.Number & " " & err.Description
@@ -2518,9 +2546,9 @@ On Error Resume Next
     txtCode.SelStart = 0
     txtCode.SelColor = vbBlack
     
-    If CurrentItem <> tvProject.SelectedItem.Key Then
-        tblPath = Split(tvProject.SelectedItem.Key, "/")
-        CurrentItem = tvProject.SelectedItem.Key
+    If CurrentItem <> tvProject.SelectedItem.key Then
+        tblPath = Split(tvProject.SelectedItem.key, "/")
+        CurrentItem = tvProject.SelectedItem.key
 
         Select Case tblPath(1)
             Case "VERSIONINFO"
