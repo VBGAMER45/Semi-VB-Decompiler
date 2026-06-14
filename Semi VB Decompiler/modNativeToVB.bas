@@ -2414,28 +2414,48 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
     'Add the parameter list when the name carries no signature yet (event handlers
     'already get a typed one from getEventComplete).  Parameters are named generically
     'arg_<ebp offset> with the count from the proc's `ret N`.
-    If InStr(nm, "(") = 0 Then nm = nm & "(" & NativeProcParams(kindStr) & ")"
+    If InStr(nm, "(") = 0 Then nm = nm & "(" & NativeProcParams(kindStr, NativeProcHasMe(addr)) & ")"
     NativeProcHeader = vis & " " & kindStr & " " & nm & "   '" & Hex$(addr)
 End Function
 
-Private Function NativeProcParams(ByVal kindStr As String) As String
+Private Function NativeProcParams(ByVal kindStr As String, ByVal hasMe As Boolean) As String
     'Reconstruct the (generic) parameter list from `ret N`.  N is the bytes the
-    'callee pops = all stack arguments: a hidden Me/this (form & class methods) at
-    'ebp+8, then the user parameters at ebp+0xC, ebp+0x10, ...  A Function also
+    'callee pops = all stack arguments.  A class/form method receives a hidden
+    'Me/this at ebp+8 (so user params start at ebp+0xC); a .bas module procedure
+    'has no Me (user params start at ebp+8).  A Function (named as such) also
     'reserves a hidden return-value slot.  Names are arg_<ebp offset> (the offset
     'convention the commercial decompiler uses).
-    Dim slots As Long, nParams As Long, i As Long, off As Long, s As String
-    If NVRetN < 4 Then Exit Function           '-1 (plain ret) or ret 0/ret 4 -> no user params
+    Dim slots As Long, nParams As Long, i As Long, off As Long, base As Long, s As String
+    If NVRetN < 4 Then Exit Function           '-1 (plain ret) or ret 0 -> no stack args
     slots = NVRetN \ 4
-    nParams = slots - 1                         'drop the hidden Me/this slot
+    If hasMe Then nParams = slots - 1 Else nParams = slots    'drop the hidden Me/this slot
     If InStr(kindStr, "Function") > 0 Then nParams = nParams - 1   'drop the return-value slot
     If nParams < 0 Then nParams = 0
+    base = IIf(hasMe, &HC, &H8)                 'first user parameter's ebp offset
     For i = 0 To nParams - 1
-        off = &HC + i * 4
+        off = base + i * 4
         If Len(s) > 0 Then s = s & ", "
         s = s & "arg_" & Hex$(off)
     Next
     NativeProcParams = s
+End Function
+
+Private Function NativeProcHasMe(ByVal addr As Long) As Boolean
+    'True when a procedure receives a hidden Me/this pointer at ebp+8 - i.e. it is a
+    'class/form method, not a .bas module procedure.  Decided from the owning
+    'object's type (module = ObjectType bit 0x2 clear).  Defaults to True (assume a
+    'method) when the owner can't be resolved, preserving prior behaviour.
+    Dim owner As String, i As Long
+    owner = NativeFormOf(addr)
+    If Len(owner) = 0 Then NativeProcHasMe = True: Exit Function
+    On Error Resume Next
+    For i = 0 To UBound(gObjectNameArray)
+        If gObjectNameArray(i) = owner Then
+            NativeProcHasMe = ((gObject(i).ObjectType And &H2) <> 0)   'non-module has Me
+            Exit Function
+        End If
+    Next
+    NativeProcHasMe = True
 End Function
 
 Private Function NativeProcName(ByVal addr As Long) As String
