@@ -525,6 +525,14 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
         Case InStr(nm, "__vbaStrCat") > 0
             aa = NativeArgPop(): bb = NativeArgPop()
             NVReg(0) = "(" & aa & " & " & bb & ")": NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaStrToAnsi") > 0, InStr(nm, "__vbaStrToUnicode") > 0
+            'Charset conversion: StrToAnsi(dst, src) returns the converted string
+            'in eax.  For decompilation the value is just the source string, so
+            'fold it through to the consumer (e.g. an API argument).
+            Dim adst As String, asrc As String
+            adst = NativeArgPop(): asrc = NativeArgPop()
+            If Len(asrc) = 0 Then asrc = adst
+            NVReg(0) = asrc: NVPushTop = 0: NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrMove") > 0, InStr(nm, "__vbaStrCopy") > 0, _
              InStr(nm, "__vbaVarMove") > 0, InStr(nm, "__vbaVarCopy") > 0, _
              InStr(nm, "__vbaStrVarMove") > 0
@@ -915,7 +923,10 @@ Private Function NativeTrackReg(inst As CInstruction) As String
     op = NativeDumpByte(dump, i)
     Select Case op
         Case &HB8 To &HBF               'mov reg, imm32
-            NVReg(op - &HB8) = NativeNumFromBits(NativeDumpInt32(dump, i + 1))
+            Dim immv As Long, sv As String
+            immv = NativeDumpInt32(dump, i + 1)
+            If immv >= OptHeader.ImageBase Then sv = NativeStringAt(immv)
+            If Len(sv) > 0 Then NVReg(op - &HB8) = sv Else NVReg(op - &HB8) = NativeNumFromBits(immv)
         Case &H8B                       'mov r32, r/m32
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
