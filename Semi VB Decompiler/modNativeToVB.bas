@@ -91,6 +91,7 @@ Private NVCmpL As String           'pending condition: left operand (symbolic)
 Private NVCmpR As String           'pending condition: right operand (symbolic)
 Private NVCmpIsTest As Boolean     'the pending compare came from TEST (zero-compare)
 Private NVCmpSet As Boolean        'a GP TEST/CMP condition hint is pending
+Private NVPendingCall As String    'a "Call X()" deferred until we know if its result is used
 
 Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 '*****************************
@@ -130,6 +131,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False
+    NVPendingCall = ""
     ReDim NVFpu(31): NVFpuTop = 0
     ReDim NVPushImm(31): NVPushTop = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
@@ -164,6 +166,19 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     output = NativeProcHeader(addr) & vbCrLf
 
     For Each inst In col
+        'Resolve a deferred call (from the previous instruction) based on how
+        'THIS instruction uses eax, the call's result.  Done before any block
+        'close/label so a flushed "Call X()" stays inside the right block.
+        If Len(NVPendingCall) > 0 Then
+            Dim eu As Long
+            eu = NativeEaxUse(inst)
+            If eu = 1 Then
+                NVPendingCall = ""                          'result consumed -> folded
+            ElseIf eu = 2 Then
+                output = output & NativeIndentStr() & NVPendingCall & vbCrLf
+                NVPendingCall = "": NVReg(0) = ""           'unused -> emit; result spent
+            End If
+        End If
         'Close any structured If blocks that end at this address
         NativeCloseIfs output, inst.va
         'Open a Do loop when this address is the target of a back-edge
@@ -180,6 +195,8 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         output = output & NativeProcessInst(inst)
     Next
 
+    'Any call still deferred is the proc's last statement - emit it.
+    If Len(NVPendingCall) > 0 Then output = output & NativeIndentStr() & NVPendingCall & vbCrLf: NVPendingCall = ""
     NativeCloseIfs output, &H7FFFFFFF
     output = output & "End " & NVProcEndWord & vbCrLf
     DecompileNativeProcToVB = output
@@ -242,10 +259,13 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     pname = NativeCallTargetName(tgt)
                     uargs = NativeArgList()
                     NVPushTop = 0
-                    'Leave the result available in case it feeds an assignment,
-                    'and also emit the call so the call graph is visible.
+                    'Keep the call as the value in eax and defer the "Call X()"
+                    'statement: if the next instruction consumes the result it
+                    'folds into an assignment / argument / condition; otherwise
+                    'the deferred call is emitted as a statement (see the decode
+                    'loop's fold/flush of NVPendingCall).
                     NVReg(0) = pname & "(" & uargs & ")"
-                    NativeProcessInst = ind & "Call " & pname & "(" & uargs & ")" & vbCrLf
+                    NVPendingCall = "Call " & pname & "(" & uargs & ")"
                     Exit Function
                 End If
                 'call <reg> -> a runtime helper previously cached into the register
@@ -1185,6 +1205,54 @@ Private Function NativeRegVal(ByVal idx As Long) As String
     If idx >= 0 And idx <= 7 Then
         If Len(NVReg(idx)) > 0 Then NativeRegVal = NVReg(idx) Else NativeRegVal = NativeRegName(idx)
     End If
+End Function
+
+Private Function NativeEaxUse(inst As CInstruction) As Long
+    'How this instruction uses eax (the previous call's result):
+    '  1 = reads eax as a source  -> a deferred call folds into this instruction
+    '  2 = clobbers eax / control-flow boundary -> emit the deferred call now
+    '  0 = does not touch eax      -> keep the call deferred
+    'Unknown opcodes fall through to 0 so a deferred call is never lost early - it
+    'is emitted at the next boundary or the end of the procedure instead.
+    Dim cls As Long, dump As String, n As Long, i As Long, op As Long
+    Dim modrm As Long, md As Long, reg As Long, rm As Long
+    On Error GoTo none0
+    cls = inst.cmdType And C_TYPEMASK
+    If cls = C_CAL Or cls = C_JMP Or cls = C_JMC Or cls = C_RET Then NativeEaxUse = 2: Exit Function
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If n < 1 Then Exit Function
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    Select Case op
+        Case &H50: NativeEaxUse = 1: Exit Function          'push eax (reads)
+        Case &H58: NativeEaxUse = 2: Exit Function          'pop eax (clobbers)
+        Case &HB8: NativeEaxUse = 2: Exit Function          'mov eax, imm32
+        Case &HA1: NativeEaxUse = 2: Exit Function          'mov eax, [abs]
+        Case &H3D, &HA9: NativeEaxUse = 1: Exit Function     'cmp/test eax, imm (reads)
+    End Select
+    If n >= i + 2 Then
+        modrm = NativeDumpByte(dump, i + 1)
+        md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+        Select Case op
+            Case &H89                          'mov r/m, r (store reg)
+                If reg = 0 Then NativeEaxUse = 1: Exit Function          'eax is source
+                If md = 3 And rm = 0 Then NativeEaxUse = 2: Exit Function 'eax is dest
+            Case &H8B                          'mov r, r/m
+                If reg = 0 Then NativeEaxUse = 2: Exit Function          'eax is dest
+                If md = 3 And rm = 0 Then NativeEaxUse = 1: Exit Function 'eax is source
+            Case &H85, &H3B, &H39              'test/cmp involving a register
+                If reg = 0 Or (md = 3 And rm = 0) Then NativeEaxUse = 1: Exit Function
+            Case &H83, &H81                    'grp1 r/m, imm (cmp eax, imm reads)
+                If md = 3 And rm = 0 Then NativeEaxUse = 1: Exit Function
+            Case &H01, &H03, &H09, &H0B, &H21, &H23, &H29, &H2B, &H31, &H33
+                'alu op with eax as an operand: reads then clobbers eax, and we do
+                'not model the arithmetic - emit the call rather than fold it.
+                If reg = 0 Or (md = 3 And rm = 0) Then NativeEaxUse = 2: Exit Function
+        End Select
+    End If
+none0:
+    NativeEaxUse = 0
 End Function
 
 Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As Long) As String
