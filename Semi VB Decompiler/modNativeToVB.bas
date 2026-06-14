@@ -75,7 +75,10 @@ Private NVPendingArg As String     'value fstp'd into the outgoing argument area
 Private NVLastImm As String        'most recent pushed immediate (decoded)
 Private NVRegImport(7) As String   'register -> runtime helper cached into it
 Private NVPushImm() As String      'recent pushed immediates (call argument list)
+Private NVPushDisp() As Long       'for each pushed arg, the by-ref local displacement it addresses (0 = not by-ref)
 Private NVPushTop As Long
+Private NVLastPushDisp As Long     'set by NativePushOperand: by-ref local disp of the value just decoded (0 = none)
+Private NVVSlot As Collection      'variant stack slot (disp) -> last value stored (VT tag / string / expr)
 Private NVIndent As Long           'current block-indent level
 Private NVIfTarget() As Long       'addresses where open If blocks must close
 Private NVIfTop As Long
@@ -85,6 +88,7 @@ Private NVSkipLabels As Collection 'branch targets that belong to dropped error-
 Private NVReg(7) As String         'symbolic value currently held in each GP register (eax..edi)
 Private NVRegIsAddr(7) As Boolean  'True when a register holds &local (from LEA), for by-ref pushes
 Private NVRegAddr(7) As String     'the local name a register's LEA-address points to
+Private NVRegAddrDisp(7) As Long   'the local DISPLACEMENT a register's LEA-address points to (for variant resolution)
 Private NVRegIsMe(7) As Boolean    'True when a register holds an object pointer (this/Me or a module global)
 Private NVRegIsFormVt(7) As Boolean 'True when a register holds an object's vtable ([objPtr])
 Private NVRegObjType(7) As String  'object NAME a register's POINTER refers to (App/Screen/Clipboard, or a control like Form1.File1)
@@ -103,6 +107,10 @@ Private NVCmpIsTest As Boolean     'the pending compare came from TEST (zero-com
 Private NVCmpSet As Boolean        'a GP TEST/CMP condition hint is pending
 Private NVFpuChk As Boolean        'an FPU status-word check (fnstsw;test al,imm) is pending -> drop its Jcc
 Private NVPendingCall As String    'a "Call X()" deferred until we know if its result is used
+
+'Sentinel for a "missing optional argument" Variant (VT_ERROR / DISP_E_PARAMNOTFOUND),
+'used while reconstructing rtcMsgBox / rtcInputBox by-reference Variant argument lists.
+Private Const NV_MISSING As String = "<<MISSING>>"
 
 Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 '*****************************
@@ -145,13 +153,14 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVFpuChk = False
     NVPendingCall = ""
     ReDim NVFpu(31): NVFpuTop = 0
-    ReDim NVPushImm(31): NVPushTop = 0
+    ReDim NVPushImm(31): ReDim NVPushDisp(31): NVPushTop = 0: NVLastPushDisp = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
-    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": Next
+    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegAddrDisp(r) = 0: NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": Next
     Set NVLocal = New Collection
     Set NVLocalGuid = New Collection
     Set NVStrLits = New Collection
+    Set NVVSlot = New Collection
     Set NVSkipLabels = New Collection
     Set NVLoopHdr = New Collection
     NVBase = NativeSolveControlBase(col)
@@ -494,8 +503,9 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             'Record the pushed value (immediate / string literal / local / reg)
             'as the next call argument, and as a single-value candidate.
             Dim pv As String
+            NVLastPushDisp = 0
             pv = NativePushOperand(inst)
-            If Len(pv) > 0 Then NVLastImm = pv: NativePushImm pv
+            If Len(pv) > 0 Then NVLastImm = pv: NativePushImm pv: NativeRecordPushDisp NVLastPushDisp
             Exit Function
 
         Case C_CMD
@@ -506,13 +516,11 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 Call NativeTrackReg(inst)
                 Exit Function
             End If
-            'mov [mem], <imm32> where the immediate is a pointer to a string
-            'constant -> remember the literal (e.g. for MsgBox arguments).
-            If mn = "MOV" Then
-                Dim slit As String
-                slit = NativeMovStringLit(inst)
-                If Len(slit) > 0 Then NVStrLits.Add slit
-            End If
+            'mov [local], imm32 (opcode C7): record the value into the Variant-slot
+            'map so a Variant built in this slot (a string-literal data field, or a
+            'VT tag) can be read back when its address is passed by reference to
+            'MsgBox / InputBox.
+            If mn = "MOV" Then NativeTrackVariantStore inst
             'mov reg,[IAT] (opcode 8B) caches a runtime helper into a register.
             If mn = "MOV" And Left$(UCase$(Replace(inst.dump, " ", "")), 2) = "8B" Then
                 Dim destReg As String
@@ -615,6 +623,39 @@ Private Function NativeGetLocalExpr(ByVal disp As Long) As String
     On Error Resume Next
     NativeGetLocalExpr = NVLocal("L" & disp)
     If Len(NativeGetLocalExpr) = 0 Then NativeGetLocalExpr = "var_" & Hex$(Abs(disp))
+End Function
+
+Private Sub NativeSetVSlot(ByVal disp As Long, ByVal v As String)
+    'Record the last value written to a 4-byte stack slot, so a Variant built in
+    'that slot (a VT tag field plus a data field 8 bytes higher) can be read back
+    'when its address is passed by reference to MsgBox / InputBox.
+    Dim k As String
+    k = "S" & disp
+    On Error Resume Next
+    NVVSlot.Remove k
+    On Error GoTo 0
+    NVVSlot.Add v, k
+End Sub
+
+Private Function NativeGetVSlot(ByVal disp As Long) As String
+    On Error Resume Next
+    NativeGetVSlot = NVVSlot("S" & disp)
+End Function
+
+Private Function NativeVariantVal(ByVal baseDisp As Long) As String
+    'Resolve a Variant whose VT field is at baseDisp (its data field is 8 bytes
+    'higher in memory, i.e. at baseDisp + 8).  Returns the held string / value, the
+    'NV_MISSING sentinel for an omitted optional argument (VT_ERROR), or the bare
+    'local name when the slot was never recognised as a Variant.
+    Dim vt As String, dataV As String
+    vt = NativeGetVSlot(baseDisp)
+    If vt = "10" Then NativeVariantVal = NV_MISSING: Exit Function   'VT_ERROR -> missing optional
+    dataV = NativeGetVSlot(baseDisp + 8)
+    If Len(dataV) > 0 Then
+        NativeVariantVal = dataV
+    Else
+        NativeVariantVal = "var_" & Hex$(Abs(baseDisp))
+    End If
 End Function
 
 Private Sub NativeSetLocalGuid(ByVal disp As Long, ByVal guid As String)
@@ -781,6 +822,19 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             adst = NativeArgPop(): asrc = NativeArgPop()
             If Len(asrc) = 0 Then asrc = adst
             NVReg(0) = asrc: NVPushTop = 0: NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaVarDup") > 0
+            '__vbaVarDup(dest /*ecx*/, src /*edx*/) duplicates a Variant.  VB6 uses
+            'it to copy a freshly built BSTR/literal Variant into the by-reference
+            'argument slot of an MsgBox / InputBox call, so propagate the tracked
+            'slot values dest <- src (both the VT field and the data field 8 bytes
+            'higher) for later argument reconstruction.
+            If NVRegIsAddr(1) And NVRegIsAddr(2) Then
+                Dim vdDest As Long, vdSrc As Long
+                vdDest = NVRegAddrDisp(1): vdSrc = NVRegAddrDisp(2)
+                NativeSetVSlot vdDest, NativeGetVSlot(vdSrc)
+                NativeSetVSlot vdDest + 8, NativeGetVSlot(vdSrc + 8)
+            End If
+            NVPushTop = 0: NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrMove") > 0, InStr(nm, "__vbaStrCopy") > 0, _
              InStr(nm, "__vbaVarMove") > 0, InStr(nm, "__vbaVarCopy") > 0, _
              InStr(nm, "__vbaStrVarMove") > 0
@@ -799,9 +853,24 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             NVPushTop = 0: NativeRuntimeCall = "": Exit Function       'silent
     End Select
 
-    'MsgBox (statement; string-literal args)
+    'MsgBox / InputBox: arguments are passed as by-reference Variant pointers
+    '(lea reg,[ebp-X]; push reg).  Resolve each pointer to the Variant it built
+    'earlier (a string literal, an expression, or a missing optional) rather than
+    'showing the raw temporary local.
     If InStr(nm, "rtcMsgBox") > 0 Or InStr(UCase$(nm), "MSGBOX") > 0 Then
-        NativeRuntimeCall = "MsgBox " & NativeStrLitArgs(): NVPushTop = 0: Exit Function
+        'Emitted directly as a statement: MsgBox is normally used in statement form,
+        'and its result is followed by VB's Variant cleanup (lea eax,[..]; push eax),
+        'which the deferred-call fold would mistake for the result being consumed.
+        Dim mbArgs As String
+        mbArgs = NativeVariantArgList(True)
+        If Len(mbArgs) > 0 Then NativeRuntimeCall = "MsgBox " & mbArgs Else NativeRuntimeCall = "MsgBox"
+        NVPushTop = 0: Exit Function
+    End If
+    If InStr(nm, "rtcInputBox") > 0 Or InStr(UCase$(nm), "INPUTBOX") > 0 Then
+        'Value-returning: the result is normally assigned (var = InputBox(...)).
+        NVReg(0) = "InputBox(" & NativeVariantArgList(False) & ")"
+        NVPendingCall = "Call " & NVReg(0)
+        NativeRuntimeCall = "": Exit Function
     End If
     If InStr(UCase$(nm), "RGB") > 0 Then
         'Result feeds a property Let; keep it in the pending-value channel so it
@@ -1237,6 +1306,7 @@ Private Function NativePushOperand(inst As CInstruction) As String
             'show the local itself rather than its (often 0/stale) value.
             If NVRegIsAddr(op - &H50) Then
                 NativePushOperand = NVRegAddr(op - &H50)
+                NVLastPushDisp = NVRegAddrDisp(op - &H50)   'by-ref local -> Variant resolution
             Else
                 NativePushOperand = NVReg(op - &H50)
             End If
@@ -1272,7 +1342,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
             If md = 3 Then
                 NVReg(reg) = NVReg(rm)
-                NVRegIsAddr(reg) = NVRegIsAddr(rm): NVRegAddr(reg) = NVRegAddr(rm)   'address propagates on reg->reg
+                NVRegIsAddr(reg) = NVRegIsAddr(rm): NVRegAddr(reg) = NVRegAddr(rm): NVRegAddrDisp(reg) = NVRegAddrDisp(rm)   'address propagates on reg->reg
                 NVRegIsMe(reg) = NVRegIsMe(rm): NVRegIsFormVt(reg) = NVRegIsFormVt(rm)
                 NVRegObjType(reg) = NVRegObjType(rm): NVRegObjVt(reg) = NVRegObjVt(rm)
                 NVRegObjGuid(reg) = NVRegObjGuid(rm): NVRegObjVtGuid(reg) = NVRegObjVtGuid(rm)
@@ -1315,7 +1385,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 'reference - shows the local, not its (often 0/stale) value.
                 If Not isAbs And disp < 0 Then
                     NVReg(reg) = NativeGetLocalExpr(disp)
-                    NVRegIsAddr(reg) = True: NVRegAddr(reg) = "var_" & Hex$(Abs(disp))
+                    NVRegIsAddr(reg) = True: NVRegAddr(reg) = "var_" & Hex$(Abs(disp)): NVRegAddrDisp(reg) = disp
                 Else
                     NVReg(reg) = "": NVRegIsAddr(reg) = False
                 End If
@@ -1327,12 +1397,16 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
             If md = 3 Then
                 NVReg(rm) = NVReg(reg)
-                NVRegIsAddr(rm) = NVRegIsAddr(reg): NVRegAddr(rm) = NVRegAddr(reg)
+                NVRegIsAddr(rm) = NVRegIsAddr(reg): NVRegAddr(rm) = NVRegAddr(reg): NVRegAddrDisp(rm) = NVRegAddrDisp(reg)
                 NVRegIsMe(rm) = NVRegIsMe(reg): NVRegIsFormVt(rm) = NVRegIsFormVt(reg)
                 NVRegObjType(rm) = NVRegObjType(reg): NVRegObjVt(rm) = NVRegObjVt(reg)
                 NVRegObjGuid(rm) = NVRegObjGuid(reg): NVRegObjVtGuid(rm) = NVRegObjVtGuid(reg)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then
+                    'Record the register's value against the slot (a Variant data or
+                    'VT field filled from a register, e.g. `mov [ebp-X], esi` with
+                    'esi = 0xA for a missing optional argument).
+                    NativeSetVSlot disp, NVReg(reg)
                     'A stored call result (expression containing a call) is worth
                     'surfacing as a real assignment; bind the local to its name so
                     'later uses reference the variable rather than re-expanding.
@@ -1369,6 +1443,17 @@ Private Sub NativePushImm(ByVal s As String)
     NVPushTop = NVPushTop + 1
 End Sub
 
+Private Sub NativeRecordPushDisp(ByVal disp As Long)
+    'Tag the most-recently pushed argument (index NVPushTop-1) with the by-reference
+    'local displacement it addresses, so MsgBox/InputBox can resolve the Variant the
+    'pointer refers to.  Kept parallel to NVPushImm.
+    Dim k As Long
+    k = NVPushTop - 1
+    If k < 0 Then Exit Sub
+    If k > UBound(NVPushDisp) Then ReDim Preserve NVPushDisp(k + 16)
+    NVPushDisp(k) = disp
+End Sub
+
 Private Function NativeArgsN(ByVal nArgs As Long) As String
     'The last nArgs pushed values, in source order (last pushed = first arg).
     Dim k As Long, s As String, base As Long
@@ -1386,6 +1471,43 @@ End Function
 Private Function NativeArgList() As String
     'All pending pushed values, in source order (drains the stack).
     NativeArgList = NativeArgsN(NVPushTop)
+End Function
+
+Private Function NativeVariantArgList(ByVal trimZero As Boolean) As String
+    'Reconstruct a MsgBox / InputBox argument list.  Each pending pushed argument is
+    'either a by-reference Variant pointer (resolved to the value the Variant holds)
+    'or a direct immediate (e.g. the Buttons value).  Trailing missing optionals -
+    'and, when trimZero is set (MsgBox), a trailing Buttons value of 0 - are dropped;
+    'an omitted interior optional renders as an empty slot, e.g. InputBox(a, , c).
+    Dim k As Long, cnt As Long, vals() As String, idx As Long, last As Long, s As String
+    cnt = NVPushTop
+    If cnt < 1 Then NVPushTop = 0: Exit Function
+    ReDim vals(cnt - 1)
+    idx = 0
+    For k = NVPushTop - 1 To 0 Step -1              'last pushed = first argument
+        If NVPushDisp(k) < 0 Then
+            vals(idx) = NativeVariantVal(NVPushDisp(k))
+        Else
+            vals(idx) = NVPushImm(k)
+        End If
+        idx = idx + 1
+    Next
+    NVPushTop = 0
+    last = idx - 1
+    Do While last >= 0
+        If vals(last) = NV_MISSING Then
+            last = last - 1
+        ElseIf trimZero And vals(last) = "0" Then
+            last = last - 1
+        Else
+            Exit Do
+        End If
+    Loop
+    For k = 0 To last
+        If k > 0 Then s = s & ", "
+        If vals(k) <> NV_MISSING Then s = s & vals(k)
+    Next
+    NativeVariantArgList = s
 End Function
 
 Private Function NativeArgPop() As String
@@ -1781,6 +1903,36 @@ Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
         NVCmpL = L: NVCmpR = R: NVCmpIsTest = isTst: NVCmpSet = True
     End If
 done3:
+End Sub
+
+Private Sub NativeTrackVariantStore(inst As CInstruction)
+    'mov [local], imm32 (opcode C7 /0): record the stored value against its stack
+    'slot.  A string-constant pointer becomes the quoted literal (a Variant's BSTR
+    'data field); any other immediate is kept as a number (e.g. a VT tag such as 8
+    'for VT_BSTR).  Only local slots (disp < 0) are tracked.
+    Dim dump As String, op As Long, n As Long, i As Long, imm As Long, disp As Long, isAbs As Boolean, slit As String
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If n < 5 Then Exit Sub
+    i = 0
+    Do While i < n
+        op = NativeDumpByte(dump, i)
+        Select Case op
+            Case &H66, &H67, &HF0, &HF2, &HF3, &H26, &H2E, &H36, &H3E, &H64, &H65: i = i + 1
+            Case Else: Exit Do
+        End Select
+    Loop
+    If NativeDumpByte(dump, i) <> &HC7 Then Exit Sub
+    If Not NativeDecodeDisp(dump, disp, isAbs) Then Exit Sub
+    If isAbs Or disp >= 0 Then Exit Sub
+    imm = NativeDumpInt32(dump, n - 4)            'imm32 is the trailing dword
+    If imm >= OptHeader.ImageBase Then slit = NativeStringAt(imm)
+    If Len(slit) > 0 Then
+        NativeSetVSlot disp, slit
+    Else
+        NativeSetVSlot disp, NativeNumFromBits(imm)
+    End If
 End Sub
 
 Private Function NativeMovStringLit(inst As CInstruction) As String
