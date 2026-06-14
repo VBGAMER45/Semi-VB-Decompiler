@@ -205,8 +205,9 @@ Option Explicit
 
 Private mScanning As Boolean       ' a scan is running
 Private mCancel As Boolean         ' user asked to stop
-Private mScanned As Long           ' candidate files examined
+Private mScanned As Long           ' files enumerated (all types)
 Private mFound As Long             ' matches added to the list
+Private mWantExt As String         ' wanted extensions, e.g. "|exe|dll|ocx|" — built once per scan
 
 Private Sub Form_Load()
     ' List view columns.
@@ -287,6 +288,14 @@ Private Sub cmdScan_Click()
     mCancel = False
     mScanned = 0
     mFound = 0
+
+    ' Build the wanted-extension filter once from the checkboxes.
+    mWantExt = ""
+    If chkExe.Value = vbChecked Then mWantExt = mWantExt & "|exe"
+    If chkDll.Value = vbChecked Then mWantExt = mWantExt & "|dll"
+    If chkOcx.Value = vbChecked Then mWantExt = mWantExt & "|ocx"
+    mWantExt = mWantExt & "|"
+
     lvResults.ListItems.Clear
     cmdScan.Caption = "Stop"
     SetControls False
@@ -344,7 +353,7 @@ Private Sub ScanFolder(ByVal sFolder As String, ByVal fso As Object)
 
     For Each fil In fld.Files
         If mCancel Then Exit Sub
-        ConsiderFile fil.Path
+        If WantedFile(fil.Name) Then ConsiderFile fil.Path
         mScanned = mScanned + 1
         If (mScanned Mod 20) = 0 Then
             lblStatus.Caption = "Scanning... " & FoundSummary()
@@ -358,20 +367,22 @@ Private Sub ScanFolder(ByVal sFolder As String, ByVal fso As Object)
     Next
 End Sub
 
-' Apply the type filter, identify the file, apply the runtime filter,
-' and add a match to the list.
+' True if the file's extension is one of the checked types. Cheap test
+' against the prebuilt mWantExt string so the checkboxes aren't re-read per file.
+Private Function WantedFile(ByVal sName As String) As Boolean
+    Dim dotPos As Long
+    dotPos = InStrRev(sName, ".")
+    If dotPos = 0 Then Exit Function   ' no extension
+    WantedFile = (InStr(mWantExt, "|" & LCase$(Mid$(sName, dotPos + 1)) & "|") > 0)
+End Function
+
+' Identify the file, apply the runtime filter, and add a match to the list.
+' The extension is already known to be wanted (see WantedFile).
 Private Sub ConsiderFile(ByVal sPath As String)
     Dim ext As String, dotPos As Long
     dotPos = InStrRev(sPath, ".")
     If dotPos = 0 Then Exit Sub
     ext = LCase$(Mid$(sPath, dotPos + 1))
-
-    Select Case ext
-        Case "exe": If chkExe.Value <> vbChecked Then Exit Sub
-        Case "dll": If chkDll.Value <> vbChecked Then Exit Sub
-        Case "ocx": If chkOcx.Value <> vbChecked Then Exit Sub
-        Case Else: Exit Sub
-    End Select
 
     Dim kind As Long
     kind = modPE.IdentifyFile(sPath)
