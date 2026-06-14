@@ -85,6 +85,7 @@ Private NVReg(7) As String         'symbolic value currently held in each GP reg
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
+Private NVProcEndWord As String    'closing keyword for this proc: "Sub" / "Function" / "Property"
 
 Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 '*****************************
@@ -120,6 +121,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 
     'Reset per-proc state
     NVForm = NativeFormOf(addr)
+    NVProcEndWord = "Sub"
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
     ReDim NVFpu(31): NVFpuTop = 0
@@ -173,7 +175,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Next
 
     NativeCloseIfs output, &H7FFFFFFF
-    output = output & "End Sub" & vbCrLf
+    output = output & "End " & NVProcEndWord & vbCrLf
     DecompileNativeProcToVB = output
     Exit Function
 fail:
@@ -1209,23 +1211,41 @@ Private Function NativeStrLitArgs() As String
     NativeStrLitArgs = s
 End Function
 
+Private Function NativeProcMatchIdx(ByVal addr As Long) As Long
+    'Index of the nearest named SubNamelist entry at or just before this entry
+    'is (the named proc list and the clickable list can differ by a few prologue
+    'bytes), or -1 if none.  Shared by NativeProcName and NativeProcHeader so the
+    'name, kind and visibility all come from the same matched entry.
+    Dim i As Long, d As Long, bestDelta As Long, best As Long
+    On Error Resume Next
+    bestDelta = 99999: best = -1
+    For i = 0 To UBound(SubNamelist)
+        d = addr - SubNamelist(i).offset
+        If d >= 0 And d <= 24 And d < bestDelta Then bestDelta = d: best = i
+    Next
+    NativeProcMatchIdx = best
+End Function
+
 Private Function NativeProcHeader(ByVal addr As Long) As String
-    Dim nm As String
+    Dim nm As String, idx As Long, vis As String, kindStr As String
     nm = NativeProcName(addr)
     If InStr(nm, "(") = 0 Then nm = nm & "()"
-    NativeProcHeader = "Private Sub " & nm & "   '" & Hex$(addr)
+    vis = "Private": kindStr = "Sub": NVProcEndWord = "Sub"
+    idx = NativeProcMatchIdx(addr)
+    If idx >= 0 Then
+        If Len(SubNamelist(idx).visibility) > 0 Then vis = SubNamelist(idx).visibility
+        If Len(SubNamelist(idx).kind) > 0 Then
+            kindStr = SubNamelist(idx).kind          '"Function" / "Property Get" / ...
+            If InStr(kindStr, "Property") > 0 Then NVProcEndWord = "Property" Else NVProcEndWord = kindStr
+        End If
+    End If
+    NativeProcHeader = vis & " " & kindStr & " " & nm & "   '" & Hex$(addr)
 End Function
 
 Private Function NativeProcName(ByVal addr As Long) As String
-    'Match the nearest named procedure at or just before this entry (the named
-    'proc table and the clickable list can differ by a few prologue bytes).
-    Dim i As Long, nm As String, p As Long, d As Long, bestDelta As Long
-    On Error Resume Next
-    bestDelta = 99999
-    For i = 0 To UBound(SubNamelist)
-        d = addr - SubNamelist(i).offset
-        If d >= 0 And d <= 24 And d < bestDelta Then bestDelta = d: nm = SubNamelist(i).strName
-    Next
+    Dim nm As String, p As Long, idx As Long
+    idx = NativeProcMatchIdx(addr)
+    If idx >= 0 Then nm = SubNamelist(idx).strName
     If Len(nm) = 0 Then nm = "proc_" & Hex$(addr)
     p = InStr(nm, ".")
     If p > 0 Then nm = Mid$(nm, p + 1)

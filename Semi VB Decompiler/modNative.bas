@@ -301,19 +301,38 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
             Next b
         Next a
 
+        'Visibility: named members of a public-interface object (class /
+        'usercontrol - ObjectType bit 0x100000) are Public by VB6 default;
+        'everything else (forms, modules) defaults to Private.
+        Dim vis As String
+        If (gObject(oi).ObjectType And &H100000) <> 0 Then vis = "Public" Else vis = "Private"
+
         'Read the names array (index -> name-string VA) and pair with addresses.
         ReDim namesVA(pc - 1)
         Seek F, gObject(oi).aProcNamesArray + 1 - OptHeader.ImageBase
         Get F, , namesVA
+        Dim prevName As String, prevPos As Long, prevIdx As Long, pos As Long
+        prevName = "": prevPos = -1: prevIdx = -2
         For i = 0 To pc - 1
+            nm = ""
             If namesVA(i) <> 0 And (namesVA(i) - OptHeader.ImageBase) > 0 Then
                 Seek F, namesVA(i) + 1 - OptHeader.ImageBase
                 nm = GetUntilNull(F)
-                If Len(nm) > 0 Then
-                    SubNamelist(UBound(SubNamelist)).strName = gObjectNameArray(oi) & "." & nm
-                    SubNamelist(UBound(SubNamelist)).offset = addrs(i)
-                    ReDim Preserve SubNamelist(UBound(SubNamelist) + 1)
+            End If
+            If Len(nm) > 0 Then
+                pos = UBound(SubNamelist)
+                SubNamelist(pos).strName = gObjectNameArray(oi) & "." & nm
+                SubNamelist(pos).offset = addrs(i)
+                SubNamelist(pos).visibility = vis
+                SubNamelist(pos).kind = ""                  'default -> Sub
+                'A read/write property is stored as the SAME name at two adjacent
+                'indices: the first is the Get accessor, the second the Let/Set.
+                If i = prevIdx + 1 And nm = prevName And prevPos >= 0 Then
+                    SubNamelist(prevPos).kind = "Property Get"
+                    SubNamelist(pos).kind = "Property Let"
                 End If
+                ReDim Preserve SubNamelist(UBound(SubNamelist) + 1)
+                prevName = nm: prevPos = pos: prevIdx = i
             End If
         Next i
 nextObj:
