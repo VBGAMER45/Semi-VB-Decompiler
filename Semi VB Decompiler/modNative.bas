@@ -21,6 +21,25 @@ Global gNativeProcArray() As NativeProcType
 Global NativeShowOffsets As Boolean
 Global NativeShowHexInformation As Boolean
 
+'Event-handler name resolution (see LinkNativeEventNames): each event-link slot's
+'raw link value + resolved proc address, and each control event's name + the
+'tEventPointer struct address.  An event maps to the slot whose link value equals
+'the event's tEventPointer + 8 (the E9 thunk sits at +8 inside the struct).
+Private Type tEvSlot
+    obj As String
+    lnRaw As Long      'raw event-link array value (points to the slot's E9 thunk)
+    addr As Long       'resolved procedure VA
+End Type
+Private Type tEvName
+    obj As String
+    nm As String
+    taPtr As Long      'tEventPointer struct address (taPtr + 8 = the slot's lnRaw)
+End Type
+Private gEvSlot() As tEvSlot
+Private gEvSlotN As Long
+Private gEvName() As tEvName
+Private gEvNameN As Long
+
 'Decompiled code, grouped by owning object (form/module/class), built once at
 'load so the main tree can show it inline.  Keyed "OBJ_<UPPER object name>".
 Public gNativeCodeCache As Collection
@@ -347,6 +366,69 @@ Private Function KeyExists(ByRef col As Collection, ByVal key As String) As Bool
     KeyExists = (Err.Number = 0)
     Err.Clear
 End Function
+
+'---------------------------------------------------------------------------
+' Native event-handler name resolution (Form_Load, Timer1_Timer, ...)
+'
+' Form/control event handlers are NOT in aProcNamesArray, so LinkNativeProcNames
+' cannot name them.  Their real ADDRESSES are discovered by the native event-link
+' block (E9 thunks -> proc VA, in vtable SLOT order); their NAMES come from the
+' event tables (getEventComplete -> "Timer1_Timer"), keyed by an aEvent ordering
+' value.  Sorting events by aEvent reproduces the slot order, so: among the
+' event-link slots NOT already named by aProcNamesArray (the public methods), the
+' first E (in slot order) are the events - assign the aEvent-sorted names to them.
+'(tEvSlot/tEvName types and the gEv* arrays are declared at the top of the module.)
+'---------------------------------------------------------------------------
+Public Sub ResetEventLists()
+    ReDim gEvSlot(63): gEvSlotN = 0
+    ReDim gEvName(63): gEvNameN = 0
+End Sub
+
+Public Sub AddEventSlot(ByVal obj As String, ByVal lnRaw As Long, ByVal addr As Long)
+    'Called from the native event-link block for each slot (lnRaw = the raw link
+    'array value, addr = the resolved procedure VA the thunk jumps to).
+    On Error Resume Next
+    If gEvSlotN > UBound(gEvSlot) Then ReDim Preserve gEvSlot(gEvSlotN + 64)
+    gEvSlot(gEvSlotN).obj = obj
+    gEvSlot(gEvSlotN).lnRaw = lnRaw
+    gEvSlot(gEvSlotN).addr = addr
+    gEvSlotN = gEvSlotN + 1
+End Sub
+
+Public Sub AddEventName(ByVal obj As String, ByVal nm As String, ByVal taPtr As Long)
+    'Called from the per-control event block (taPtr = the tEventPointer address).
+    On Error Resume Next
+    If gEvNameN > UBound(gEvName) Then ReDim Preserve gEvName(gEvNameN + 64)
+    gEvName(gEvNameN).obj = obj
+    gEvName(gEvNameN).nm = nm
+    gEvName(gEvNameN).taPtr = taPtr
+    gEvNameN = gEvNameN + 1
+End Sub
+
+Public Sub LinkNativeEventNames()
+    'Run AFTER LinkNativeProcNames.  Each control event's tEventPointer struct holds
+    'its own E9 thunk at offset +8, and the event-link array entry for that slot is
+    'exactly that thunk address (lnRaw).  So an event handler maps to the native
+    'slot whose link value equals the event's tEventPointer + 8 - a direct, exact
+    'correlation (no heuristics).  Helper/private methods occupy the slots that no
+    'event points at, and stay unnamed.
+    On Error GoTo done
+    Dim e As Long, s As Long, pos As Long
+    For e = 0 To gEvNameN - 1
+        For s = 0 To gEvSlotN - 1
+            If gEvSlot(s).obj = gEvName(e).obj And gEvSlot(s).lnRaw = gEvName(e).taPtr + 8 Then
+                pos = UBound(SubNamelist)
+                SubNamelist(pos).strName = gEvName(e).obj & "." & gEvName(e).nm
+                SubNamelist(pos).offset = gEvSlot(s).addr
+                SubNamelist(pos).visibility = "Private"
+                SubNamelist(pos).kind = ""
+                ReDim Preserve SubNamelist(UBound(SubNamelist) + 1)
+                Exit For
+            End If
+        Next s
+    Next e
+done:
+End Sub
 
 Public Sub Decode(ByVal Filename As String)
 '*****************************

@@ -1761,6 +1761,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
        
         
         Dim loopC As Integer
+        Call modNative.ResetEventLists       'collect native event slots/names for handler naming
         For loopC = 0 To UBound(gObject)
         'Get ObjectName
         Seek F, gObject(loopC).aObjectName + 1 - OptHeader.ImageBase
@@ -1873,6 +1874,9 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                                         On Error Resume Next
                                         gFormVtable.Add currPos, gObjectNameArray(loopC) & ":" & i
                                         On Error GoTo 0
+                                        'Record (raw link value, resolved VA) so a handler name can be
+                                        'attached later by matching tEventPointer + 8 == the link value.
+                                        Call modNative.AddEventSlot(gObjectNameArray(loopC), lNative(i), currPos)
 
                                         gNativeProcArray(UBound(gNativeProcArray)).sName = gObjectNameArray(loopC) & ".proc_" & Hex$(currPos)
                                         gNativeProcArray(UBound(gNativeProcArray)).offset = currPos
@@ -1950,21 +1954,27 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                            'Debug.Print "Event #: " & k
                            'Debug.Print "Max Events: " & UBound(taEventPointer)
        
+                            Dim evHandlerName As String
                             If GetEventNumber(strGuid, CInt(k)) = -1 Then
-                             SubNamelist(UBound(SubNamelist)).strName = gObjectNameArray(loopC) & "." & ControlName & "_Event" & CInt(k)
+                             evHandlerName = ControlName & "_Event" & CInt(k)
+                             SubNamelist(UBound(SubNamelist)).strName = gObjectNameArray(loopC) & "." & evHandlerName
                              SubNamelist(UBound(SubNamelist)).offset = pointerAevent.aEvent
-                                                      
-                                gProcedureList(UBound(gProcedureList)).strProcedureName = ControlName & "_Event" & CInt(k)
+
+                                gProcedureList(UBound(gProcedureList)).strProcedureName = evHandlerName
                                 gProcedureList(UBound(gProcedureList)).strParent = gObjectNameArray(loopC)
                                 ReDim Preserve gProcedureList(UBound(gProcedureList) + 1)
                             Else
-                                SubNamelist(UBound(SubNamelist)).strName = gObjectNameArray(loopC) & "." & ControlName & "_" & getEventComplete(App.Path & "\data\VB6.OLB", strGuid, GetEventNumber(strGuid, CInt(k)))
+                                evHandlerName = ControlName & "_" & getEventComplete(App.Path & "\data\VB6.OLB", strGuid, GetEventNumber(strGuid, CInt(k)))
+                                SubNamelist(UBound(SubNamelist)).strName = gObjectNameArray(loopC) & "." & evHandlerName
                                 SubNamelist(UBound(SubNamelist)).offset = pointerAevent.aEvent
-                                gProcedureList(UBound(gProcedureList)).strProcedureName = ControlName & "_" & getEventComplete(App.Path & "\data\VB6.OLB", strGuid, GetEventNumber(strGuid, CInt(k)))
+                                gProcedureList(UBound(gProcedureList)).strProcedureName = evHandlerName
                                 gProcedureList(UBound(gProcedureList)).strParent = gObjectNameArray(loopC)
                                 ReDim Preserve gProcedureList(UBound(gProcedureList) + 1)
-                            
+
                             End If
+                            'Record (name, tEventPointer address) so the handler name can be matched
+                            'to its native slot (tEventPointer + 8 == the slot's raw link value).
+                            Call modNative.AddEventName(gObjectNameArray(loopC), evHandlerName, taEventPointer(k))
                           ' MsgBox gObjectNameArray(loopC) & "." & ControlName & "_" & getEventComplete(App.Path & "\data\VB6.OLB", strGuid, GetEventNumber(strGuid, CInt(k)))
                            ' Dim k234 As Byte
                            ' For k234 = 0 To 40
@@ -2040,6 +2050,9 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
             'procedure names (from each object's aProcNamesArray) by pairing the
             'name index with the i-th procedure address in ascending order.
             Call modNative.LinkNativeProcNames(F)
+            'Then attach form/control event-handler names (Form_Load, Timer1_Timer,
+            '...) - not in aProcNamesArray - to their event-link slot addresses.
+            Call modNative.LinkNativeEventNames
         End If
 
         'Main Loop to Get all Form's Properties
