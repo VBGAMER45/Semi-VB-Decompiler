@@ -911,6 +911,61 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
              InStr(nm, "__vbaGenerateBoundsError") > 0, _
              InStr(nm, "__vbaExceptHandler") > 0, InStr(nm, "__vbaSetSystemError") > 0
             NVPushTop = 0: NativeRuntimeCall = "": Exit Function       'silent
+
+        '--- Array intrinsics ---
+        Case InStr(nm, "__vbaUbound") > 0, InStr(nm, "__vbaLbound") > 0
+            'UBound/LBound(array[, dim]).  Value-returning -> folds into eax.  Args
+            'in source order are [dim, arrayPtr]; the array is the deepest push.
+            Dim ubA() As String, ubN As Long, ubArr As String, ubDim As String
+            NativeArgsSnapshot ubA, ubN
+            If ubN >= 1 Then
+                ubArr = ubA(ubN - 1)
+                If ubN >= 2 Then If ubA(0) <> "1" And Len(ubA(0)) > 0 Then ubDim = ", " & ubA(0)
+                NVReg(0) = IIf(InStr(nm, "Ubound") > 0, "UBound", "LBound") & "(" & ubArr & ubDim & ")"
+            End If
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaRedimPreserve") > 0, InStr(nm, "__vbaRedim") > 0
+            'ReDim [Preserve] array(lb To ub, ...).  Args: [elemFlags, elemSize,
+            'arrayPtr, saFlags, nDims, (ub,lb) per dimension].
+            Dim rdA() As String, rdN As Long
+            NativeArgsSnapshot rdA, rdN
+            NativeRuntimeCall = NativeRedimStmt(rdA, rdN, (InStr(nm, "Preserve") > 0))
+            Exit Function
+        Case InStr(nm, "__vbaEraseKeepData") > 0
+            'Internal bookkeeping emitted just before a ReDim Preserve - drop.
+            NVPushTop = 0: NativeRuntimeCall = "": Exit Function
+
+        '--- File I/O statements ---
+        Case InStr(nm, "__vbaFileOpen") > 0
+            'Open <path> For <mode> As #<n> [Len = <rl>].  Args (source order):
+            '[mode, reclen, filenum, pathname].
+            Dim foA() As String, foN As Long
+            NativeArgsSnapshot foA, foN
+            NativeRuntimeCall = NativeFileOpenStmt(foA, foN)
+            Exit Function
+        Case InStr(nm, "__vbaFileClose") > 0
+            Dim fcA() As String, fcN As Long
+            NativeArgsSnapshot fcA, fcN
+            If fcN >= 1 And Len(fcA(0)) > 0 Then NativeRuntimeCall = "Close #" & fcA(0) Else NativeRuntimeCall = "Close"
+            Exit Function
+        Case InStr(nm, "__vbaPutOwner") > 0, InStr(nm, "__vbaPut3") > 0, InStr(nm, "__vbaPut4") > 0
+            'Put #<filenum>, , <var>.  Args: [descriptor/size, var, filenum].
+            Dim ptA() As String, ptN As Long
+            NativeArgsSnapshot ptA, ptN
+            If ptN >= 3 Then NativeRuntimeCall = "Put #" & ptA(2) & ", , " & ptA(1)
+            Exit Function
+        Case InStr(nm, "__vbaGetOwner") > 0, InStr(nm, "__vbaGet3") > 0, InStr(nm, "__vbaGet4") > 0
+            'Get #<filenum>, , <var>.  Args: [descriptor/size, var, filenum].
+            Dim gtA() As String, gtN As Long
+            NativeArgsSnapshot gtA, gtN
+            If gtN >= 3 Then NativeRuntimeCall = "Get #" & gtA(2) & ", , " & gtA(1)
+            Exit Function
+        Case InStr(nm, "__vbaLineInputStr") > 0
+            'Line Input #<filenum>, <var>.  Args: [var, filenum].
+            Dim liA() As String, liN As Long
+            NativeArgsSnapshot liA, liN
+            If liN >= 2 Then NativeRuntimeCall = "Line Input #" & liA(1) & ", " & liA(0)
+            Exit Function
     End Select
 
     'MsgBox / InputBox: arguments are passed as by-reference Variant pointers
@@ -1531,6 +1586,79 @@ Private Sub NativeRecordPushDisp(ByVal disp As Long)
     If k > UBound(NVPushDisp) Then ReDim Preserve NVPushDisp(k + 16)
     NVPushDisp(k) = disp
 End Sub
+
+Private Sub NativeArgsSnapshot(ByRef a() As String, ByRef cnt As Long)
+    'Snapshot the pending pushed arguments in SOURCE order (last-pushed = arg 0)
+    'into a() and drain the stack.  Lets a runtime-helper handler index its args
+    'and reorder them into VB statement syntax (Open/Put/Get/ReDim/...).
+    Dim k As Long, idx As Long
+    cnt = NVPushTop
+    If cnt < 0 Then cnt = 0
+    ReDim a(IIf(cnt > 0, cnt - 1, 0))
+    idx = 0
+    For k = NVPushTop - 1 To 0 Step -1
+        a(idx) = NVPushImm(k): idx = idx + 1
+    Next
+    NVPushTop = 0
+End Sub
+
+Private Function NativeRedimStmt(ByRef a() As String, ByVal cnt As Long, ByVal bPreserve As Boolean) As String
+    'Build `ReDim [Preserve] arr(lb To ub, ...)` from a __vbaRedim arg snapshot:
+    'a() = [elemFlags, elemSize, arrayPtr, saFlags, nDims, (ub,lb) per dimension].
+    Dim arr As String, nd As Long, k As Long, bounds As String, ub As String, lb As String
+    If cnt < 7 Then
+        'Not enough args to parse the bound list - fall back to a visible call.
+        NativeRedimStmt = "ReDim " & IIf(bPreserve, "Preserve ", "") & "(" & NativeJoinArr(a, cnt) & ")"
+        Exit Function
+    End If
+    arr = a(2)
+    nd = Val(a(4))
+    If nd < 1 Then nd = 1
+    For k = 0 To nd - 1
+        If (6 + 2 * k) > (cnt - 1) Then Exit For       'ran out of bound pairs
+        ub = a(5 + 2 * k)
+        lb = a(6 + 2 * k)
+        If Len(bounds) > 0 Then bounds = bounds & ", "
+        bounds = bounds & lb & " To " & ub
+    Next
+    NativeRedimStmt = "ReDim " & IIf(bPreserve, "Preserve ", "") & arr & "(" & bounds & ")"
+End Function
+
+Private Function NativeFileOpenStmt(ByRef a() As String, ByVal cnt As Long) As String
+    'Build `Open <path> For <mode> As #<n> [Len = <rl>]` from a __vbaFileOpen arg
+    'snapshot: a() = [mode, reclen, filenum, pathname].
+    Dim rl As String, fn As String, pth As String, s As String
+    'Args (source order): [mode, reclen, filenum, pathname].  The pathname is the
+    'deepest push and is dropped when it is an unresolved value (e.g. a parameter),
+    'leaving 3 args - still render it with an <arg> placeholder for the path.
+    If cnt < 3 Then NativeFileOpenStmt = "Open " & NativeJoinArr(a, cnt): Exit Function
+    rl = a(1): fn = a(2)
+    If cnt >= 4 Then pth = a(3) Else pth = "<arg>"
+    s = "Open " & pth & " For " & NativeOpenMode(Val(a(0))) & " As #" & fn
+    If rl <> "-1" And Len(rl) > 0 Then s = s & " Len = " & rl
+    NativeFileOpenStmt = s
+End Function
+
+Private Function NativeOpenMode(ByVal m As Long) As String
+    'Decode the VB6 __vbaFileOpen mode bitmask to the Open ... For <mode> keyword.
+    Select Case True
+        Case (m And &H20) <> 0: NativeOpenMode = "Binary"
+        Case (m And &H4) <> 0: NativeOpenMode = "Random"
+        Case (m And &H8) <> 0: NativeOpenMode = "Append"
+        Case (m And &H2) <> 0: NativeOpenMode = "Output"
+        Case (m And &H1) <> 0: NativeOpenMode = "Input"
+        Case Else: NativeOpenMode = "Random"
+    End Select
+End Function
+
+Private Function NativeJoinArr(ByRef a() As String, ByVal cnt As Long) As String
+    Dim k As Long, s As String
+    For k = 0 To cnt - 1
+        If Len(s) > 0 Then s = s & ", "
+        s = s & a(k)
+    Next
+    NativeJoinArr = s
+End Function
 
 Private Function NativeArgsN(ByVal nArgs As Long) As String
     'The last nArgs pushed values, in source order (last pushed = first arg).
