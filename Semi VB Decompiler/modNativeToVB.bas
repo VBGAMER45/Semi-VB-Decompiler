@@ -524,7 +524,7 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             Exit Function
         Case InStr(nm, "__vbaStrCat") > 0
             aa = NativeArgPop(): bb = NativeArgPop()
-            NVReg(0) = "(" & aa & " & " & bb & ")": NativeRuntimeCall = "": Exit Function
+            NVReg(0) = NativeConcat(aa, bb): NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrToAnsi") > 0, InStr(nm, "__vbaStrToUnicode") > 0
             'Charset conversion: StrToAnsi(dst, src) returns the converted string
             'in eax.  For decompilation the value is just the source string, so
@@ -600,20 +600,51 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
 End Function
 
 Private Function NativeMoveAssign() As String
-    'A move/copy runtime helper stores eax into the local addressed by the most
-    'recent LEA.  Surface it as "var_X = <value>" when the value is meaningful
-    '(a call/expression), and leave the local's name in eax (the helpers return
-    'the moved value) so a following concat/use references it.
+    'A move/copy runtime helper stores a value into the local addressed by the
+    'most recent LEA.  Surface it as "var_X = <value>" when the value is worth
+    'showing (a call/concat, or a string literal), and leave the local's name in
+    'eax (the helpers return the moved value) so a following use references it.
+    'Source priority: eax (computed expressions), the FPU pending arg, then edx
+    '(the register-argument form used by StrCopy for `var = "literal"`).
     Dim dn As String, src As String
     src = NVReg(0)
-    If Len(src) = 0 And Len(NVPendingArg) > 0 Then src = NVPendingArg
-    If NVLastLeaSet And Len(src) > 0 And InStr(src, "(") > 0 Then
+    If Not NativeIsExprValue(src) And Len(NVPendingArg) > 0 Then src = NVPendingArg
+    If Not NativeIsExprValue(src) And NativeIsExprValue(NVReg(2)) Then src = NVReg(2)
+    If NVLastLeaSet And NativeIsExprValue(src) Then
         dn = "var_" & Hex$(Abs(NVLastLea))
         NativeMoveAssign = dn & " = " & src
         NativeSetLocalExpr NVLastLea, dn
         NVReg(0) = dn                       'the helper returns the moved value in eax
     End If
     NVLastLeaSet = False: NVPendingArg = "": NVPushTop = 0
+End Function
+
+Private Function NativeIsExprValue(ByVal s As String) As Boolean
+    'A value worth surfacing in an assignment: a call/concat (parenthesised), a
+    'string literal, or a local variable (incl. a plain copy).  Bare numbers /
+    'register names are treated as not worth it.
+    If Len(s) = 0 Then Exit Function
+    If InStr(s, "(") > 0 Then NativeIsExprValue = True: Exit Function
+    If Left$(s, 1) = Chr$(34) Then NativeIsExprValue = True: Exit Function
+    If Left$(s, 4) = "var_" Then NativeIsExprValue = True
+End Function
+
+Private Function NativeConcat(ByVal aa As String, ByVal bb As String) As String
+    'Build "a & b", dropping a null operand (VB pushes vbNullString as 0, which
+    'would otherwise render as the spurious `0 & "x"` / `"x" & 0`).  An untracked
+    '"<arg>" operand is kept - it stands for a real value we could not recover.
+    Dim a As Boolean, b As Boolean
+    a = (Len(aa) > 0 And aa <> "0")
+    b = (Len(bb) > 0 And bb <> "0")
+    If a And b Then
+        NativeConcat = "(" & aa & " & " & bb & ")"
+    ElseIf a Then
+        NativeConcat = aa
+    ElseIf b Then
+        NativeConcat = bb
+    Else
+        NativeConcat = Chr$(34) & Chr$(34)      'empty string ""
+    End If
 End Function
 
 Private Sub NativeRuntimeSyntax(ByVal nm As String, ByRef vbName As String, ByRef arity As Long, ByRef isStmt As Boolean)
