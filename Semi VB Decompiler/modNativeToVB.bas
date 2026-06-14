@@ -84,6 +84,8 @@ Private NVSkipLabels As Collection 'branch targets that belong to dropped error-
 Private NVReg(7) As String         'symbolic value currently held in each GP register (eax..edi)
 Private NVRegIsAddr(7) As Boolean  'True when a register holds &local (from LEA), for by-ref pushes
 Private NVRegAddr(7) As String     'the local name a register's LEA-address points to
+Private NVRegIsMe(7) As Boolean    'True when a register holds an object pointer (this/Me or a module global)
+Private NVRegIsFormVt(7) As Boolean 'True when a register holds an object's vtable ([objPtr])
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
@@ -127,6 +129,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         NVLastDisasmText = NVLastDisasmText & inst.offset & "  " & inst.dump & "  " & inst.command & vbCrLf
     Next
 
+
     'Reset per-proc state
     NVForm = NativeFormOf(addr)
     NVProcEndWord = "Sub"
@@ -138,7 +141,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     ReDim NVPushImm(31): NVPushTop = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
-    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": Next
+    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: Next
     Set NVLocal = New Collection
     Set NVStrLits = New Collection
     Set NVSkipLabels = New Collection
@@ -241,6 +244,34 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             ElseIf hasMem Then
                 'call [reg+disp] -> the object's own method (via its vtable), a
                 'control accessor, or a property vtable call.
+                'VB6 intrinsic global objects (App/Screen/Clipboard) are getters
+                'at fixed low vtable offsets on the runtime "Global" object (held
+                'in a module global) or the form.  Resolve `call [objVt + 0x14]`
+                'etc. when objVt is a tracked object vtable.  These offsets are
+                'IDispatch slots on arbitrary objects, which VB never raw-calls, so
+                'the object-vtable guard keeps it safe.
+                Dim gobj As String, gcb As Long
+                gobj = NativeGlobalObjByOffset(disp)
+                If Len(gobj) > 0 Then
+                    gcb = NativeMemBase(inst.dump)
+                    If gcb >= 0 And gcb <= 7 Then
+                        If NVRegIsFormVt(gcb) Then
+                            NVPushTop = 0
+                            NVReg(0) = gobj
+                            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                            'The object is written to the out-param local addressed
+                            'by the LEA just before the call - surface var_X = App.
+                            If NVLastLeaSet Then
+                                Dim gln As String
+                                gln = "var_" & Hex$(Abs(NVLastLea))
+                                NativeSetLocalExpr NVLastLea, gobj
+                                NVLastLeaSet = False
+                                NativeProcessInst = ind & gln & " = " & gobj & vbCrLf
+                            End If
+                            Exit Function           'value flows to the consumer
+                        End If
+                    End If
+                End If
                 'A form calling its own method: call [vtable + 0x6F8 + slot*4].
                 'Checked first: requiring a real gFormVtable slot is a stronger
                 'signal than the NVBase control heuristic (which the same form-method
@@ -1001,16 +1032,26 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             immv = NativeDumpInt32(dump, i + 1)
             If immv >= OptHeader.ImageBase Then sv = NativeStringAt(immv)
             If Len(sv) > 0 Then NVReg(op - &HB8) = sv Else NVReg(op - &HB8) = NativeNumFromBits(immv)
-            NVRegIsAddr(op - &HB8) = False
+            NVRegIsAddr(op - &HB8) = False: NVRegIsMe(op - &HB8) = False: NVRegIsFormVt(op - &HB8) = False
         Case &H8B                       'mov r32, r/m32
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
             If md = 3 Then
                 NVReg(reg) = NVReg(rm)
                 NVRegIsAddr(reg) = NVRegIsAddr(rm): NVRegAddr(reg) = NVRegAddr(rm)   'address propagates on reg->reg
+                NVRegIsMe(reg) = NVRegIsMe(rm): NVRegIsFormVt(reg) = NVRegIsFormVt(rm)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
+                Dim bse As Long, baseObj As Boolean
+                bse = NativeMemBase(dump)
+                If bse >= 0 And bse <= 7 Then baseObj = NVRegIsMe(bse)
                 If Not isAbs And disp < 0 Then NVReg(reg) = NativeGetLocalExpr(disp) Else NVReg(reg) = ""
                 NVRegIsAddr(reg) = False
+                'Track object pointers and their vtables so an intrinsic-global
+                'getter `call [objVt + 0x14]` can be resolved.  An object pointer
+                'comes from `[ebp+8]` (this/Me) or from a module global `[abs]`;
+                'its vtable is the deref `[objPtr]`.
+                NVRegIsMe(reg) = (Not isAbs And disp = 8 And bse = 5) Or (isAbs And disp >= OptHeader.ImageBase)
+                NVRegIsFormVt(reg) = (Not isAbs And disp = 0 And baseObj)
             End If
         Case &H8D                       'lea r32, [mem]  (address-of)
             modrm = NativeDumpByte(dump, i + 1)
@@ -1026,6 +1067,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 Else
                     NVReg(reg) = "": NVRegIsAddr(reg) = False
                 End If
+                NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
             End If
         Case &H89                       'mov r/m32, r32 (store)
             modrm = NativeDumpByte(dump, i + 1)
@@ -1033,6 +1075,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             If md = 3 Then
                 NVReg(rm) = NVReg(reg)
                 NVRegIsAddr(rm) = NVRegIsAddr(reg): NVRegAddr(rm) = NVRegAddr(reg)
+                NVRegIsMe(rm) = NVRegIsMe(reg): NVRegIsFormVt(rm) = NVRegIsFormVt(reg)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then
                     'A stored call result (expression containing a call) is worth
@@ -1057,7 +1100,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H33                       'xor r32, r/m32 (xor reg,reg -> 0)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
-            If md = 3 And reg = rm Then NVReg(reg) = "0": NVRegIsAddr(reg) = False
+            If md = 3 And reg = rm Then NVReg(reg) = "0": NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
     End Select
 End Function
 
@@ -1310,6 +1353,43 @@ Private Function NativeRegVal(ByVal idx As Long) As String
     If idx >= 0 And idx <= 7 Then
         If Len(NVReg(idx)) > 0 Then NativeRegVal = NVReg(idx) Else NativeRegVal = NativeRegName(idx)
     End If
+End Function
+
+Private Function NativeMemBase(ByVal dump As String) As Long
+    'Base register index of a single-opcode ModR/M memory operand, or -1 for an
+    'absolute / register-direct / SIB-without-base operand.
+    Dim n As Long, i As Long, op As Long, modrm As Long, md As Long, rm As Long, sib As Long
+    On Error GoTo none
+    NativeMemBase = -1
+    dump = Replace(dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i): i = i + 1
+    If op = &HF Or op = &HE8 Or op = &HE9 Or op = &HEB Then Exit Function
+    If i >= n Then Exit Function
+    modrm = NativeDumpByte(dump, i)
+    md = (modrm \ &H40) And 3: rm = modrm And 7
+    If md = 3 Then Exit Function
+    If rm = 4 Then
+        sib = NativeDumpByte(dump, i + 1)
+        If md = 0 And (sib And 7) = 5 Then Exit Function    'no base
+        NativeMemBase = sib And 7
+        Exit Function
+    End If
+    If md = 0 And rm = 5 Then Exit Function                 'abs [disp32]
+    NativeMemBase = rm
+    Exit Function
+none:
+    NativeMemBase = -1
+End Function
+
+Private Function NativeGlobalObjByOffset(ByVal disp As Long) As String
+    'VB6 form-interface vtable slots for the intrinsic global objects.
+    Select Case disp
+        Case &H14: NativeGlobalObjByOffset = "App"
+        Case &H18: NativeGlobalObjByOffset = "Screen"
+        Case &H1C: NativeGlobalObjByOffset = "Clipboard"
+    End Select
 End Function
 
 Private Function NativeEaxUse(inst As CInstruction) As Long
