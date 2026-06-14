@@ -757,6 +757,11 @@ Private Function NativeDecodeDisp(ByVal dump As String, ByRef disp As Long, ByRe
     If i >= n Then GoTo no
     op = NativeDumpByte(dump, i): i = i + 1
     If op = &HF Then GoTo no     '2-byte opcode (0F xx) not handled
+    'E8/E9 (call/jmp rel32) and EB (jmp rel8) carry NO ModR/M byte - the bytes
+    'that follow are a relative displacement, not a memory operand.  Treating
+    'the first rel byte as ModR/M wrongly reports a [reg+disp] memory call
+    '(e.g. "call .0"), so reject these opcodes outright.
+    If op = &HE8 Or op = &HE9 Or op = &HEB Then GoTo no
     If i >= n Then GoTo no
     modrm = NativeDumpByte(dump, i): i = i + 1
     md = (modrm \ &H40) And 3
