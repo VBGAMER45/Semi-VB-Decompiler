@@ -87,6 +87,10 @@ Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
 Private NVProcEndWord As String    'closing keyword for this proc: "Sub" / "Function" / "Property"
 Private NVApiStubCache As Collection 'declared-DLL stub address -> resolved API name (global, "" = not a stub)
+Private NVCmpL As String           'pending condition: left operand (symbolic)
+Private NVCmpR As String           'pending condition: right operand (symbolic)
+Private NVCmpIsTest As Boolean     'the pending compare came from TEST (zero-compare)
+Private NVCmpSet As Boolean        'a GP TEST/CMP condition hint is pending
 
 Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 '*****************************
@@ -125,6 +129,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVProcEndWord = "Sub"
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
+    NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False
     ReDim NVFpu(31): NVFpuTop = 0
     ReDim NVPushImm(31): NVPushTop = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
@@ -193,6 +198,13 @@ Private Function NativeProcessInst(inst As CInstruction) As String
     mn = NativeMnem(inst)
     ind = NativeIndentStr()
 
+    'TEST/CMP set the flags consumed by the next conditional jump.  Record the
+    'operands now (the relational operator is resolved later from the Jcc).
+    If mn = "TEST" Or mn = "CMP" Then
+        NativeDecodeCompare inst, mn
+        Exit Function
+    End If
+
     Select Case cls
 
         Case C_CAL
@@ -258,15 +270,18 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             If inst.jmpConst <= inst.va And NativeHas(NVLoopHdr, inst.jmpConst) Then
                 'Back-edge to a loop header -> the bottom of a Do...Loop
                 If NVIndent > 0 Then NVIndent = NVIndent - 1
-                NativeProcessInst = NativeIndentStr() & "Loop While " & NativeCondExpr() & vbCrLf
+                'Loop continues while the back-jump is taken.
+                NativeProcessInst = NativeIndentStr() & "Loop While " & NativeCondExpr(mn, False) & vbCrLf
             ElseIf inst.jmpConst > inst.va Then
                 'Forward conditional branch -> a structured If guarding the block
-                'up to the branch target.
-                NativeProcessInst = ind & "If " & NativeCondExpr() & " Then" & vbCrLf
+                'up to the branch target.  The block runs when the jump is NOT
+                'taken, so negate the jump's relational.
+                NativeProcessInst = ind & "If " & NativeCondExpr(mn, True) & " Then" & vbCrLf
                 NativePushIf inst.jmpConst
             Else
                 'Backward branch (not a recognised loop header) -> conditional GoTo
-                NativeProcessInst = ind & "If " & NativeCondExpr() & " Then GoTo loc_" & Right$("00000000" & Hex$(inst.jmpConst), 8) & vbCrLf
+                '(the GoTo fires when the jump is taken).
+                NativeProcessInst = ind & "If " & NativeCondExpr(mn, False) & " Then GoTo loc_" & Right$("00000000" & Hex$(inst.jmpConst), 8) & vbCrLf
             End If
             Exit Function
 
@@ -1101,16 +1116,124 @@ Private Function NativeIsIfTarget(ByVal addr As Long) As Boolean
     Next
 End Function
 
-Private Function NativeCondExpr() As String
-    'Best-effort condition: the operands of the most recent compare, else a
-    'placeholder.  The exact relational operator is not recovered.
+Private Function NativeCondExpr(ByVal jmpMnem As String, ByVal blockGuard As Boolean) As String
+    'Build the source condition for a conditional jump.  jmpMnem is the Jcc
+    'mnemonic; blockGuard is True for a forward If (the block runs when the jump
+    'is NOT taken, so the condition is the negation of "jump taken") and False
+    'for a loop-continue / conditional-GoTo (condition = "jump taken").
+    Dim op As String, L As String, R As String
+    If NVCmpSet Then
+        op = NativeJccOp(jmpMnem)
+        If blockGuard Then op = NativeNegOp(op)
+        L = NVCmpL
+        If NVCmpIsTest Then R = "0" Else R = NVCmpR
+        NVCmpSet = False: NVLastCmp = ""
+        If Len(op) > 0 And Len(L) > 0 And Len(R) > 0 Then
+            NativeCondExpr = L & " " & op & " " & R
+            Exit Function
+        End If
+    End If
+    'FPU compare hint (FCOM) or nothing.
     If Len(NVLastCmp) > 0 Then
-        NativeCondExpr = NVLastCmp
-        NVLastCmp = ""
-    Else
-        NativeCondExpr = "<cond>"
+        NativeCondExpr = NVLastCmp: NVLastCmp = "": Exit Function
+    End If
+    NativeCondExpr = "<cond>"
+End Function
+
+Private Function NativeJccOp(ByVal mn As String) As String
+    'Relational operator for "the jump is taken" (left <op> right).
+    Select Case UCase$(mn)
+        Case "JE", "JZ": NativeJccOp = "="
+        Case "JNE", "JNZ": NativeJccOp = "<>"
+        Case "JL", "JNGE", "JB", "JC", "JNAE": NativeJccOp = "<"
+        Case "JLE", "JNG", "JBE", "JNA": NativeJccOp = "<="
+        Case "JG", "JNLE", "JA", "JNBE": NativeJccOp = ">"
+        Case "JGE", "JNL", "JAE", "JNB", "JNC": NativeJccOp = ">="
+        Case "JS": NativeJccOp = "<"          'sign set ~ negative
+        Case "JNS": NativeJccOp = ">="
+        Case Else: NativeJccOp = ""
+    End Select
+End Function
+
+Private Function NativeNegOp(ByVal op As String) As String
+    Select Case op
+        Case "=": NativeNegOp = "<>"
+        Case "<>": NativeNegOp = "="
+        Case "<": NativeNegOp = ">="
+        Case "<=": NativeNegOp = ">"
+        Case ">": NativeNegOp = "<="
+        Case ">=": NativeNegOp = "<"
+        Case Else: NativeNegOp = op
+    End Select
+End Function
+
+Private Function NativeRegName(ByVal idx As Long) As String
+    Select Case idx
+        Case 0: NativeRegName = "eax"
+        Case 1: NativeRegName = "ecx"
+        Case 2: NativeRegName = "edx"
+        Case 3: NativeRegName = "ebx"
+        Case 4: NativeRegName = "esp"
+        Case 5: NativeRegName = "ebp"
+        Case 6: NativeRegName = "esi"
+        Case 7: NativeRegName = "edi"
+    End Select
+End Function
+
+Private Function NativeRegVal(ByVal idx As Long) As String
+    'Tracked symbolic value of a register, else its raw name.
+    If idx >= 0 And idx <= 7 Then
+        If Len(NVReg(idx)) > 0 Then NativeRegVal = NVReg(idx) Else NativeRegVal = NativeRegName(idx)
     End If
 End Function
+
+Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As Long) As String
+    'Symbolic value of a ModR/M r/m operand: a register's tracked value, or a
+    'local stack slot.  "" when it is a memory operand we do not model.
+    Dim disp As Long, isAbs As Boolean
+    If md = 3 Then
+        NativeRmVal = NativeRegVal(rm)
+    ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
+        If Not isAbs And disp < 0 Then NativeRmVal = NativeGetLocalExpr(disp)
+    End If
+End Function
+
+Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
+    'Decode a TEST/CMP into symbolic left/right operands for the next Jcc.
+    Dim dump As String, n As Long, i As Long, op As Long
+    Dim modrm As Long, md As Long, reg As Long, rm As Long
+    Dim L As String, R As String, isTst As Boolean
+    On Error GoTo done3
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    isTst = (mn = "TEST")
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+    Select Case op
+        Case &H85                       'test r/m32, r32
+            L = NativeRmVal(dump, md, rm): R = "0": isTst = True
+        Case &HA9                       'test eax, imm32
+            L = NativeRegVal(0): R = "0": isTst = True
+        Case &HF7                       'test r/m32, imm32 (reg field = 0)
+            L = NativeRmVal(dump, md, rm): R = "0": isTst = True
+        Case &H3B                       'cmp r32, r/m32
+            L = NativeRegVal(reg): R = NativeRmVal(dump, md, rm)
+        Case &H39                       'cmp r/m32, r32
+            L = NativeRmVal(dump, md, rm): R = NativeRegVal(reg)
+        Case &H3D                       'cmp eax, imm32
+            L = NativeRegVal(0): R = NativeNumFromBits(NativeDumpInt32(dump, i + 1))
+        Case &H83                       'cmp r/m32, imm8 (sign-extended)
+            L = NativeRmVal(dump, md, rm): R = CStr(NativeDumpInt8(dump, n - 1))
+        Case &H81                       'cmp r/m32, imm32
+            L = NativeRmVal(dump, md, rm): R = NativeNumFromBits(NativeDumpInt32(dump, n - 4))
+    End Select
+    If Len(L) > 0 And Len(R) > 0 Then
+        NVCmpL = L: NVCmpR = R: NVCmpIsTest = isTst: NVCmpSet = True
+    End If
+done3:
+End Sub
 
 Private Function NativeMovStringLit(inst As CInstruction) As String
     'mov [mem], imm32 (opcode C7): if the immediate is a pointer to a readable
