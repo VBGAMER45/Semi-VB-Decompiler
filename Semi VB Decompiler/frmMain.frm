@@ -2627,10 +2627,15 @@ End Sub
 'output, native projects use the native decompiler (mirrors how each path
 'is decompiled).  Used by the form / module / class views below.
 Private Function GetObjectCode(ByVal objName As String) As String
+    'Prepend the reconstructed Win32 API Declare block so the on-screen Code view
+    'shows it for every object (form / module / class / usercontrol), matching the
+    'exported form source.
+    Dim sApiDecl As String
+    sApiDecl = modOutput.GetApiDeclareBlock()
     If gProjectInfo.aNativeCode = 0 Then
-        GetObjectCode = modPCode.GetPcodeObjectCode(objName)
+        GetObjectCode = sApiDecl & modPCode.GetPcodeObjectCode(objName)
     Else
-        GetObjectCode = modNative.GetNativeObjectCode(objName)
+        GetObjectCode = sApiDecl & modNative.GetNativeObjectCode(objName)
     End If
 End Function
 
