@@ -1358,10 +1358,16 @@ Private Function NativePushOperand(inst As CInstruction) As String
     i = NativeOpStart(dump, n)
     op = NativeDumpByte(dump, i)
     Select Case op
-        Case &H68                       'push imm32 (may point at a string constant)
+        Case &H68                       'push imm32 (string constant / global address / number)
             imm = NativeDumpInt32(dump, i + 1)
             If imm >= OptHeader.ImageBase Then s = NativeStringAt(imm)
-            If Len(s) > 0 Then NativePushOperand = s Else NativePushOperand = NativeNumFromBits(imm)
+            If Len(s) > 0 Then
+                NativePushOperand = s
+            ElseIf NativeIsGlobalAddr(imm) Then
+                NativePushOperand = NativeGlobalName(imm)
+            Else
+                NativePushOperand = NativeNumFromBits(imm)
+            End If
         Case &H6A                       'push imm8
             NativePushOperand = CStr(NativeDumpInt8(dump, i + 1))
         Case &H50 To &H57               'push reg
@@ -1413,7 +1419,13 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 Dim bse As Long, baseObj As Boolean
                 bse = NativeMemBase(dump)
                 If bse >= 0 And bse <= 7 Then baseObj = NVRegIsMe(bse)
-                If Not isAbs And disp < 0 Then NVReg(reg) = NativeGetLocalExpr(disp) Else NVReg(reg) = ""
+                If Not isAbs And disp < 0 Then
+                    NVReg(reg) = NativeGetLocalExpr(disp)
+                ElseIf isAbs And NativeIsGlobalAddr(disp) Then
+                    NVReg(reg) = NativeGlobalName(disp)      'load of a module-level global
+                Else
+                    NVReg(reg) = ""
+                End If
                 NVRegIsAddr(reg) = False
                 'Track object pointers and their vtables so an intrinsic-global
                 'getter `call [objVt + 0x14]` can be resolved.  An object pointer
@@ -1449,6 +1461,9 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 If Not isAbs And disp < 0 Then
                     NVReg(reg) = NativeGetLocalExpr(disp)
                     NVRegIsAddr(reg) = True: NVRegAddr(reg) = "var_" & Hex$(Abs(disp)): NVRegAddrDisp(reg) = disp
+                ElseIf isAbs And NativeIsGlobalAddr(disp) Then
+                    'address-of a module-level global (e.g. an array passed by ref)
+                    NVReg(reg) = NativeGlobalName(disp): NVRegIsAddr(reg) = False
                 Else
                     NVReg(reg) = "": NVRegIsAddr(reg) = False
                 End If
@@ -1489,7 +1504,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     'call / concat / string value as `global_X = ...` (without
                     'this a deferred call folded into the store would be lost).
                     If NativeIsExprValue(NVReg(reg)) Then
-                        NativeTrackReg = "global_" & Hex$(disp) & " = " & NVReg(reg)
+                        NativeTrackReg = NativeGlobalName(disp) & " = " & NVReg(reg)
                     End If
                 End If
             End If
@@ -1941,7 +1956,11 @@ Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As
     If md = 3 Then
         NativeRmVal = NativeRegVal(rm)
     ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
-        If Not isAbs And disp < 0 Then NativeRmVal = NativeGetLocalExpr(disp)
+        If Not isAbs And disp < 0 Then
+            NativeRmVal = NativeGetLocalExpr(disp)
+        ElseIf isAbs And NativeIsGlobalAddr(disp) Then
+            NativeRmVal = NativeGlobalName(disp)
+        End If
     End If
 End Function
 
@@ -2054,6 +2073,31 @@ End Function
 Private Function NativeInImage(ByVal addr As Long) As Boolean
     'Within this EXE's address range (excludes msvbvm60 et al. at high addresses).
     NativeInImage = (addr >= OptHeader.ImageBase) And (addr < OptHeader.ImageBase + &H1000000)
+End Function
+
+Private Function NativeGlobalName(ByVal va As Long) As String
+    'Synthetic stable name for a module-level global / static at an absolute .data
+    'address, matching the commercial decompiler's scheme (8 hex digits).
+    NativeGlobalName = "global_" & Right$("00000000" & Hex$(va), 8)
+End Function
+
+Private Function NativeIsGlobalAddr(ByVal va As Long) As Boolean
+    'True when va is an absolute address inside a NON-executable (data) section of
+    'this image - a module-level global / static, not code - so it can be rendered
+    'as global_XXXXXXXX rather than a bare number.  Section fields are unsigned
+    'DWORDs held in Doubles; test the IMAGE_SCN_MEM_EXECUTE bit (0x20000000) by
+    'division to avoid a Long overflow on data-section characteristics (0xC0000040).
+    Dim rva As Long, k As Long
+    If va < OptHeader.ImageBase Then Exit Function
+    rva = va - OptHeader.ImageBase
+    For k = 0 To MAXSECTIONS
+        If SecHeader(k).SizeRawData > 0 And SecHeader(k).Address > 0 Then
+            If rva >= SecHeader(k).Address And rva < SecHeader(k).Address + SecHeader(k).SizeRawData Then
+                NativeIsGlobalAddr = ((Int(SecHeader(k).Properties / &H20000000) Mod 2) = 0)
+                Exit Function
+            End If
+        End If
+    Next
 End Function
 
 Private Function NativeCallTargetName(ByVal tgt As Long) As String
