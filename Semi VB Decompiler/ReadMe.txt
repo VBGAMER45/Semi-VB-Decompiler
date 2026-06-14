@@ -1,8 +1,8 @@
 -------------------------------
-Semi VB Decompiler
-Version: 0.09
-Build: 1.0.65
-Website: https://www.theprogrammingzone.com/products/semivbdecompiler/
+Semi VB Decompiler - VisualBasicZone.com
+Version: 2.0
+Build: 2.0.0
+Website: http://www.visualbasiczone.com/products/semivbdecompiler
 -------------------------------
 Contents
 1. What's New?
@@ -13,6 +13,9 @@ Contents
 6. Credits
 
 1. What's New?
+
+   Version 2.0
+   Native decompiler now finds procedure offsets for modules and classes, recovers .bas module procedures, lists them in the project tree, exports the decompiled code into the generated project, and adds a raw disassembly (Dism) tab.
 
    Version 0.09
    Added a new tool. Api Add allows you to add Api's to the Semi VB Decompiler Api Database.
@@ -190,17 +193,19 @@ Contents
       All of the above files need to be registered(the installer should auto register the files.)
       If you are examining a .Net file then you need to have the .Net framework installed.
    Q. Where can I learn more about Visual Basic 5/6 Decompiling?
-   A. Head over to https://sandsprite.com/vb-reversing/  tons of information on vb decompiling.
+   A. Head over to http://www.vb-decompiler.com  tons of information on vb decompiling.
 
 4. Bugs
      Some properties aren't handled yet such as dataformat
      P-Code decoding may hang use the disable P-Code option under options.
-
+     If you would wish to report a bug email me at
+     support@visualbasiczone.com
      Please include as much information as possible so we can try to fix it and even better send us the file if possible.
 
 5. Contact/Support
+     Email=support@visualbasiczone.com
      Semi VB Decompiler Website:
-     https://www.theprogrammingzone.com/forums/
+     http://www.visualbasiczone.com/products/semivbdecompiler/
 
 6. Credits
      I would like to thank the following people for helping me with this project.

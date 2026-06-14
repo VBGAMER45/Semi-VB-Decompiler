@@ -1,10 +1,9 @@
 VERSION 5.00
 Object = "{F9043C88-F6F2-101A-A3C9-08002B2F49FB}#1.2#0"; "COMDLG32.OCX"
-Object = "{3B7C8863-D78F-101B-B9B5-04021C009402}#1.2#0"; "RICHTX32.OCX"
+Object = "{3B7C8863-D78F-101B-B9B5-04021C009402}#1.2#0"; "richtx32.ocx"
 Object = "{831FDD16-0C5C-11D2-A9FC-0000F8754DA1}#2.0#0"; "MSCOMCTL.OCX"
-Object = "{BDC217C8-ED16-11CD-956C-0000C04E4C0A}#1.1#0"; "Tabctl32.ocx"
-Object = "{5E9E78A0-531B-11CF-91F6-C2863C385E30}#1.0#0"; "Msflxgrd.ocx"
-Object = "{FCEA04FA-85AF-4857-AF33-3842A581C8BC}#1.0#0"; "pePropertySheet.ocx"
+Object = "{BDC217C8-ED16-11CD-956C-0000C04E4C0A}#1.1#0"; "TABCTL32.OCX"
+Object = "{5E9E78A0-531B-11CF-91F6-C2863C385E30}#1.0#0"; "MSFLXGRD.OCX"
 Begin VB.Form frmMain 
    Caption         =   "Semi VB Decompiler - VisualBasicZone.com"
    ClientHeight    =   6375
@@ -490,8 +489,8 @@ Begin VB.Form frmMain
       _ExtentY        =   10716
       _Version        =   393216
       Style           =   1
-      Tabs            =   4
-      TabsPerRow      =   4
+      Tabs            =   5
+      TabsPerRow      =   5
       TabHeight       =   520
       WordWrap        =   0   'False
       ShowFocusRect   =   0   'False
@@ -523,35 +522,40 @@ Begin VB.Form frmMain
       TabCaption(3)   =   "Edit Object"
       TabPicture(3)   =   "frmMain.frx":16B08
       Tab(3).ControlEnabled=   0   'False
-      Tab(3).Control(0)=   "pePropTree"
-      Tab(3).Control(1)=   "cmdColor(0)"
-      Tab(3).Control(2)=   "txtEditArray(0)"
-      Tab(3).Control(3)=   "lblHelpText"
-      Tab(3).Control(4)=   "lblObjectName"
-      Tab(3).Control(5)=   "lblArrayEdit(0)"
+      Tab(3).Control(0)=   "lblArrayEdit(0)"
+      Tab(3).Control(1)=   "lblObjectName"
+      Tab(3).Control(2)=   "lblHelpText"
+      Tab(3).Control(3)=   "txtEditArray(0)"
+      Tab(3).Control(4)=   "cmdColor(0)"
+      Tab(3).Control(5)=   "pePropTree"
       Tab(3).ControlCount=   6
-      Begin pePropertyEditor.pePropertyTree pePropTree 
+      TabCaption(4)   =   "Dism"
+      TabPicture(4)   =   "frmMain.frx":16B24
+      Tab(4).ControlEnabled=   0   'False
+      Tab(4).Control(0)=   "txtDism"
+      Tab(4).Control(0).Enabled=   0   'False
+      Tab(4).ControlCount=   1
+      Begin VB.TextBox txtDism 
+         Height          =   5415
+         Left            =   -74880
+         MultiLine       =   -1  'True
+         ScrollBars      =   3  'Both
+         TabIndex        =   26
+         Top             =   480
+         Width           =   4095
+      End
+      Begin VB.PictureBox pePropTree 
+         Appearance      =   0  'Flat
+         BackColor       =   &H80000004&
+         BorderStyle     =   0  'None
          Height          =   4215
          Left            =   -74760
+         ScaleHeight     =   4215
+         ScaleWidth      =   4095
          TabIndex        =   24
          Top             =   600
          Visible         =   0   'False
          Width           =   4095
-         _ExtentX        =   7223
-         _ExtentY        =   7435
-         BackColor       =   -2147483644
-         BeginProperty Font {0BE35203-8F91-11CE-9DE3-00AA004BB851} 
-            Name            =   "MS Sans Serif"
-            Size            =   8.25
-            Charset         =   0
-            Weight          =   400
-            Underline       =   0   'False
-            Italic          =   0   'False
-            Strikethrough   =   0   'False
-         EndProperty
-         LockWindowUpdate=   0   'False
-         BorderStyle     =   0
-         Appearance      =   0
       End
       Begin VB.CommandButton cmdColor 
          Caption         =   "..."
@@ -596,7 +600,7 @@ Begin VB.Form frmMain
          ReadOnly        =   -1  'True
          ScrollBars      =   3
          AutoVerbMenu    =   -1  'True
-         TextRTF         =   $"frmMain.frx":16B24
+         TextRTF         =   $"frmMain.frx":16B40
       End
       Begin MSFlexGridLib.MSFlexGrid fxgEXEInfo 
          Height          =   5535
@@ -636,7 +640,7 @@ Begin VB.Form frmMain
          ReadOnly        =   -1  'True
          ScrollBars      =   2
          Appearance      =   0
-         TextRTF         =   $"frmMain.frx":16BA6
+         TextRTF         =   $"frmMain.frx":16BC2
       End
       Begin VB.Label lblHelpText 
          Height          =   615
@@ -714,12 +718,20 @@ Begin VB.Form frmMain
          Caption         =   "&Debug VB Process"
          Visible         =   0   'False
       End
-      Begin VB.Menu mnuFileGenerate 
+      Begin VB.Menu mnuFileGenerate
          Caption         =   "&Generate vbp"
          Enabled         =   0   'False
          Shortcut        =   ^G
       End
-      Begin VB.Menu mnuFileSaveExe 
+      Begin VB.Menu mnuFileGenerateDism
+         Caption         =   "Generate vbp (Disassembl&y)"
+         Enabled         =   0   'False
+      End
+      Begin VB.Menu mnuFileBuildSolution
+         Caption         =   "Build .NET &Solution"
+         Enabled         =   0   'False
+      End
+      Begin VB.Menu mnuFileSaveExe
          Caption         =   "&Save Exe Changes"
          Enabled         =   0   'False
          Shortcut        =   ^S
@@ -846,7 +858,7 @@ Attribute VB_Exposed = False
 
 '*********************************************
 '*Semi VB Decompiler
-'*Copyright VisualBasicZone.com 2004-2007
+'*Copyright VisualBasicZone.com 2004-2026
 '*By vbgamer45
 '*Credits:
 '*Some structures from decompiler.theautomaters.com  The VB Decompiling Community
@@ -954,8 +966,8 @@ On Error GoTo errHandle
     gSkipCom = False
     gDumpData = False
     gShowOffsets = False
-    gShowColors = True
-    gPcodeDecompile = True
+    gShowColors = False
+    gPcodeDecompile = False
     CancelDecompile = False
     ShowPCodeStringAddress = True
     NativeShowOffsets = True
@@ -1113,9 +1125,11 @@ Private Sub Form_Resize()
     tvProject.Height = Me.Height - StatusBar1.Height - 700
     sstViewFile.Height = Me.Height - StatusBar1.Height - 700
     txtCode.Height = sstViewFile.Height - 420
+    txtDism.Height = sstViewFile.Height - 420
     Me.fxgEXEInfo.Height = sstViewFile.Height - 600
     sstViewFile.Width = Me.Width - tvProject.Width - 200
     txtCode.Width = sstViewFile.Width - 200
+    txtDism.Width = sstViewFile.Width - 200
     fxgEXEInfo.Width = sstViewFile.Width - 200
     picPreview.Width = sstViewFile.Width - 200
     picPreview.Height = sstViewFile.Height - 600
@@ -1217,8 +1231,6 @@ Private Sub mnuFileGenerate_Click()
     Dim structFolder As BROWSEINFO
     Dim iNull As Integer
     Dim ret As Long
-    Dim g As Integer
-    Dim i As Integer
     structFolder.hOwner = Me.hwnd
     structFolder.lpszTitle = "Browse for folder"
     structFolder.ulFlags = BIF_NEWDIALOGSTYLE  'To create make new folder option
@@ -1235,16 +1247,30 @@ Private Sub mnuFileGenerate_Click()
             sPath = Left$(sPath, iNull - 1)
         End If
     End If
-    
+
     If sPath = vbNullString Then Exit Sub
-    
+
+    Call GenerateProject(sPath)
+
+    Dim strResponse As String
+    strResponse = MsgBox("Project Generated. Do you want to open the project file now?", vbYesNo + vbInformation)
+    If strResponse = vbYes Then
+        ShellExecute Me.hwnd, vbNullString, sPath & "\" & ProjectName & ".vbp", vbNullString, "C:\", SW_SHOWNORMAL
+    End If
+End Sub
+
+'Write the regenerated VB project (.vbp + all objects) into sPath.  Shared by
+'the File > Generate menu and the command-line (headless) mode.
+Public Sub GenerateProject(ByVal sPath As String)
+    Dim g As Integer
+    Dim i As Integer
+
     'Write The Project File
     If gVB4App = True Then
       Call WriteVBPVB4(sPath & "\" & ProjectName & ".vbp")
     Else
       Call WriteVBP(sPath & "\" & ProjectName & ".vbp")
     End If
-
 
     'Write the Forms
     If VBVersion = 4 Then
@@ -1253,20 +1279,20 @@ Private Sub mnuFileGenerate_Click()
                 Call modOutput.WriteForms(sPath & "\" & strVB4Forms(i) & ".frm", strVB4Forms(i), i)
             End If
         Next
-        
+
     Else
         'Write VB5/6 Forms
         For i = 0 To UBound(gObject)
             For g = 0 To UBound(gObjectTypeList)
                 If gObject(i).ObjectType = gObjectTypeList(g).value And gObjectTypeList(g).strType = 1 Then
-           
+
                     Call modOutput.WriteForms(sPath & "\" & gObjectNameArray(i) & ".frm", gObjectNameArray(i), i)
                     Exit For
                 End If
             Next g
         Next
-   
-        
+
+
         'Write Forms frx files
         For i = 0 To UBound(gObject)
             For g = 0 To UBound(gObjectTypeList)
@@ -1321,7 +1347,7 @@ Private Sub mnuFileGenerate_Click()
                 End If
             Next g
         Next
-        
+
         'Write Designers
         For i = 0 To UBound(gObject)
             If gObject(i).ObjectType = 17926147 Then
@@ -1329,16 +1355,48 @@ Private Sub mnuFileGenerate_Click()
             End If
         Next i
     End If
-    
-    Dim strResponse As String
-    strResponse = MsgBox("Project Generated. Do you want to open the project file now?", vbYesNo + vbInformation)
-    If strResponse = vbYes Then
-        ShellExecute Me.hwnd, vbNullString, sPath & "\" & ProjectName & ".vbp", vbNullString, "C:\", SW_SHOWNORMAL
-    End If
+End Sub
 
+Private Sub mnuFileGenerateDism_Click()
+'*****************************
+'Purpose: Generate the project, but write each object's raw native
+'disassembly (the Dism tab) into the source files instead of decompiled code.
+'*****************************
+    On Error GoTo cleanup
+    gExportDisassembly = True
+    mnuFileGenerate_Click          'reuse the same generation flow
+cleanup:
+    gExportDisassembly = False     'always restore normal (code) export
+End Sub
+
+Private Sub mnuFileBuildSolution_Click()
+'*****************************
+'Purpose: Export the reconstructed .NET classes as a navigable solution
+'         scaffold (per-class .cs/.vb plus .sln/.csproj/.vbproj).
+'*****************************
+On Error GoTo errHandle
+    Dim sPath As String
+    Dim structFolder As BROWSEINFO
+    Dim iNull As Integer
+    Dim ret As Long
+    structFolder.hOwner = Me.hwnd
+    structFolder.lpszTitle = "Choose a folder for the .NET solution"
+    structFolder.ulFlags = BIF_NEWDIALOGSTYLE
+
+    ret = SHBrowseForFolder(structFolder)
+    If ret Then
+        sPath = String$(MAX_PATH, 0)
+        SHGetPathFromIDList ret, sPath
+        CoTaskMemFree ret
+        iNull = InStr(sPath, vbNullChar)
+        If iNull Then sPath = Left$(sPath, iNull - 1)
+    End If
+    If sPath = vbNullString Then Exit Sub
+
+    Call modVBNET.BuildDotNetSolution(sPath)
 Exit Sub
 errHandle:
-    MsgBox "Error_frmMain_mnuFileGenerate: " & err.Number & " " & err.Description
+    MsgBox "Error_frmMain_mnuFileBuildSolution: " & err.Number & " " & err.Description
 End Sub
 
 Private Sub mnuFileOpen_Click()
@@ -1390,6 +1448,8 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
     Next i
     
     mnuFileGenerate.Enabled = False
+    mnuFileGenerateDism.Enabled = False
+    mnuFileBuildSolution.Enabled = False
     mnuFileExportMemoryMap.Enabled = False
     mnuFileAntiDecompiler.Enabled = False
     mnuToolsNetConsole.Visible = False
@@ -1458,6 +1518,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
             MakeDir (App.Path & "\dump")
             MakeDir (App.Path & "\dump\" & FileTitle)
             mnuFileGenerate.Enabled = True
+            mnuFileGenerateDism.Enabled = True
             mnuFileExportMemoryMap.Enabled = True
             'mnuFileAntiDecompiler.Enabled = True
             'Get FileVersion Info
@@ -1498,11 +1559,15 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
         If bAdvDecompile = False Then
             'Get FileVersion Info
             gFileInfo = modGlobals.FileInfo(SFilePath)
-            MsgBox "Not a VB 4/5/6 file.", vbOKOnly Or vbCritical Or vbApplicationModal, "Bad file!"
+            '.NET assemblies are handled separately (see the .Net Classes tree);
+            'don't scold the user with a "bad file" prompt for them.
+            If bISVBNET = False And gQuietMode = False Then
+                MsgBox "Not a VB 4/5/6 file.", vbOKOnly Or vbCritical Or vbApplicationModal, "Bad file!"
+            End If
             gVB5App = False
             gVB4App = False
             gVB6App = False
-            
+
         End If
         Close #InFileNumber
         If bAdvDecompile = False Then
@@ -1719,9 +1784,16 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
          'Get Optional Object Info
         Seek F, gObject(loopC).aObjectInfo + 57 - OptHeader.ImageBase
         
-        'Decide if to get Optional Info or not
-        If ((gObject(loopC).ObjectType And &H80) = &H80) Then
-            
+        'Read the optional object info only for objects that actually have one.
+        'Forms and classes have it (ObjectType bit &H2 set); .bas modules do NOT
+        '- their ObjectInfo is not followed by an optional block, so reading it
+        'returns garbage (e.g. a bogus iEventCount of 9782) and would make us
+        'walk thousands of fake event entries.  The old (... And &H80) test was
+        'too narrow (forms only) and skipped classes; bit &H2 covers forms,
+        'classes, user controls and property pages while excluding modules.
+        'Module procedures are recovered later by ScanNativeProcsByPrologue.
+        If gObject(loopC).aObjectInfo <> 0 And (gObject(loopC).ObjectType And &H2) = &H2 Then
+
             Get #F, , gOptionalObjectInfo
             'Dim testLink() As tEventLink
             Dim LinkPCode() As MethodLinkPCode
@@ -1765,17 +1837,24 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                             Next i
                             For i = 0 To UBound(lNative)
                             On Error Resume Next
-                                'MsgBox lNative(i) - OptHeader.ImageBase
-                                Get F, lNative(i) + 1 - OptHeader.ImageBase, LinkNative
-                                'MsgBox LinkNative.jmpOpCode
-                                'MsgBox LinkNative.jmpOffset + Loc(f) + 5
-                                 currPos = Loc(F) + 1
-     
-                                 gNativeProcArray(UBound(gNativeProcArray)).sName = gObjectNameArray(loopC) & ".proc:" & LinkNative.jmpoffset + 5 + currPos + 5 + OptHeader.ImageBase
-                                 'Debug.Print gNativeProcArray(UBound(gNativeProcArray)).sName
-                                 gNativeProcArray(UBound(gNativeProcArray)).offset = LinkNative.jmpoffset + 5 + currPos + 5 + OptHeader.ImageBase
-                                 ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
-                                 'frmNativeDecompile.lstProcedures.AddItem LinkNative.jmpOffset + 5 + currPos + 5 + OptHeader.ImageBase
+                                'Skip empty event slots (null pointers in the link array -
+                                'common for interface/IUnknown slots on classes).
+                                If lNative(i) <> 0 Then
+                                    Get F, lNative(i) + 1 - OptHeader.ImageBase, LinkNative
+                                    'Only E9 (jmp rel32) entries are real procedure thunks.
+                                    'Other slots (push/sub stubs, padding) resolve to junk
+                                    'addresses outside the image, so ignore them.
+                                    If LinkNative.jmpOpCode = &HE9 Then
+                                        'jmp rel32 thunk: target VA = thunk_VA + 5 + jmpOffset.
+                                        'After the Get, Loc(F) = lNative(i) - ImageBase + 5, so
+                                        'adding jmpOffset + ImageBase yields the procedure VA.
+                                        currPos = Loc(F) + LinkNative.jmpoffset + OptHeader.ImageBase
+
+                                        gNativeProcArray(UBound(gNativeProcArray)).sName = gObjectNameArray(loopC) & ".proc_" & Hex$(currPos)
+                                        gNativeProcArray(UBound(gNativeProcArray)).offset = currPos
+                                        ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
+                                    End If
+                                End If
                             Next i
                         End If
                     
@@ -1882,6 +1961,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                  gControlNameArray(UBound(gControlNameArray)).strControlName = ControlName
                  gControlNameArray(UBound(gControlNameArray)).strParentForm = gObjectNameArray(loopC)
                  gControlNameArray(UBound(gControlNameArray)).strGuid = strGuid
+                 gControlNameArray(UBound(gControlNameArray)).lControlIndex = gControl(i).index
                 End If
             Next
             End If
@@ -1927,6 +2007,13 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
         End If
         Next loopC
 
+        'Event tables only cover objects that expose events (forms/classes).
+        '.bas module procedures (and private class procs) have no event entry,
+        'so scan the native code for procedure prologues and add the rest.
+        If gProjectInfo.aNativeCode <> 0 Then
+            Call modNative.ScanNativeProcsByPrologue(F)
+        End If
+
         'Main Loop to Get all Form's Properties
         FrameStatus.Visible = True
         txtStatus.Text = vbNullString
@@ -1956,6 +2043,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
     
 
     mnuFileGenerate.Enabled = True
+    mnuFileGenerateDism.Enabled = True
     mnuFileExportMemoryMap.Enabled = True
     'mnuFileAntiDecompiler.Enabled = True
     'Get FileVersion Info
@@ -2495,6 +2583,29 @@ Private Sub picPreview_MouseDown(Button As Integer, Shift As Integer, x As Singl
         PopupMenu mnuPopUp
     End If
 End Sub
+
+'Fill the "Dism" tab with the raw native disassembly of every procedure in the
+'clicked object (form / module / class).  Native projects only.
+Private Sub ShowObjectDisassembly(ByVal objName As String)
+    If gProjectInfo.aNativeCode = 0 Then
+        sstViewFile.TabVisible(4) = False
+        Exit Sub
+    End If
+    sstViewFile.TabVisible(4) = True
+    txtDism.Text = modNative.GetNativeObjectDisassembly(objName)
+End Sub
+
+'Decompiled code for an object: P-Code projects use the P-Code engine's
+'output, native projects use the native decompiler (mirrors how each path
+'is decompiled).  Used by the form / module / class views below.
+Private Function GetObjectCode(ByVal objName As String) As String
+    If gProjectInfo.aNativeCode = 0 Then
+        GetObjectCode = modPCode.GetPcodeObjectCode(objName)
+    Else
+        GetObjectCode = modNative.GetNativeObjectCode(objName)
+    End If
+End Function
+
 Private Sub tvProject_NodeClick(ByVal Node As MSComctlLib.Node)
 '*****************************
 'Purpose: To show the contents of each struture and textbox data
@@ -2507,9 +2618,13 @@ On Error Resume Next
     txtCode.SelStart = 0
     txtCode.SelColor = vbBlack
     
-    If CurrentItem <> tvProject.SelectedItem.Key Then
-        tblPath = Split(tvProject.SelectedItem.Key, "/")
-        CurrentItem = tvProject.SelectedItem.Key
+    If CurrentItem <> tvProject.SelectedItem.key Then
+        tblPath = Split(tvProject.SelectedItem.key, "/")
+        CurrentItem = tvProject.SelectedItem.key
+
+        'Hide the native disassembly ("Dism") tab by default; the form / module /
+        'class cases below turn it back on and fill it for the clicked object.
+        sstViewFile.TabVisible(4) = False
 
         Select Case tblPath(1)
             Case "VERSIONINFO"
@@ -2906,6 +3021,29 @@ On Error Resume Next
                             Call modVBNET.ShowBlobHeap(fxgEXEInfo)
                                       
                 End Select
+            Case "NETCODE"  '#####################################################'
+                If tblPath(2) <> vbNullString Then
+                    sstViewFile.TabVisible(0) = True
+                    sstViewFile.TabVisible(1) = False
+                    sstViewFile.TabVisible(2) = False
+                    sstViewFile.TabVisible(3) = False
+                    fxgEXEInfo.Visible = False
+                    Dim netIdx As Long
+                    Dim netLang As Integer
+                    netIdx = CLng(tblPath(2))
+                    netLang = 1 'default C#
+                    If tblPath(3) = "LANG" Then
+                        Select Case tblPath(4)
+                            Case "VB": netLang = 2
+                            Case "IL": netLang = 0
+                            Case Else: netLang = 1
+                        End Select
+                    End If
+                    txtCode.Text = modVBNET.GetDotNetTypeCode(netIdx, netLang)
+                    gUpdateText = True
+                    txtCode_Change
+                    gUpdateText = False
+                End If
             Case "EXEDATA"  '#####################################################'
                 sstViewFile.TabVisible(1) = True
                 sstViewFile.TabVisible(0) = False
@@ -3252,16 +3390,8 @@ On Error Resume Next
                             End If
                             
                             If VBVersion <> 4 Then
-                                For nApi = 0 To UBound(gProcedureList)
-                                    If UCase$(tblPath(2)) = UCase$(gProcedureList(nApi).strParent) And gProcedureList(nApi).strProcedureName <> "" Then
-                                        If Right$(gProcedureList(nApi).strProcedureName, 1) = ")" Then
-                                            strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & vbCrLf
-                                        Else
-                                            strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & "()" & vbCrLf
-                                        End If
-                                        strBuffer = strBuffer & "End Sub" & vbCrLf
-                                    End If
-                                Next
+                                'Decompiled bodies (native) or signature stubs (P-Code)
+                                strBuffer = strBuffer & GetObjectCode(tblPath(2))
                             End If
                             txtCode.Text = strBuffer
                             Exit For
@@ -3296,6 +3426,7 @@ On Error Resume Next
                             Next
                         End If
                    
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
@@ -3313,16 +3444,7 @@ On Error Resume Next
                             strBuffer = txtFinal(i).Text
                             strBuffer = strBuffer & "Option Explicit" & vbCrLf
                             strBuffer = strBuffer & "'Generated by Semi VB Decompiler - VisualBasicZone.com" & vbCrLf
-                            For nApi = 0 To UBound(gProcedureList)
-                                If UCase$(tblPath(2)) = UCase$(gProcedureList(nApi).strParent) And gProcedureList(nApi).strProcedureName <> "" Then
-                                    If Right$(gProcedureList(nApi).strProcedureName, 1) = ")" Then
-                                        strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & vbCrLf
-                                    Else
-                                        strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & "()" & vbCrLf
-                                    End If
-                                    strBuffer = strBuffer & "End Sub" & vbCrLf
-                                End If
-                            Next
+                            strBuffer = strBuffer & GetObjectCode(tblPath(2))
                             txtCode.Text = strBuffer
                             Exit For
                             
@@ -3331,11 +3453,12 @@ On Error Resume Next
                          Next
                         
                    
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
                 End If
-                
+
                 Case "MODS"
                 If tblPath(2) <> vbNullString Then
                     sstViewFile.TabVisible(0) = True
@@ -3352,15 +3475,9 @@ On Error Resume Next
                     Else
                         strBuffer = strBuffer & "'This application is compiled to Native refer to Native Procedure Decompile under the Tools Menu" & vbCrLf
                     End If
-                    For nApi = 0 To UBound(gProcedureList)
-                        If UCase$(tblPath(2)) = UCase$(gProcedureList(nApi).strParent) Then
-                            If gProcedureList(nApi).strProcedureName <> "" Then
-                                strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & "()" & vbCrLf
-                                strBuffer = strBuffer & "End Sub" & vbCrLf
-                            End If
-                        End If
-                    Next
+                    strBuffer = strBuffer & GetObjectCode(tblPath(2))
                     txtCode.Text = strBuffer
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
@@ -3382,20 +3499,14 @@ On Error Resume Next
                         strBuffer = strBuffer & "'This application is compiled to Native refer to Native Procedure Decompile under the Tools Menu" & vbCrLf
                     End If
                     
-                    For nApi = 0 To UBound(gProcedureList)
-                        If UCase$(tblPath(2)) = UCase$(gProcedureList(nApi).strParent) Then
-                            If gProcedureList(nApi).strProcedureName <> "" Then
-                                strBuffer = strBuffer & "Private Sub " & gProcedureList(nApi).strProcedureName & "()" & vbCrLf
-                                strBuffer = strBuffer & "End Sub" & vbCrLf
-                            End If
-                        End If
-                    Next
+                    strBuffer = strBuffer & GetObjectCode(tblPath(2))
                     txtCode.Text = strBuffer
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
                 End If
-                
+
                 Case "USERDOC"
                 If tblPath(2) <> vbNullString Then
                     sstViewFile.TabVisible(0) = True
@@ -3416,11 +3527,12 @@ On Error Resume Next
                     Next
                         
                    
+                    ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
                     txtCode_Change
                     gUpdateText = False
                 End If
-                
+
                 Case "IMAGES"
                 'Image Preview
                 If tblPath(2) <> vbNullString Then
@@ -3508,6 +3620,28 @@ On Error Resume Next
         tvProject.Nodes.Add strParent, tvwChild, "ROOT/NETSTRUCT/BLOBHEAP", "#Blob Heap", 2
         tvProject.Nodes.Add strParent, tvwChild, "ROOT/NETSTRUCT/GUIDHEAP", "#GUID Heap", 2
         tvProject.Nodes.Add strParent, tvwChild, "ROOT/NETSTRUCT/USHEAP", "User Strings Heap", 2
+
+        '####################   .Net Reconstructed Classes   ####################'
+        Call tvProject.Nodes.Add("ROOT/PROJECT/" & Filename, tvwChild, "ROOT/NETCODE/", ".Net Classes", 1)
+        Dim nt As Long, mm As Long
+        Dim methArr() As String, methText As String
+        For nt = 0 To modVBNET.GetDotNetTypeCount - 1
+            tvProject.Nodes.Add "ROOT/NETCODE/", tvwChild, "ROOT/NETCODE/" & nt & "/", modVBNET.GetDotNetTypeName(nt), 48
+            'One child per language view
+            tvProject.Nodes.Add "ROOT/NETCODE/" & nt & "/", tvwChild, "ROOT/NETCODE/" & nt & "/LANG/CS/", "C#", 2
+            tvProject.Nodes.Add "ROOT/NETCODE/" & nt & "/", tvwChild, "ROOT/NETCODE/" & nt & "/LANG/VB/", "VB.NET", 2
+            tvProject.Nodes.Add "ROOT/NETCODE/" & nt & "/", tvwChild, "ROOT/NETCODE/" & nt & "/LANG/IL/", "IL", 2
+            'One child per method (navigation)
+            methText = modVBNET.GetDotNetTypeMethods(nt)
+            If Len(methText) > 0 Then
+                methArr = Split(methText, vbLf)
+                For mm = 0 To UBound(methArr)
+                    If Len(methArr(mm)) > 0 Then
+                        tvProject.Nodes.Add "ROOT/NETCODE/" & nt & "/", tvwChild, "ROOT/NETCODE/" & nt & "/M/" & mm & "/", methArr(mm), 45
+                    End If
+                Next
+            End If
+        Next
     End If
     If gVB4App = True Or gVB5App = True Or gVB6App = True Then
         '####################   VB Structures       ####################'

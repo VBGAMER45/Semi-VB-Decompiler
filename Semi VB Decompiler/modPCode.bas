@@ -5,14 +5,14 @@ Attribute VB_Name = "modPCode"
 '>'      put the following hex in subsegments up to next
 '         offset following ArgStr char should be "p" for
 '         Procedure Address
-'h'      return hex output of following typechars. possible(°,%,&);
+'h'      return hex output of following typechars. possible(ï¿½,%,&);
 '}'      End Procedure
 
 'Arguments
 'Will usually take bytes from the datastream
 
 '.'      name Of Object at the Address specified by a Long off the datastream
-'b'      a byte off the datastream - formerly '°'
+'b'      a byte off the datastream - formerly 'ï¿½'
 '%'      an integer off the datastream
 '&'      a long off the datastream
 '!'      a single off the datastream
@@ -156,6 +156,41 @@ Global SubNamelist() As subNameListType
 Global ShowPCodeStringAddress As Boolean
 Public bEndOfProcedure As Boolean
 Dim strPCODEStringList As String
+
+'#############################################
+'P-Code -> VB reconstruction engine state
+'The decompiler models the VB P-Code evaluation stack so that the
+'many opcodes that make up a single source line can be folded back
+'into one readable VB statement (assignments, property access,
+'arithmetic, comparisons, calls and structured If blocks).
+'#############################################
+Private VBExprStack() As String     'simulated evaluation stack of expression strings
+Private VBExprTop As Long           'count of items currently on VBExprStack
+Private VBIfTarget() As Long        'addresses where open If blocks must close
+Private VBIfTop As Long             'count of open If blocks
+Private VBIndent As Long            'current indent level (in tab stops)
+Private VBPendingObj As String      'object whose property is about to be get/set
+Private VBPendingObjSet As Boolean  'True once VBPendingObj is meaningful
+Private VBProcEnd As Long           'CodeInfo address marking the end of the current proc
+Private Const VBMISSING As String = vbNullChar & "MISSING" & vbNullChar  'sentinel for an omitted optional argument
+
+'Control-name resolution: a VCallAd operand is a byte offset into the form
+'instance and equals (base + tControl.index * 4).  During decode each control
+'access is emitted as a unique token and recorded; once every procedure of a
+'form has been seen the base is solved from the pooled offsets and the tokens
+'are replaced with the real control names.
+Private VBCurrentForm As String     'form/object that owns the procedure being decoded
+Private VBCtlForm() As String       'recorded control accesses - parent form
+Private VBCtlOff() As Long          'recorded control accesses - instance offset
+Private VBCtlCnt As Long            'number of recorded control accesses
+
+'Per-object decompiled VB code, so the project tree can show a form/module/
+'class's P-Code-decompiled source in txtCode (mirrors gNativeCodeCache).
+'Keyed "OBJ_<UPPER-OBJECT-NAME>".  gPcodeOwner maps a procedure address to its
+'owning object name, built from the object procedure tables.
+Public gPcodeCodeCache As Collection
+Private gPcodeOwner As Collection
+
 Public Sub Decode(ByVal Filename As String)
 '*****************************
 'Purpose: To decode a P-Code excutable and return all procedures in P-Code tokens
@@ -168,6 +203,8 @@ Public Sub Decode(ByVal Filename As String)
     Dim g As Long
     ReDim ProcList(0)
     ProcCnt = 0
+    Set gPcodeCodeCache = New Collection
+    Set gPcodeOwner = New Collection
 
     LoadPE2 Filename
 
@@ -188,6 +225,10 @@ Public Sub Decode(ByVal Filename As String)
                 If ProcAddr(g) < UBound(SubName) And ProcAddr(g) > LBound(SubName) Then
                 SubName(ProcAddr(g)) = gObjectNameArray(i) & ".Proc" & ProcAddr(g)
                 AddProc ProcAddr(g)
+                'Remember which object owns this procedure address.
+                On Error Resume Next
+                gPcodeOwner.Add gObjectNameArray(i), "A" & ProcAddr(g)
+                On Error GoTo 0
                 End If
             End If
         Next
@@ -233,10 +274,18 @@ Public Sub Decode(ByVal Filename As String)
         Print #F, "---------------------------------"
         frmMain.txtStatus.Text = frmMain.txtStatus.Text & "P-Code Procedure Count: " & ProcCnt & vbCrLf
         frmMain.txtStatus.Refresh
+        'Accumulate the VB output so control offsets can be resolved to names
+        'in a single post-pass once every procedure of each form is decoded.
+        'Also accumulate per owning object so the tree can show each object's
+        'code in txtCode (like native code does).
+        Dim strVBAll As String
+        Dim objNames() As String, objCode() As String, objCount As Long
+        ReDim objNames(64): ReDim objCode(64): objCount = 0
+        VBResetControlCollection
         Do
             c = 0
             For a = 0 To ProcCnt - 1
-            
+
                 If CancelDecompile = True Then Exit For
                 If ProcList(a) <> 0 Then
                     ReDim DataStack(0) 'Resize datastack
@@ -246,19 +295,95 @@ Public Sub Decode(ByVal Filename As String)
                     Print #f2, DecompileProc(ProcList(a))
                     Print #f2, ""
                     bEndOfProcedure = False
-                    Print #F, DecompileProcToVB(ProcList(a))
+                    Dim vb As String
+                    vb = DecompileProcToVB(ProcList(a))
+                    strVBAll = strVBAll & vb & vbCrLf
 
-                    
+                    'Group this procedure under its owning object.
+                    Dim owner As String, oi As Long, found As Long
+                    owner = PcodeOwnerOf(ProcList(a))
+                    found = -1
+                    For oi = 0 To objCount - 1
+                        If objNames(oi) = owner Then found = oi: Exit For
+                    Next
+                    If found = -1 Then
+                        If objCount > UBound(objNames) Then
+                            ReDim Preserve objNames(objCount + 64): ReDim Preserve objCode(objCount + 64)
+                        End If
+                        objNames(objCount) = owner: objCode(objCount) = ""
+                        found = objCount: objCount = objCount + 1
+                    End If
+                    objCode(found) = objCode(found) & vb & vbCrLf
+
                     ProcList(a) = 0
                     c = 1
                 End If
             Next
         Loop While c
+        'Resolve control tokens (offset -> index -> name) then write the result
+        VBApplyControlNames strVBAll
+        Print #F, strVBAll
+        'Resolve control names per object and cache for the project tree.
+        Dim oj As Long
+        For oj = 0 To objCount - 1
+            Dim oc As String
+            oc = objCode(oj)
+            VBApplyControlNames oc
+            On Error Resume Next
+            gPcodeCodeCache.Add oc, "OBJ_" & UCase$(objNames(oj))
+            On Error GoTo 0
+        Next
     Close #f2
     Close #F
 
     frmMain.cmdSkipProcedure.Visible = False
 End Sub
+
+'Owning object name (UPPER) for a procedure address: from the object proc
+'tables when known, otherwise the prefix of the procedure's name.
+Private Function PcodeOwnerOf(ByVal addr As Long) As String
+    On Error Resume Next
+    Dim o As String
+    o = ""
+    o = gPcodeOwner("A" & addr)
+    If Len(o) > 0 Then
+        PcodeOwnerOf = UCase$(o)
+        Exit Function
+    End If
+    Dim nm As String, dp As Long
+    nm = DecompileProcToVB(addr, True)
+    dp = InStr(nm, ".")
+    If dp > 0 Then
+        PcodeOwnerOf = UCase$(Left$(nm, dp - 1))
+    Else
+        PcodeOwnerOf = "MODULE1"
+    End If
+End Function
+
+'Return the P-Code-decompiled VB source for an object (form / module / class),
+'so the project tree can show it in txtCode the same way native code does.
+'Falls back to signature-only stubs when the P-Code engine has not run
+'(P-Code decompiling can be disabled under Options).
+Public Function GetPcodeObjectCode(ByVal objName As String) As String
+    Dim code As String, p As Long
+    On Error Resume Next
+    If Not gPcodeCodeCache Is Nothing Then
+        code = gPcodeCodeCache("OBJ_" & UCase$(objName))
+        If Len(code) > 0 Then GetPcodeObjectCode = code: Exit Function
+    End If
+    For p = 0 To UBound(gProcedureList)
+        If UCase$(gProcedureList(p).strParent) = UCase$(objName) And gProcedureList(p).strProcedureName <> "" Then
+            If Right$(gProcedureList(p).strProcedureName, 1) = ")" Then
+                code = code & "Private Sub " & gProcedureList(p).strProcedureName & vbCrLf
+            Else
+                code = code & "Private Sub " & gProcedureList(p).strProcedureName & "()" & vbCrLf
+            End If
+            code = code & "End Sub" & vbCrLf
+        End If
+    Next
+    GetPcodeObjectCode = code
+End Function
+
 Sub LoadPE2(ByVal strFileName As String)
 '*****************************
 'Purpose: To get the PE data of the filename
@@ -421,25 +546,41 @@ Function DecompileProc(addr As Long) As String
 End Function
 Function DecompileProcToVB(addr As Long, Optional bReturnProcedureName As Boolean = False) As String
 '*****************************
-'Purpose: Decompile a P-Code procedure from a CodeInfo address
+'Purpose: Decompile a P-Code procedure back into readable VB source.
+'         Rather than translating opcodes one line at a time, this walks
+'         the byte stream while simulating the P-Code evaluation stack
+'         (VBExprStack).  A whole source statement - which compiles to many
+'         opcodes - is rebuilt as one expression and only written out when a
+'         "sink" opcode fires (a store, a property Let, a discarded call, a
+'         branch or a procedure exit).  Forward conditional branches are
+'         folded back into structured If ... End If blocks.
 '*****************************
-    Dim i As Long, t As Long, t2 As Long, u As String, m As OpcodeType
+    Dim i As Long, t As Long, t2 As Long, m As OpcodeType
     Dim pd As ProcDscInfo, output As String, pc&, pass&, sr&
     Dim tt As TableInfo
-    Dim strProcHeader As String
+    Dim pool As Long, mnem0 As String
     On Error Resume Next
     CopyMemory pd, file(addr), Len(pd)
     CopyMemory tt, file(pd.table), Len(tt)
     pc = addr - pd.ProcSize
-  
+
     If bReturnProcedureName = True Then
         DecompileProcToVB = FastName("proc", addr)
         Exit Function
-    Else
-        output = output & "Sub " & FastName("proc", addr) + "()" & vbCrLf
     End If
-    output = output & "'ProcInfo: StartAddress=" & Hex$(pc) & " ProcSize: " & pd.ProcSize & vbCrLf
-    For pass = 1 To 1 '0 To 1
+
+    VBEngineReset
+    VBProcEnd = addr
+    'Remember which form/object owns this procedure (e.g. "Form1" from
+    '"Form1.Timer1_Timer") so control offsets can be resolved per form.
+    Dim nmFull As String, dp As Long
+    nmFull = FastName("proc", addr)
+    dp = InStr(nmFull, ".")
+    If dp > 0 Then VBCurrentForm = Left$(nmFull, dp - 1) Else VBCurrentForm = ""
+    output = VBProcHeader(addr) & vbCrLf
+    output = output & "    'ProcInfo: StartAddress=" & Hex$(pc) & " ProcSize: " & pd.ProcSize & vbCrLf
+
+    For pass = 1 To 1
         i = pc
         Do
             DoEvents
@@ -447,10 +588,18 @@ Function DecompileProcToVB(addr As Long, Optional bReturnProcedureName As Boolea
                 bSkipProcedure = False
                 Exit Function
             End If
+
+            'Close any structured If blocks that end at this address
+            VBCloseIfs output, i
+
             If HasRef(i) And pass Then
-                output = output + vbCrLf + Hex$(i) + " " + FastName("loc", i) + ":"
-                output = output + vbTab + vbTab + vbTab + "; " + RefName(i) + vbCrLf
+                'A label that is not just an If-target gets emitted so any
+                'remaining GoTo style jumps still resolve.
+                If Not VBIsKnownIfTarget(i) Then
+                    output = output & FastName("loc", i) & ":" & vbCrLf
+                End If
             End If
+
             AddMap i
             t = file(i)
             i = i + 1
@@ -460,91 +609,506 @@ Function DecompileProcToVB(addr As Long, Optional bReturnProcedureName As Boolea
                     t2 = file(i)
                     i = i + 1
                     m = OPCode(t - &HFB + 1, t2)
-                    
                 Case Else
                     m = OPCode(0, t)
             End Select
             If m.Size <= 0 Then
-            'Size is -1 FreeVars
-            ReDim DataStack(0)
+                'Size is -1 (FreeVars): variable-length operand list
+                ReDim DataStack(0)
                 t = File16(i)
                 i = i + 2
-                If t < 48 Then
-                    i = i + t
-                End If
+                If t < 48 Then i = i + t
             End If
-            u = vbNullString
-            'Ident Code a little
-            'u = u & Space(5)
-            'u = u & modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic)
-            'MsgBox m.Mnemonic
-            'MsgBox modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic)
-            If bEndOfProcedure = True Then
-                DecompileProcToVB = output
-                Exit Function
-            End If
-                'Select Case m.Flag
-                 '   Case std
-                 '     u = u & modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic, ConvertStrToVB(m.Mnemonic, i, tt.ConstPool, tt.ConstPool, pc))
-                 '   Case idx
-                 '       u = u & modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic, ConvertStrToVB(m.Mnemonic, i, sr, tt.ConstPool, pc))
-                 '   Case none
-                '        u = u & modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic, "-1")
-                '    Case Else
-                '     u = u & modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic, "-1")
-                'End Select
-                Dim bNoOpcode As Boolean
-                Dim strVB As String
-            Select Case m.Flag
 
-                Case std
-                    strVB = modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic, ConvertStrToVB(m.Mnemonic, i, tt.ConstPool, tt.ConstPool, pc), bNoOpcode)
-                    If bNoOpcode = True Then
-                        u = u + strVB
-                    Else
-                        u = u + ConvertStr(m.Mnemonic, i, tt.ConstPool, tt.ConstPool, pc)
-                    End If
-                Case idx
-                    strVB = modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic, ConvertStrToVB(m.Mnemonic, i, sr, tt.ConstPool, pc), bNoOpcode)
-                    If bNoOpcode = True Then
-                        u = u + strVB
-                    Else
-                     u = u + ConvertStr(m.Mnemonic, i, sr, tt.ConstPool, pc)
-                    End If
-                Case none
-                    strVB = modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic, "-1", bNoOpcode)
-                    If bNoOpcode = True Then
-                        u = u + strVB
-                    Else
-                        u = u + (m.Mnemonic)
-                    End If
-                Case fOneString
-                    Call FreeOneString
-                
-                Case fReturnOneVar
-                    strVB = modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic, ConvertStrToVB(m.Mnemonic, i, tt.ConstPool, tt.ConstPool, pc), bNoOpcode)
-                    If bNoOpcode = True Then
-                        u = u + strVB
-                    Else
-                        u = u + (m.Mnemonic)
-                    End If
-                Case Else
-                    strVB = modPCodeToVB.ReturnVBCodeByPcodeToken(i, m.Mnemonic, "-1", bNoOpcode)
-                    If bNoOpcode = True Then
-                        u = u + strVB
-                    Else
-                    u = u + m.Mnemonic '+ "  ???"
-                    End If
-            End Select
-                
-   
-            u = u + vbCrLf
-            If pass Then output = output + u
+            'idx opcodes index off SR, everything else off the constant pool
+            If m.Flag = idx Then pool = sr Else pool = tt.ConstPool
+
+            mnem0 = m.Mnemonic
+            If InStr(mnem0, " ") > 0 Then mnem0 = Left$(mnem0, InStr(mnem0, " ") - 1)
+
+            VBProcessOpcode mnem0, m, i, pool, pc, output
+
             If m.Size > 0 Then i = i + m.Size - 1
         Loop While i < addr
     Next
-    'output = strProcHeader & output
+
+    'Drain anything still pending then close the procedure
+    VBFlushLeftovers output
+    VBCloseIfs output, &H7FFFFFFF
+    output = output & VBProcFooter(addr)
+
     DecompileProcToVB = output
+End Function
+
+Private Sub VBProcessOpcode(ByVal op As String, m As OpcodeType, ByVal i As Long, ByVal pool As Long, ByVal pc As Long, ByRef output As String)
+'*****************************
+'Apply one opcode to the simulated evaluation stack, emitting a VB statement
+'when the opcode is a sink.  'i' points at the first operand byte.
+'*****************************
+    Dim a As String, b As String, dst As String, tgt As Long
+    Dim propName As String, kind As String
+
+    Select Case op
+
+        '----- Literals: push a constant value -----
+        Case "LitI2":        VBPush CStr(File16(i))
+        Case "LitI2_Byte":   VBPush CStr(file(i))
+        Case "LitI4":        VBPush CStr(File32(i))
+        Case "LitStr", "LdFixedStr"
+                             VBPush cQuote & FileW(File32(File16(i) * 4 + pool)) & cQuote
+        Case "LitVarStr":    VBPush cQuote & FileW(File32(File16(i + 2) * 4 + pool)) & cQuote
+        Case "LitVar_TRUE":  VBPush "True"
+        Case "LitVar_Missing": VBPush VBMISSING
+        Case "FLdZeroAd":    VBPush "0"
+
+        '----- Loads: push a variable / argument reference -----
+        Case "FLdI2", "ILdI2", "ILdI4", "ILdR8", "ILdFPR4", "ILdFPR8", "FStStrCopy"
+                             VBPush MakeArg(File16(i))
+        Case "ImpAdLdI4", "ImpAdLdCy", "ImpAdLdFPR4", "ImpAdLdFPR8"
+                             VBPush VBStrip(MakeAddrToVB(File32(File16(i) * 4 + pool)))
+        Case "MemLdI2", "MemLdStr", "MemLdR8", "MemLdFPR4", "MemLdFPR8"
+                             VBPush "mem_" & Hex$(File16(i))
+
+        '----- Object / property access -----
+        Case "FLdPrThis":   VBPendingObj = "Me": VBPendingObjSet = True
+        Case "VCallAd", "ThisVCallAd"
+                             VBPendingObj = VBResolveControl(File16(i)): VBPendingObjSet = True
+        Case "VCallHresult"
+            VBResolveProp i, pool, propName, kind
+            Dim objName As String
+            If VBPendingObjSet Then objName = VBPendingObj Else objName = "Me"
+            Select Case kind
+                Case "Get"
+                    VBPush objName & "." & propName
+                Case "Let", "Set"
+                    b = VBStrip(VBPop())
+                    VBEmit output, objName & "." & propName & " = " & b
+                Case Else
+                    'A method call on the object
+                    VBEmit output, objName & "." & propName & VBArgList()
+            End Select
+            VBPendingObjSet = False
+
+        Case "ThisVCallHresult"
+            'A call to one of the form's own methods (operand layout %2 %c).
+            Dim mName As String
+            mName = VBCleanName(MakeAddrToVB(File32(File16(i + 2) * 4 + pool)))
+            VBEmit output, mName & VBArgList()
+            VBPendingObjSet = False
+
+        '----- Arithmetic (pop two, push folded expression) -----
+        Case "AddR8", "AddI2", "AddI4", "AddCy":    VBBinary "+"
+        Case "SubR4", "SubI2", "SubI4", "SubCy":    VBBinary "-"
+        Case "MulI2", "MulI4", "MulR8", "MulCy", "MulCyI2": VBBinary "*"
+        Case "DivR8":                               VBBinary "/"
+        Case "IDvI2", "IDvI4":                      VBBinary "\"
+        Case "ModI2", "ModI4":                      VBBinary "Mod"
+        Case "ConcatStr":                           VBBinary "&"
+
+        '----- Comparisons -----
+        Case "EqI2", "EqI4", "EqR4", "EqCy", "EqCyR8":          VBBinary "="
+        Case "NeI2", "NeI4", "NeR8", "NeCy", "NeCyR8":          VBBinary "<>"
+        Case "LtI2", "LtI4", "LtR8", "LtCy", "LtCyR8":          VBBinary "<"
+        Case "LeI2", "LeI4", "LeR8", "LeCy", "LeCyR8":          VBBinary "<="
+        Case "GtI2", "GtI4", "GtR4", "GtCy", "GtCyR8":          VBBinary ">"
+        Case "GeI2", "GeI4", "GeR8", "GeCy", "GeCyR8":          VBBinary ">="
+
+        '----- Logical -----
+        Case "OrI4":   VBBinary "Or"
+        Case "AndI4":  VBBinary "And"
+        Case "NotI4":  VBPush "Not (" & VBStrip(VBPop()) & ")"
+        Case "UMiI2", "UMiI4", "UMiR8", "UMiCy": VBPush "-" & VBPop()
+
+        '----- Stores (sink): write the top expression to a destination -----
+        Case "FStI2", "FStR4", "FStR8", "FStFPR4", "FStFPR8", "IStI2", "IStI4"
+            dst = MakeArg(File16(i))
+            VBEmit output, dst & " = " & VBStrip(VBPop())
+        Case "MemStI2", "MemStI4", "MemStR8", "MemStFPR4", "MemStFPR8"
+            VBEmit output, "mem_" & Hex$(File16(i)) & " = " & VBStrip(VBPop())
+
+        '----- Calls -----
+        Case "ImpAdCallI4", "ImpAdCallI2", "ImpAdCallFPR4", "ImpAdCallHresult", "ImpAdCallCy"
+            Dim fnName As String, fnArgs As String, nArgs As Long
+            fnName = VBCleanName(MakeAddrToVB(File32(File16(i) * 4 + pool)))
+            nArgs = VBKnownArity(fnName)
+            If nArgs >= 0 Then fnArgs = VBArgListN(nArgs) Else fnArgs = VBArgList()
+            Select Case op
+                Case "ImpAdCallHresult"
+                    'Discarded result -> emit as a statement (e.g. MsgBox ...)
+                    VBEmit output, fnName & " " & VBStripCallParens(fnArgs)
+                Case Else
+                    VBPush fnName & fnArgs
+            End Select
+
+        '----- Control flow: fold forward branches into If blocks -----
+        Case "BranchF"
+            tgt = pc + File16(i)
+            VBEmit output, "If " & VBStrip(VBPop()) & " Then"
+            VBPushIf tgt
+        Case "BranchT"
+            tgt = pc + File16(i)
+            VBEmit output, "If Not (" & VBStrip(VBPop()) & ") Then"
+            VBPushIf tgt
+        Case "Branch"
+            tgt = pc + File16(i)
+            'Unconditional jump - keep it as a GoTo so behaviour is preserved
+            VBEmit output, "GoTo " & FastName("loc", tgt)
+            AddRef tgt, i - 1
+
+        '----- Procedure exits -----
+        Case "ExitProc", "ExitProcHresult", "ExitProcI2", "ExitProcR4", _
+             "ExitProcR8", "ExitProcCy", "ExitProcCbHresult"
+            VBFlushLeftovers output
+            'Only emit an explicit Exit when this is an early return
+            If i < (VBProcEndAddr) Then VBEmit output, "Exit Sub"
+
+        '----- Memory frees: statement boundaries; flush stranded values -----
+        Case "FFreeVar", "FFreeStr", "FFree1Var", "FFree1Str", "FFreeAd", "FFree1Ad"
+            VBFlushLeftovers output
+
+        '----- Conversions and pointer plumbing: transparent, no output -----
+        Case Else
+            'Conversions (CR8I2, CI2I4, ...) leave their operand untouched.
+            'Pointer plumbing (FLdRfVar, FLdPr=, FStAdFunc, FLdFPR4, PopFPR4,
+            'FStVarCopyObj, PopTmpLdAd2, ...) is implicit in the rebuilt
+            'expressions, so it produces no VB on its own.
+    End Select
+End Sub
+
+'#############################################
+'Evaluation-stack helpers for the VB reconstruction engine
+'#############################################
+Private Function VBProcEndAddr() As Long
+    VBProcEndAddr = VBProcEnd
+End Function
+
+Private Sub VBEngineReset()
+    ReDim VBExprStack(64)
+    VBExprTop = 0
+    ReDim VBIfTarget(32)
+    VBIfTop = 0
+    VBIndent = 0
+    VBPendingObj = ""
+    VBPendingObjSet = False
+End Sub
+
+Private Sub VBPush(ByVal s As String)
+    If VBExprTop > UBound(VBExprStack) Then ReDim Preserve VBExprStack(VBExprTop + 32)
+    VBExprStack(VBExprTop) = s
+    VBExprTop = VBExprTop + 1
+End Sub
+
+Private Function VBPop() As String
+    If VBExprTop > 0 Then
+        VBExprTop = VBExprTop - 1
+        VBPop = VBExprStack(VBExprTop)
+    Else
+        VBPop = "Unknown"
+    End If
+End Function
+
+Private Sub VBBinary(ByVal opText As String)
+    Dim a As String, b As String
+    b = VBPop()
+    a = VBPop()
+    VBPush "(" & a & " " & opText & " " & b & ")"
+End Sub
+
+Private Sub VBEmit(ByRef output As String, ByVal stmt As String)
+    Dim ind As Long
+    ind = 1 + VBIndent
+    'A closing block keyword is written at the outer indent
+    output = output & String$(ind, vbTab) & stmt & vbCrLf
+    If Left$(stmt, 3) = "If " Then VBIndent = VBIndent + 1
+End Sub
+
+Private Sub VBFlushLeftovers(ByRef output As String)
+    'Any value still on the stack at a statement boundary was a call whose
+    'result is discarded - emit each as its own statement.
+    Dim k As Long, item As String
+    For k = 0 To VBExprTop - 1
+        item = VBExprStack(k)
+        If item <> VBMISSING And Len(Trim$(item)) > 0 Then
+            'A stranded value is a call whose return value was discarded.
+            'Calls with a parenthesised argument list need "Call" to be a
+            'valid statement.
+            If VBLooksLikeCall(item) Then item = "Call " & item
+            output = output & String$(1 + VBIndent, vbTab) & item & vbCrLf
+        End If
+    Next
+    VBExprTop = 0
+End Sub
+
+Private Sub VBPushIf(ByVal tgt As Long)
+    If VBIfTop > UBound(VBIfTarget) Then ReDim Preserve VBIfTarget(VBIfTop + 16)
+    VBIfTarget(VBIfTop) = tgt
+    VBIfTop = VBIfTop + 1
+End Sub
+
+Private Sub VBCloseIfs(ByRef output As String, ByVal addr As Long)
+    Do While VBIfTop > 0
+        If VBIfTarget(VBIfTop - 1) > addr Then Exit Do
+        VBIfTop = VBIfTop - 1
+        If VBIndent > 0 Then VBIndent = VBIndent - 1
+        output = output & String$(1 + VBIndent, vbTab) & "End If" & vbCrLf
+    Loop
+End Sub
+
+Private Function VBIsKnownIfTarget(ByVal addr As Long) As Boolean
+    Dim k As Long
+    For k = 0 To VBIfTop - 1
+        If VBIfTarget(k) = addr Then VBIsKnownIfTarget = True: Exit Function
+    Next
+End Function
+
+Private Function VBResolveControl(ByVal vtOffset As Long) As String
+    'The VCallAd operand is a byte offset into the form instance and equals
+    '(base + tControl.index * 4).  The base is form-specific and only solvable
+    'once all of the form's offsets are known, so emit a unique token now and
+    'resolve it to the real control name in a post-pass (VBApplyControlNames).
+    VBRecordControl VBCurrentForm, vtOffset
+    VBResolveControl = VBCtlToken(VBCurrentForm, vtOffset)
+End Function
+
+Private Function VBCtlToken(ByVal formName As String, ByVal vtOffset As Long) As String
+    'Sentinel-wrapped token, unique per (form, offset); replaced after decode.
+    VBCtlToken = Chr$(1) & "CTL" & Chr$(2) & formName & Chr$(2) & Hex$(vtOffset) & Chr$(1)
+End Function
+
+Private Sub VBRecordControl(ByVal formName As String, ByVal vtOffset As Long)
+    Dim k As Long
+    For k = 0 To VBCtlCnt - 1
+        If VBCtlOff(k) = vtOffset And VBCtlForm(k) = formName Then Exit Sub
+    Next
+    If VBCtlCnt = 0 Then
+        ReDim VBCtlForm(32): ReDim VBCtlOff(32)
+    ElseIf VBCtlCnt > UBound(VBCtlOff) Then
+        ReDim Preserve VBCtlForm(VBCtlCnt + 32): ReDim Preserve VBCtlOff(VBCtlCnt + 32)
+    End If
+    VBCtlForm(VBCtlCnt) = formName
+    VBCtlOff(VBCtlCnt) = vtOffset
+    VBCtlCnt = VBCtlCnt + 1
+End Sub
+
+Public Sub VBResetControlCollection()
+    VBCtlCnt = 0
+    Erase VBCtlForm
+    Erase VBCtlOff
+End Sub
+
+Public Sub VBApplyControlNames(ByRef text As String)
+    '*****************************
+    'Replace every recorded control-access token with its real control name.
+    'For each form the instance base is solved from the pooled offsets against
+    'the known control indices, then offset -> index -> name.
+    '*****************************
+    Dim k As Long, j As Long, formName As String, base As Long
+    Dim doneForm As String, tok As String, nm As String
+    On Error Resume Next
+    For k = 0 To VBCtlCnt - 1
+        formName = VBCtlForm(k)
+        'Solve this form's base only once
+        If InStr(doneForm, Chr$(1) & formName & Chr$(1)) = 0 Then
+            doneForm = doneForm & Chr$(1) & formName & Chr$(1)
+            base = VBSolveControlBase(formName)
+            'Replace every token belonging to this form
+            For j = 0 To VBCtlCnt - 1
+                If VBCtlForm(j) = formName Then
+                    tok = VBCtlToken(formName, VBCtlOff(j))
+                    nm = VBControlNameAt(formName, VBCtlOff(j), base)
+                    text = Replace(text, tok, nm)
+                End If
+            Next
+        End If
+    Next
+End Sub
+
+Private Function VBSolveControlBase(ByVal formName As String) As Long
+    'Find the single base B such that, for every offset used by this form,
+    '(offset - B) is a non-negative multiple of 4 whose quotient is the index
+    'of one of the form's controls.  A form with several distinct offsets pins
+    'B uniquely.
+    Dim k As Long, idx As Long, cand As Long, firstOff As Long, ok As Boolean
+    On Error Resume Next
+    VBSolveControlBase = -1
+    firstOff = -1
+    For k = 0 To VBCtlCnt - 1
+        If VBCtlForm(k) = formName Then firstOff = VBCtlOff(k): Exit For
+    Next
+    If firstOff < 0 Then Exit Function
+
+    'Candidate bases: firstOff minus (index * 4) for each control of the form
+    For k = 0 To UBound(gControlNameArray)
+        If gControlNameArray(k).strParentForm = formName Then
+            idx = gControlNameArray(k).lControlIndex
+            cand = firstOff - idx * 4
+            If cand >= 0 Then
+                If VBBaseFits(formName, cand) Then
+                    VBSolveControlBase = cand
+                    Exit Function
+                End If
+            End If
+        End If
+    Next
+End Function
+
+Private Function VBBaseFits(ByVal formName As String, ByVal base As Long) As Boolean
+    Dim k As Long, d As Long
+    On Error Resume Next
+    For k = 0 To VBCtlCnt - 1
+        If VBCtlForm(k) = formName Then
+            d = VBCtlOff(k) - base
+            If d < 0 Then Exit Function
+            If (d Mod 4) <> 0 Then Exit Function
+            If VBControlByIndex(formName, d \ 4) = "" Then Exit Function
+        End If
+    Next
+    VBBaseFits = True
+End Function
+
+Private Function VBControlByIndex(ByVal formName As String, ByVal idx As Long) As String
+    Dim k As Long
+    On Error Resume Next
+    For k = 0 To UBound(gControlNameArray)
+        If gControlNameArray(k).strParentForm = formName Then
+            If gControlNameArray(k).lControlIndex = idx Then
+                VBControlByIndex = gControlNameArray(k).strControlName
+                Exit Function
+            End If
+        End If
+    Next
+End Function
+
+Private Function VBControlNameAt(ByVal formName As String, ByVal vtOffset As Long, ByVal base As Long) As String
+    Dim nm As String
+    If base >= 0 And vtOffset >= base And ((vtOffset - base) Mod 4) = 0 Then
+        nm = VBControlByIndex(formName, (vtOffset - base) \ 4)
+    End If
+    If Len(nm) > 0 Then VBControlNameAt = nm Else VBControlNameAt = "Ctl_" & Hex$(vtOffset)
+End Function
+
+Private Sub VBResolveProp(ByVal i As Long, ByVal pool As Long, ByRef propName As String, ByRef kind As String)
+    Dim lParam As Long, t As Long, gp As String, namePart As String, p As Long
+    lParam = File16(i)
+    t = File32(File16(i + 2) * 4 + pool)
+    gp = GetProperty(FileGUID(t), lParam)        '"PictureBox_Left (Property Get)"
+    p = InStr(gp, " (")
+    If p > 0 Then namePart = Left$(gp, p - 1) Else namePart = gp
+    p = InStrRev(namePart, "_")
+    If p > 0 Then propName = Mid$(namePart, p + 1) Else propName = namePart
+    If InStr(gp, "Get") > 0 Then
+        kind = "Get"
+    ElseIf InStr(gp, "Let") > 0 Then
+        kind = "Let"
+    ElseIf InStr(gp, "Set") > 0 Then
+        kind = "Set"
+    Else
+        kind = "Method"
+    End If
+End Sub
+
+Private Function VBArgList() As String
+    'Drain the whole stack (oldest first) into "(a, b, c)".
+    VBArgList = VBArgListN(VBExprTop)
+End Function
+
+Private Function VBArgListN(ByVal n As Long) As String
+    'VB pushes call arguments right-to-left, so the most recently pushed
+    'value is the first argument.  Walk the consumed slots top-down.
+    Dim k As Long, base As Long, s As String, item As String
+    If n < 0 Then n = 0
+    If n > VBExprTop Then n = VBExprTop
+    base = VBExprTop - n
+    For k = VBExprTop - 1 To base Step -1
+        item = VBExprStack(k)
+        If item <> VBMISSING Then
+            If Len(s) > 0 Then s = s & ", "
+            s = s & VBStrip(item)
+        End If
+    Next
+    VBExprTop = base
+    VBArgListN = "(" & s & ")"
+End Function
+
+Private Function VBStripCallParens(ByVal s As String) As String
+    'Turn "(a, b)" into "a, b" for statement-style calls (MsgBox x, y, z).
+    s = Trim$(s)
+    If Left$(s, 1) = "(" And Right$(s, 1) = ")" Then s = Mid$(s, 2, Len(s) - 2)
+    VBStripCallParens = s
+End Function
+
+Private Function VBCleanName(ByVal s As String) As String
+    'MakeAddrToVB returns names such as "RGB()" / "MsgBox()" - strip the
+    'trailing empty parens so the engine can append its own argument list.
+    s = Trim$(VBStrip(s))
+    If Right$(s, 2) = "()" Then s = Left$(s, Len(s) - 2)
+    VBCleanName = Trim$(s)
+End Function
+
+Private Function VBLooksLikeCall(ByVal s As String) As Boolean
+    'True for "Name(args)" / "Me.Method(args)" style expressions.
+    Dim c As String
+    s = Trim$(s)
+    If InStr(s, "(") = 0 Then Exit Function
+    c = Left$(s, 1)
+    If (c >= "A" And c <= "Z") Or (c >= "a" And c <= "z") Then VBLooksLikeCall = True
+End Function
+
+Private Function VBStrip(ByVal s As String) As String
+    'Remove one redundant outer pair of parentheses if it wraps the whole
+    'expression, so "(a + b)" reads as "a + b".
+    Dim depth As Long, k As Long
+    s = Trim$(s)
+    If Len(s) >= 2 And Left$(s, 1) = "(" And Right$(s, 1) = ")" Then
+        depth = 0
+        For k = 1 To Len(s)
+            Select Case Mid$(s, k, 1)
+                Case "(": depth = depth + 1
+                Case ")"
+                    depth = depth - 1
+                    If depth = 0 And k < Len(s) Then VBStrip = s: Exit Function
+            End Select
+        Next
+        VBStrip = Mid$(s, 2, Len(s) - 2)
+    Else
+        VBStrip = s
+    End If
+End Function
+
+Private Function VBKnownArity(ByVal fnName As String) As Long
+    'Returns the fixed argument count for common runtime calls, or -1 when
+    'the call is variadic / unknown (drain the whole stack instead).
+    Select Case UCase$(Trim$(fnName))
+        Case "ASC", "ASCW", "ASCB", "CHR", "CHRW", "CHRB", "LEN", "LENB", _
+             "CINT", "CLNG", "CSNG", "CDBL", "CBYTE", "CBOOL", "CCUR", "CVAR", _
+             "INT", "FIX", "ABS", "SGN", "SQR", "EXP", "LOG", "SIN", "COS", _
+             "TAN", "ATN", "UCASE", "LCASE", "TRIM", "LTRIM", "RTRIM", "HEX", _
+             "OCT", "STR", "VAL", "ISNUMERIC", "ISNULL", "ISEMPTY", "ISDATE", _
+             "ISARRAY", "ISOBJECT", "RND"
+            VBKnownArity = 1
+        Case "RGB", "MID", "LEFTB", "RIGHTB", "STRING", "INSTRREV"
+            VBKnownArity = 3
+        Case "LEFT", "RIGHT", "SPACE", "QBCOLOR"
+            VBKnownArity = 2
+        Case Else
+            VBKnownArity = -1
+    End Select
+End Function
+
+Private Function VBProcHeader(ByVal addr As Long) As String
+    'Build a clean "Private Sub Name(args)" header from the recovered name.
+    Dim nm As String, p As Long
+    nm = FastName("proc", addr)
+    p = InStr(nm, ".")
+    If p > 0 Then nm = Mid$(nm, p + 1)      'drop the "Form1." object prefix
+    nm = Trim$(nm)
+    nm = Replace(nm, " (", "(")             'Name (args) -> Name(args)
+    If InStr(nm, "(") = 0 Then nm = nm & "()"
+    VBProcHeader = "Private Sub " & nm
+End Function
+
+Private Function VBProcFooter(ByVal addr As Long) As String
+    VBProcFooter = "End Sub" & vbCrLf
 End Function
 
 Private Function ConvertStr(Mnem As String, addr As Long, pool As Long, origpool As Long, ProcPC As Long) As String
@@ -2564,7 +3128,7 @@ End Sub
 Public Function GetPCodeStringList() As String
     GetPCodeStringList = strPCODEStringList
 End Function
-Private Function GetProperty(ByVal strGuid As String, ByVal lCode As Long) As String
+Public Function GetProperty(ByVal strGuid As String, ByVal lCode As Long) As String
     'Control Type
     Dim i As Long, g As Long
     With cTypeInfo

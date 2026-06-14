@@ -21,6 +21,232 @@ Global gNativeProcArray() As NativeProcType
 Global NativeShowOffsets As Boolean
 Global NativeShowHexInformation As Boolean
 
+'Decompiled code, grouped by owning object (form/module/class), built once at
+'load so the main tree can show it inline.  Keyed "OBJ_<UPPER object name>".
+Public gNativeCodeCache As Collection
+'Raw native disassembly per object, keyed "OBJ_<UPPER name>", built in the same
+'pass as gNativeCodeCache so the Dism tab never disassembles a second time.
+Public gNativeDismCache As Collection
+
+'*****************************
+'ScanNativeProcsByPrologue
+'Find procedures that have no event-link table entry - most importantly the
+'Sub/Function procedures in .bas modules, but also any private class procedure.
+'
+'VB6 lays out every object's native code contiguously, in object-table order,
+'and every procedure starts with the standard prologue:
+'        55          push ebp
+'        8B EC       mov  ebp, esp
+'So we read the whole native code range (gProjectInfo.aStartOfCode ..
+'aEndOfCode) and add any prologue address we did not already discover through
+'the event tables.
+'
+'Ownership: the form/class objects give exact code-start anchors (their lowest
+'event-proc address).  Because code is in object-table order, the modules that
+'follow an anchored object - up to the next anchored object - own the non-event
+'procedures found in that address range.  Within such a run of modules the procs
+'are split in proportion to each module's declared ProcCount (native code keeps
+'no per-module proc table, so this is the best available boundary).  See
+'AssignRegionProcs.
+'*****************************
+Public Sub ScanNativeProcsByPrologue(ByVal F As Integer)
+    On Error GoTo done
+
+    Dim startVA As Long, endVA As Long, codeLen As Long
+    startVA = gProjectInfo.aStartOfCode
+    endVA = gProjectInfo.aEndOfCode
+    If startVA = 0 Or endVA <= startVA Then Exit Sub
+    codeLen = endVA - startVA
+    If codeLen < 3 Or codeLen > 16000000 Then Exit Sub
+
+    Dim nObj As Long
+    nObj = UBound(gObjectNameArray)        'objects 0..nObj (table order = code order)
+
+    'Per object: anchor (lowest known event-proc addr - 0 if none, i.e. a module),
+    'whether it is a module, and its declared procedure count.
+    Dim objAnchor() As Long, objIsMod() As Boolean, objPC() As Long
+    ReDim objAnchor(nObj): ReDim objIsMod(nObj): ReDim objPC(nObj)
+    Dim oi As Long
+    For oi = 0 To nObj
+        objIsMod(oi) = ((gObject(oi).ObjectType And &H2) = 0)
+        objPC(oi) = gObject(oi).ProcCount
+    Next oi
+
+    Dim p As Long, dotPos As Long, objName As String
+    For p = 0 To UBound(gNativeProcArray) - 1
+        If gNativeProcArray(p).offset <> 0 Then
+            dotPos = InStr(gNativeProcArray(p).sName, ".")
+            If dotPos > 0 Then
+                objName = Left$(gNativeProcArray(p).sName, dotPos - 1)
+                For oi = 0 To nObj
+                    If gObjectNameArray(oi) = objName Then
+                        If objAnchor(oi) = 0 Or gNativeProcArray(p).offset < objAnchor(oi) Then _
+                            objAnchor(oi) = gNativeProcArray(p).offset
+                        Exit For
+                    End If
+                Next oi
+            End If
+        End If
+    Next p
+
+    'Addresses we already know (event procs + SubMain) so we never duplicate.
+    Dim seen As Collection
+    Set seen = New Collection
+    On Error Resume Next
+    For p = 0 To UBound(gNativeProcArray) - 1
+        If gNativeProcArray(p).offset <> 0 Then seen.Add 1, "k" & gNativeProcArray(p).offset
+    Next p
+    If gVBHeader.aSubMain <> 0 Then seen.Add 1, "k" & gVBHeader.aSubMain
+    On Error GoTo done
+
+    'Read the whole native code blob once and collect every new prologue address
+    '(55 8B EC = push ebp / mov ebp,esp) in ascending order.
+    Dim b() As Byte
+    ReDim b(codeLen - 1)
+    Seek F, startVA + 1 - OptHeader.ImageBase
+    Get F, , b
+
+    Dim newAddr() As Long, nNew As Long
+    ReDim newAddr(1024): nNew = 0
+    Dim j As Long, va As Long
+    For j = 0 To codeLen - 3
+        If b(j) = &H55 And b(j + 1) = &H8B And b(j + 2) = &HEC Then
+            va = startVA + j
+            If Not KeyExists(seen, "k" & va) Then
+                seen.Add 1, "k" & va
+                If nNew > UBound(newAddr) Then ReDim Preserve newAddr(nNew + 1024)
+                newAddr(nNew) = va: nNew = nNew + 1
+            End If
+        End If
+    Next j
+    If nNew = 0 Then GoTo done
+
+    'Build segment boundaries from the anchored (form/class) objects.  Code is
+    'laid out in object-table order, so each anchored object starts a region and
+    'the module objects that follow it (before the next anchored object) own the
+    'non-event procedures found in that region.  Segment 0 covers any leading
+    'modules before the first anchored object.
+    Dim segStart() As Long, segLead() As Long, nSeg As Long
+    ReDim segStart(nObj + 2): ReDim segLead(nObj + 2)
+    segStart(0) = startVA: segLead(0) = -1: nSeg = 1
+    For oi = 0 To nObj
+        If objAnchor(oi) <> 0 Then
+            segStart(nSeg) = objAnchor(oi): segLead(nSeg) = oi: nSeg = nSeg + 1
+        End If
+    Next oi
+
+    'Sort segments by start address (object-table order should already be
+    'ascending, but guard against the odd out-of-order layout).
+    Dim a As Long, c As Long, ts As Long, tl As Long
+    For a = 0 To nSeg - 2
+        For c = a + 1 To nSeg - 1
+            If segStart(c) < segStart(a) Then
+                ts = segStart(a): segStart(a) = segStart(c): segStart(c) = ts
+                tl = segLead(a): segLead(a) = segLead(c): segLead(c) = tl
+            End If
+        Next c
+    Next a
+
+    Dim si As Long, regEnd As Long, nextLead As Long
+    For si = 0 To nSeg - 1
+        If si < nSeg - 1 Then regEnd = segStart(si + 1) Else regEnd = endVA
+        If si < nSeg - 1 Then nextLead = segLead(si + 1) Else nextLead = nObj + 1
+        Call AssignRegionProcs(newAddr(), nNew, segStart(si), regEnd, segLead(si), nextLead, objIsMod(), objPC())
+    Next si
+
+done:
+End Sub
+
+'Assign the new (non-event) procedures found in [regStart, regEnd) to the module
+'objects that fall between the leading anchored object and the next one.
+'Procedures are kept in address (code) order and split between the modules in
+'proportion to their declared ProcCount.  If the region has no modules the procs
+'are the leading form/class's own private procedures.
+Private Sub AssignRegionProcs(ByRef newAddr() As Long, ByVal nNew As Long, _
+        ByVal regStart As Long, ByVal regEnd As Long, ByVal leadIdx As Long, _
+        ByVal nextLead As Long, ByRef objIsMod() As Boolean, ByRef objPC() As Long)
+
+    Dim regProc() As Long, nReg As Long, i As Long
+    ReDim regProc(nNew): nReg = 0
+    For i = 0 To nNew - 1
+        If newAddr(i) >= regStart And newAddr(i) < regEnd Then
+            regProc(nReg) = newAddr(i): nReg = nReg + 1
+        End If
+    Next i
+    If nReg = 0 Then Exit Sub
+
+    'Module objects in (leadIdx, nextLead)
+    Dim mods() As Long, nMods As Long, oi As Long
+    ReDim mods(UBound(objIsMod) + 1)
+    nMods = 0
+    For oi = leadIdx + 1 To nextLead - 1
+        If oi >= 0 And oi <= UBound(objIsMod) Then
+            If objIsMod(oi) Then mods(nMods) = oi: nMods = nMods + 1
+        End If
+    Next oi
+
+    'No modules -> the leading form/class owns these private procedures.
+    If nMods = 0 Then
+        If leadIdx >= 0 Then
+            For i = 0 To nReg - 1
+                AddNativeProc gObjectNameArray(leadIdx), regProc(i)
+            Next i
+        End If
+        Exit Sub
+    End If
+
+    'Shares proportional to ProcCount (even split if all counts are zero).
+    Dim share() As Long, totPC As Long, m As Long, used As Long
+    ReDim share(nMods - 1)
+    totPC = 0
+    For m = 0 To nMods - 1: totPC = totPC + objPC(mods(m)): Next m
+    used = 0
+    For m = 0 To nMods - 1
+        If totPC > 0 Then
+            share(m) = (CLng(nReg) * objPC(mods(m))) \ totPC
+        Else
+            share(m) = nReg \ nMods
+        End If
+        used = used + share(m)
+    Next m
+    'Hand out any rounding leftover round-robin so nothing is dropped.
+    Dim rr As Long, leftover As Long
+    leftover = nReg - used: rr = 0
+    Do While leftover > 0
+        share(rr Mod nMods) = share(rr Mod nMods) + 1
+        rr = rr + 1: leftover = leftover - 1
+    Loop
+
+    'Assign in address order, module by module.
+    Dim pIdx As Long, cnt As Long
+    pIdx = 0
+    For m = 0 To nMods - 1
+        For cnt = 1 To share(m)
+            If pIdx >= nReg Then Exit For
+            AddNativeProc gObjectNameArray(mods(m)), regProc(pIdx)
+            pIdx = pIdx + 1
+        Next cnt
+    Next m
+    Do While pIdx < nReg
+        AddNativeProc gObjectNameArray(mods(nMods - 1)), regProc(pIdx)
+        pIdx = pIdx + 1
+    Loop
+End Sub
+
+Private Sub AddNativeProc(ByVal owner As String, ByVal va As Long)
+    gNativeProcArray(UBound(gNativeProcArray)).sName = owner & ".proc_" & Hex$(va)
+    gNativeProcArray(UBound(gNativeProcArray)).offset = va
+    ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
+End Sub
+
+Private Function KeyExists(ByRef col As Collection, ByVal key As String) As Boolean
+    Dim v As Variant
+    On Error Resume Next
+    v = col(key)
+    KeyExists = (Err.Number = 0)
+    Err.Clear
+End Function
+
 Public Sub Decode(ByVal Filename As String)
 '*****************************
 'Purpose: To Get the procdures of a Native Exe and produce a report
@@ -45,8 +271,161 @@ Dim FileNum As Integer
              Print #F, gNativeProcArray(i).offset
         Next i
     Close #F
-    
+
+    'Decompile every procedure to readable VB, grouped by object, for the tree.
+    Call BuildNativeCodeCache
+
 End Sub
+
+Public Sub BuildNativeCodeCache()
+'*****************************
+'Decompile each procedure (grouped by its owning object) and cache the result
+'so the main tree can display per-object code without re-running the engine.
+'Addresses come from gNativeProcArray - the same authoritative list the Native
+'Procedure Decompile window uses - so they are always valid (SubNamelist's
+'event-proc addresses are unreliable).  The procedure name in each header is
+'resolved internally by the engine from the address.
+'*****************************
+    On Error Resume Next
+    Dim objNames() As String, objCode() As String, objCount As Long
+    Dim p As Long, oi As Long, found As Long, addr As Long, body As String, total As Long, done As Long
+    Dim sn As String, objName As String, dotPos As Long
+
+    Set gNativeCodeCache = New Collection
+    Set gNativeDismCache = New Collection
+    Dim objDism() As String
+    Dim ub As Long
+    ub = -1
+    ub = UBound(gNativeProcArray)                      '-1 stays if not dimensioned
+    If ub < 0 Then Exit Sub
+    total = ub
+    ReDim objNames(64): ReDim objCode(64): ReDim objDism(64): objCount = 0
+
+    For p = 0 To ub - 1
+        If CancelDecompile = True Then Exit For
+        addr = gNativeProcArray(p).offset
+        If addr = 0 Then GoTo nextProc
+
+        'Owning object is the prefix of the synthetic name "Object.proc:addr"
+        sn = gNativeProcArray(p).sName
+        dotPos = InStr(sn, ".")
+        If dotPos > 0 Then objName = UCase$(Left$(sn, dotPos - 1)) Else objName = "MODULE1"
+
+        found = -1
+        For oi = 0 To objCount - 1
+            If objNames(oi) = objName Then found = oi: Exit For
+        Next
+        If found = -1 Then
+            If objCount > UBound(objNames) Then
+                ReDim Preserve objNames(objCount + 64): ReDim Preserve objCode(objCount + 64): ReDim Preserve objDism(objCount + 64)
+            End If
+            objNames(objCount) = objName
+            objCode(objCount) = ""
+            objDism(objCount) = ""
+            found = objCount: objCount = objCount + 1
+        End If
+
+        done = done + 1
+        frmMain.txtStatus.Text = frmMain.txtStatus.Text & "Decompiling " & sn & " (" & done & "\" & total & ")" & vbCrLf
+        frmMain.txtStatus.Refresh
+        DoEvents
+
+        body = modNativeToVB.DecompileNativeProcToVB(addr)
+        objCode(found) = objCode(found) & body & vbCrLf
+        'Raw disassembly captured during the decompile above (no re-disassembly).
+        objDism(found) = objDism(found) & _
+            "; ---------------------------------------------" & vbCrLf & _
+            "; " & sn & "  (" & Hex$(addr) & "h)" & vbCrLf & _
+            "; ---------------------------------------------" & vbCrLf & _
+            modNativeToVB.NVLastDisasmText & vbCrLf
+nextProc:
+    Next p
+
+    For oi = 0 To objCount - 1
+        gNativeCodeCache.Add objCode(oi), "OBJ_" & objNames(oi)
+        gNativeDismCache.Add objDism(oi), "OBJ_" & objNames(oi)
+    Next
+End Sub
+
+Public Function GetNativeObjectCode(ByVal objName As String) As String
+'*****************************
+'Return the cached decompiled code for an object, or empty stubs built from the
+'procedure list when nothing was cached (e.g. P-Code projects).
+'*****************************
+    Dim code As String, p As Long
+    On Error Resume Next
+    If Not gNativeCodeCache Is Nothing Then
+        code = gNativeCodeCache("OBJ_" & UCase$(objName))
+        If Len(code) > 0 Then GetNativeObjectCode = code: Exit Function
+    End If
+    'Fallback: signature-only stubs
+    For p = 0 To UBound(gProcedureList)
+        If UCase$(gProcedureList(p).strParent) = UCase$(objName) And gProcedureList(p).strProcedureName <> "" Then
+            If Right$(gProcedureList(p).strProcedureName, 1) = ")" Then
+                code = code & "Private Sub " & gProcedureList(p).strProcedureName & vbCrLf
+            Else
+                code = code & "Private Sub " & gProcedureList(p).strProcedureName & "()" & vbCrLf
+            End If
+            code = code & "End Sub" & vbCrLf
+        End If
+    Next
+    GetNativeObjectCode = code
+End Function
+
+'*****************************
+'GetNativeObjectDisassembly
+'Return the raw native disassembly of every procedure that belongs to objName
+'(form / module / class).  Served from gNativeDismCache, which is built in the
+'same pass as the decompiled code (BuildNativeCodeCache) so the procedure is
+'never disassembled a second time.  Falls back to a live disassembly only if
+'the cache was never built.
+'*****************************
+Public Function GetNativeObjectDisassembly(ByVal objName As String) As String
+    On Error GoTo done
+    If gProjectInfo.aNativeCode = 0 Then
+        GetNativeObjectDisassembly = "; This project is compiled to P-Code - no native assembly available."
+        Exit Function
+    End If
+
+    'Fast path: cached during load.
+    If Not gNativeDismCache Is Nothing Then
+        Dim cached As String
+        cached = gNativeDismCache("OBJ_" & UCase$(objName))
+        If Len(cached) > 0 Then GetNativeObjectDisassembly = cached: Exit Function
+    End If
+
+    'Fallback: cache not built yet - disassemble live this once.
+    Dim ub As Long
+    ub = -1
+    ub = UBound(gNativeProcArray)
+    If ub < 1 Then Exit Function
+
+    Dim p As Long, dotPos As Long, owner As String, va As Long, cnt As Long
+    Dim sb As String, target As String, ignoreVB As String
+    target = UCase$(objName)
+    For p = 0 To ub - 1
+        If gNativeProcArray(p).offset <> 0 Then
+            dotPos = InStr(gNativeProcArray(p).sName, ".")
+            If dotPos > 0 Then owner = UCase$(Left$(gNativeProcArray(p).sName, dotPos - 1)) Else owner = ""
+            If owner = target Then
+                va = gNativeProcArray(p).offset
+                'Fills NVLastDisasmText as a side effect; the VB return is ignored.
+                ignoreVB = modNativeToVB.DecompileNativeProcToVB(va)
+                sb = sb & "; ---------------------------------------------" & vbCrLf
+                sb = sb & "; " & gNativeProcArray(p).sName & "  (" & Hex$(va) & "h)" & vbCrLf
+                sb = sb & "; ---------------------------------------------" & vbCrLf
+                sb = sb & modNativeToVB.NVLastDisasmText & vbCrLf
+                cnt = cnt + 1
+            End If
+        End If
+    Next p
+
+    If cnt = 0 Then sb = "; No native procedures found for " & objName
+    GetNativeObjectDisassembly = sb
+    Exit Function
+done:
+    GetNativeObjectDisassembly = sb & vbCrLf & "; (disassembly stopped: " & err.Description & ")"
+End Function
 
 Sub VBFunction_Description_Init(ByVal fRes As String)
 '*****************************

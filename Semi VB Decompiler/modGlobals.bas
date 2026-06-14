@@ -14,7 +14,7 @@ Attribute VB_Name = "modGlobals"
 '*********************************************
 Option Explicit
 Const MAX_PATH = 260
-Public Const Version As String = "0.09" 'Current Version of Semi VB Decompiler
+Public Const Version As String = "2.0" 'Current Version of Semi VB Decompiler
 
 Type VBHeader
     signature               As String * 4  '00h 00d
@@ -599,12 +599,20 @@ Global gDumpData As Boolean
 Global gShowOffsets As Boolean
 Global gShowColors As Boolean
 Global gPcodeDecompile As Boolean
+'When True, project generation writes each object's raw native disassembly
+'(the Dism tab) into the source files instead of the decompiled VB code.
+Global gExportDisassembly As Boolean
+
+'When True the app is running headless (command line); suppress all message
+'boxes / prompts and never block waiting for user input.
+Global gQuietMode As Boolean
 
 Private Type typeControlName
     strParentForm As String
     strControlName As String
     strGuid As String
     bControlImage As Byte
+    lControlIndex As Long   'tControl.index - used to map P-Code VCallAd offsets to controls
 End Type
 Global gControlNameArray() As typeControlName
 
@@ -1285,6 +1293,9 @@ Sub PrintReadMe()
         Print #F, "6. Credits"
         Print #F, ""
         Print #F, "1. What's New?"
+        Print #F, ""
+        Print #F, "   Version 2.0"
+        Print #F, "   Native decompiler now finds procedure offsets for modules and classes, recovers .bas module procedures, shows them in the project tree, exports decompiled code into the generated project, and adds a raw disassembly (Dism) tab."
         Print #F, ""
         Print #F, "   Version 0.09"
         Print #F, "   Added a new tool. Api Add allows you to add Api's to the Semi VB Decompiler Api Database."
@@ -2030,7 +2041,7 @@ Sub LoadObjectType()
 '*****************************
 'Purpose: Checks wether a FileExists or not
 '*****************************
-    ReDim gObjectTypeList(15)
+    ReDim gObjectTypeList(17)
     gObjectTypeList(0).value = 98435
     gObjectTypeList(0).strType = 1
     gObjectTypeList(1).value = 98467
@@ -2063,6 +2074,13 @@ Sub LoadObjectType()
     gObjectTypeList(14).strType = 5
     gObjectTypeList(15).value = 1411075
     gObjectTypeList(15).strType = 6
+    'Module variants with bit5/bit6 set (e.g. 0x18041), same pattern as the
+    'form variants above.  Without these a .bas module is not recognised and
+    'never gets a tree node / methods count / code view.
+    gObjectTypeList(16).value = 98369   '0x18041
+    gObjectTypeList(16).strType = 2
+    gObjectTypeList(17).value = 98401   '0x18061
+    gObjectTypeList(17).strType = 2
 End Sub
 Public Sub AddToErrorLog(ByVal strError As String)
     strErrorLog = strErrorLog & strError & vbCrLf

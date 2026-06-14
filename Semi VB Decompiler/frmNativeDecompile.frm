@@ -1,17 +1,17 @@
 VERSION 5.00
-Object = "{F9043C88-F6F2-101A-A3C9-08002B2F49FB}#1.2#0"; "Comdlg32.ocx"
+Object = "{F9043C88-F6F2-101A-A3C9-08002B2F49FB}#1.2#0"; "COMDLG32.OCX"
 Begin VB.Form frmNativeDecompile 
    BorderStyle     =   3  'Fixed Dialog
    Caption         =   "Native Procedure Decompile (Beta)"
    ClientHeight    =   5085
    ClientLeft      =   45
    ClientTop       =   330
-   ClientWidth     =   6840
+   ClientWidth     =   8655
    LinkTopic       =   "Form1"
    MaxButton       =   0   'False
    MinButton       =   0   'False
    ScaleHeight     =   5085
-   ScaleWidth      =   6840
+   ScaleWidth      =   8655
    ShowInTaskbar   =   0   'False
    StartUpPosition =   1  'CenterOwner
    Begin VB.CommandButton cmdExportList 
@@ -61,11 +61,11 @@ Begin VB.Form frmNativeDecompile
       Left            =   0
       TabIndex        =   4
       Top             =   240
-      Width           =   1695
+      Width           =   3495
    End
    Begin VB.TextBox txtView 
       Height          =   3570
-      Left            =   1800
+      Left            =   3600
       MultiLine       =   -1  'True
       ScrollBars      =   3  'Both
       TabIndex        =   3
@@ -93,7 +93,6 @@ Begin VB.Form frmNativeDecompile
    End
    Begin VB.OptionButton optNativeToVB 
       Caption         =   "Native Asm To VB"
-      Enabled         =   0   'False
       Height          =   255
       Left            =   3000
       TabIndex        =   0
@@ -130,7 +129,7 @@ Begin VB.Form frmNativeDecompile
    Begin VB.Label Label1 
       Caption         =   "Just click on a procedure in the list to disassemble it."
       Height          =   255
-      Left            =   1800
+      Left            =   3720
       TabIndex        =   5
       Top             =   0
       Width           =   4215
@@ -149,6 +148,15 @@ Option Explicit
 Dim dsm As New CDisassembler
 Private Sub cmdAddAddress_Click()
     Me.lstProcedures.AddItem txtAddress.Text
+    'Keep the numeric address in ItemData so the click handler can read it back
+    'even when the visible text carries a procedure name.
+    Me.lstProcedures.ItemData(Me.lstProcedures.NewIndex) = CLng(txtAddress.Text)
+    UpdateProcCount
+End Sub
+
+'Show the running total of procedures in the list title.
+Private Sub UpdateProcCount()
+    lblTitle.Caption = "Procedure List: (" & Me.lstProcedures.ListCount & ")"
 End Sub
 
 Private Sub cmdClose_Click()
@@ -190,8 +198,9 @@ Private Sub cmdRemove_Click()
     iResponse = MsgBox("Are you sure you want to remove address: " & lstProcedures.List(lstProcedures.ListIndex), vbYesNo + vbInformation, "Remove Item?")
     If iResponse = vbYes Then
         lstProcedures.RemoveItem (lstProcedures.ListIndex)
+        UpdateProcCount
     End If
-    
+
 End Sub
 
 
@@ -199,17 +208,19 @@ Private Sub Form_Load()
     Me.lstProcedures.Clear
     If gProjectInfo.aNativeCode <> 0 Then
         If gVBHeader.aSubMain <> 0 Then
-            Me.lstProcedures.AddItem gVBHeader.aSubMain
+            Me.lstProcedures.AddItem gVBHeader.aSubMain & "   SubMain"
+            Me.lstProcedures.ItemData(Me.lstProcedures.NewIndex) = gVBHeader.aSubMain
         End If
     End If
     Dim i As Integer
     For i = 0 To UBound(gNativeProcArray) - 1
-        Me.lstProcedures.AddItem gNativeProcArray(i).offset
+        'Visible text = address + owning object/proc name (so you can tell a
+        'form proc from a class proc); numeric address kept in ItemData.
+        Me.lstProcedures.AddItem gNativeProcArray(i).offset & "   " & gNativeProcArray(i).sName
+        Me.lstProcedures.ItemData(Me.lstProcedures.NewIndex) = gNativeProcArray(i).offset
     Next i
 
-    
-    'Me.lstProcedures.AddItem "4247518"
-    'Me.lstProcedures.AddItem gProjectInfo.aNativeCode
+    UpdateProcCount
 End Sub
 
 Private Sub lstProcedures_Click()
@@ -217,14 +228,23 @@ On Error GoTo errHandle
     If lstProcedures.ListIndex = -1 Then Exit Sub
 
     Dim fp As Integer, g As Long
-     
+    Dim selAddr As Long
+    'Numeric address lives in ItemData; the visible text also carries the name.
+    selAddr = lstProcedures.ItemData(lstProcedures.ListIndex)
+
     txtView.Text = ""
 
-    If lstProcedures.List(lstProcedures.ListIndex) = gVBHeader.aSubMain Then
+    'Native Asm -> VB reconstruction path
+    If optNativeToVB.value = True Then
+        txtView.Text = modNativeToVB.DecompileNativeProcToVB(selAddr)
+        Exit Sub
+    End If
+
+    If selAddr = gVBHeader.aSubMain Then
         txtView.Text = txtView.Text & "Disassembly of SubMain()" & vbCrLf
     Else
         For g = 0 To UBound(gNativeProcArray)
-            If gNativeProcArray(g).offset = lstProcedures.List(lstProcedures.ListIndex) Then
+            If gNativeProcArray(g).offset = selAddr Then
                 txtView.Text = txtView.Text & "Disassembly of " & gNativeProcArray(g).sName & "()" & vbCrLf
             End If
         Next g
@@ -234,11 +254,11 @@ On Error GoTo errHandle
     'MsgBox "ag"
     'Close
     Open SFilePath For Binary Access Read As #fp
-       Get #fp, lstProcedures.List(lstProcedures.ListIndex) + 1 - OptHeader.ImageBase, b
+       Get #fp, selAddr + 1 - OptHeader.ImageBase, b
     Dim va As Long
     Dim col As Collection
     Dim inst As CInstruction
-     va = lstProcedures.List(lstProcedures.ListIndex)
+     va = selAddr
     
     Set col = dsm.DisasmBlock(b(), va)
     Dim strBuffer As String
@@ -303,7 +323,11 @@ MsgBox "Error_frmNativeDecompile_lstProcedures_Click: " & err.Number & " " & err
 End Sub
 
 Private Sub optNativeToVB_Click()
-    MsgBox "Cheater :)"
+    lstProcedures_Click
+End Sub
+
+Private Sub optPCode_Click()
+    lstProcedures_Click
 End Sub
 
 Private Sub txtAddress_Change()
