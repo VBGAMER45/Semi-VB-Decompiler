@@ -86,6 +86,8 @@ Private NVRegIsAddr(7) As Boolean  'True when a register holds &local (from LEA)
 Private NVRegAddr(7) As String     'the local name a register's LEA-address points to
 Private NVRegIsMe(7) As Boolean    'True when a register holds an object pointer (this/Me or a module global)
 Private NVRegIsFormVt(7) As Boolean 'True when a register holds an object's vtable ([objPtr])
+Private NVRegObjType(7) As String  'intrinsic-object name a register's POINTER refers to (App/Screen/Clipboard)
+Private NVRegObjVt(7) As String    'intrinsic-object name whose VTABLE a register holds ([objPtr] deref)
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
@@ -141,7 +143,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     ReDim NVPushImm(31): NVPushTop = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
-    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: Next
+    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": Next
     Set NVLocal = New Collection
     Set NVStrLits = New Collection
     Set NVSkipLabels = New Collection
@@ -242,6 +244,34 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 End If
                 ann = "call " & dsmNative.GetApiByIatVa(disp)
             ElseIf hasMem Then
+                'Property access on a resolved intrinsic object (e.g. App.Path):
+                'when the call's base register holds an intrinsic object's vtable
+                '(tagged by the getter chain `mov reg,[App_local]; mov vt,[reg]`),
+                'map the call offset via the intrinsic property table.  Checked
+                'first - a tagged object vtable is a strong, specific signal.
+                Dim ocb As Long, oprop As String
+                ocb = NativeMemBase(inst.dump)
+                If ocb >= 0 And ocb <= 7 Then
+                    If Len(NVRegObjVt(ocb)) > 0 Then
+                        oprop = NativeIntrinsicPropByOffset(NVRegObjVt(ocb), disp)
+                        If Len(oprop) > 0 Then
+                            Dim ochain As String
+                            ochain = NVRegObjVt(ocb) & "." & oprop
+                            NVPushTop = 0
+                            NVReg(0) = ochain
+                            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                            NVRegObjType(0) = "": NVRegObjVt(0) = ""
+                            If NVLastLeaSet Then
+                                Dim oln As String
+                                oln = "var_" & Hex$(Abs(NVLastLea))
+                                NativeSetLocalExpr NVLastLea, ochain
+                                NVLastLeaSet = False
+                                NativeProcessInst = ind & oln & " = " & ochain & vbCrLf
+                            End If
+                            Exit Function           'value flows to the consumer
+                        End If
+                    End If
+                End If
                 'call [reg+disp] -> the object's own method (via its vtable), a
                 'control accessor, or a property vtable call.
                 'VB6 intrinsic global objects (App/Screen/Clipboard) are getters
@@ -259,6 +289,7 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             NVPushTop = 0
                             NVReg(0) = gobj
                             NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                            NVRegObjType(0) = gobj: NVRegObjVt(0) = ""    'eax now holds the App/Screen/Clipboard pointer
                             'The object is written to the out-param local addressed
                             'by the LEA just before the call - surface var_X = App.
                             If NVLastLeaSet Then
@@ -1033,6 +1064,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             If immv >= OptHeader.ImageBase Then sv = NativeStringAt(immv)
             If Len(sv) > 0 Then NVReg(op - &HB8) = sv Else NVReg(op - &HB8) = NativeNumFromBits(immv)
             NVRegIsAddr(op - &HB8) = False: NVRegIsMe(op - &HB8) = False: NVRegIsFormVt(op - &HB8) = False
+            NVRegObjType(op - &HB8) = "": NVRegObjVt(op - &HB8) = ""
         Case &H8B                       'mov r32, r/m32
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
@@ -1040,6 +1072,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 NVReg(reg) = NVReg(rm)
                 NVRegIsAddr(reg) = NVRegIsAddr(rm): NVRegAddr(reg) = NVRegAddr(rm)   'address propagates on reg->reg
                 NVRegIsMe(reg) = NVRegIsMe(rm): NVRegIsFormVt(reg) = NVRegIsFormVt(rm)
+                NVRegObjType(reg) = NVRegObjType(rm): NVRegObjVt(reg) = NVRegObjVt(rm)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 Dim bse As Long, baseObj As Boolean
                 bse = NativeMemBase(dump)
@@ -1052,6 +1085,16 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 'its vtable is the deref `[objPtr]`.
                 NVRegIsMe(reg) = (Not isAbs And disp = 8 And bse = 5) Or (isAbs And disp >= OptHeader.ImageBase)
                 NVRegIsFormVt(reg) = (Not isAbs And disp = 0 And baseObj)
+                'Propagate intrinsic-object identity for property chains (App.Path):
+                'loading an App/Screen/Clipboard-typed local tags the register as
+                'that object pointer; dereferencing such a pointer ([objPtr], disp 0)
+                'tags the register as that object's vtable.
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = ""
+                If Not isAbs And disp < 0 Then
+                    If NativeIsIntrinsicObj(NVReg(reg)) Then NVRegObjType(reg) = NVReg(reg)
+                ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 Then
+                    NVRegObjVt(reg) = NVRegObjType(bse)
+                End If
             End If
         Case &H8D                       'lea r32, [mem]  (address-of)
             modrm = NativeDumpByte(dump, i + 1)
@@ -1068,6 +1111,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NVReg(reg) = "": NVRegIsAddr(reg) = False
                 End If
                 NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = ""
             End If
         Case &H89                       'mov r/m32, r32 (store)
             modrm = NativeDumpByte(dump, i + 1)
@@ -1076,6 +1120,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 NVReg(rm) = NVReg(reg)
                 NVRegIsAddr(rm) = NVRegIsAddr(reg): NVRegAddr(rm) = NVRegAddr(reg)
                 NVRegIsMe(rm) = NVRegIsMe(reg): NVRegIsFormVt(rm) = NVRegIsFormVt(reg)
+                NVRegObjType(rm) = NVRegObjType(reg): NVRegObjVt(rm) = NVRegObjVt(reg)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then
                     'A stored call result (expression containing a call) is worth
@@ -1100,7 +1145,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H33                       'xor r32, r/m32 (xor reg,reg -> 0)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
-            If md = 3 And reg = rm Then NVReg(reg) = "0": NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+            If md = 3 And reg = rm Then NVReg(reg) = "0": NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False: NVRegObjType(reg) = "": NVRegObjVt(reg) = ""
     End Select
 End Function
 
@@ -1389,6 +1434,27 @@ Private Function NativeGlobalObjByOffset(ByVal disp As Long) As String
         Case &H14: NativeGlobalObjByOffset = "App"
         Case &H18: NativeGlobalObjByOffset = "Screen"
         Case &H1C: NativeGlobalObjByOffset = "Clipboard"
+    End Select
+End Function
+
+Private Function NativeIsIntrinsicObj(ByVal s As String) As Boolean
+    'True for the VB6 intrinsic global object names whose property vtables we know.
+    Select Case s
+        Case "App", "Screen", "Clipboard": NativeIsIntrinsicObj = True
+    End Select
+End Function
+
+Private Function NativeIntrinsicPropByOffset(ByVal obj As String, ByVal disp As Long) As String
+    'Property-getter vtable offsets on a VB6 intrinsic object (e.g. App.Path is
+    'call [App_vtable + 0x50]).  These offsets are part of the runtime _App
+    'interface and are stable across every VB6 program; each is verified by
+    'tracing real binaries.  Extend as more are confirmed.
+    Select Case obj
+        Case "App"
+            Select Case disp
+                Case &H50: NativeIntrinsicPropByOffset = "Path"
+                Case &H58: NativeIntrinsicPropByOffset = "EXEName"
+            End Select
     End Select
 End Function
 
