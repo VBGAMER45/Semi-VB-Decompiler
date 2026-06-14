@@ -237,7 +237,25 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 End If
                 ann = "call " & dsmNative.GetApiByIatVa(disp)
             ElseIf hasMem Then
-                'call [reg+disp] -> a form control accessor or a property vtable call
+                'call [reg+disp] -> the object's own method (via its vtable), a
+                'control accessor, or a property vtable call.
+                'A form calling its own method: call [vtable + 0x6F8 + slot*4].
+                'Checked first: requiring a real gFormVtable slot is a stronger
+                'signal than the NVBase control heuristic (which the same form-method
+                'calls can otherwise mis-solve into a bogus control base).
+                Dim ftgt As Long
+                ftgt = NativeFormVtableTarget(disp)
+                If ftgt <> 0 Then
+                    'The implicit Me/this (the last push, ebx) is normally
+                    'untracked, so it never reaches the argument stack - the
+                    'tracked pushes are exactly the explicit arguments.
+                    Dim fpname As String, fargs As String
+                    fargs = NativeArgList()
+                    fpname = NativeCallTargetName(ftgt)
+                    NVReg(0) = NVForm & "." & fpname & "(" & fargs & ")"
+                    NVPendingCall = "Call " & NVForm & "." & fpname & "(" & fargs & ")"
+                    Exit Function
+                End If
                 If NVBase >= 0 And disp >= NVBase And NativeControlByOffset(disp) <> "" Then
                     NVLastControl = NVForm & "." & NativeControlByOffset(disp)
                     NVLastGuid = NativeGuidByOffset(disp)
@@ -752,6 +770,23 @@ Private Function NativeBaseFits(col As Collection, ByVal base As Long) As Boolea
         End If
     Next
     NativeBaseFits = True
+End Function
+
+Private Function NativeFormVtableTarget(ByVal disp As Long) As Long
+    'Resolve "call [vtable + disp]" on the current object's own methods.  VB6
+    'lays a form's user methods in its vtable starting at offset 0x6F8 (one 4-byte
+    'slot per method, in the object's method order), so slot = (disp-0x6F8)/4.
+    'gFormVtable maps "ObjectName:slot" -> method address (filled from the
+    'event-link table).  Only forms reach an offset this large, so class/usercontrol
+    'method calls (much smaller vtables) yield a negative slot and are left alone.
+    Const FORM_VTABLE_BASE As Long = &H6F8
+    Dim slot As Long, v As Variant
+    If disp < FORM_VTABLE_BASE Then Exit Function
+    If ((disp - FORM_VTABLE_BASE) Mod 4) <> 0 Then Exit Function
+    slot = (disp - FORM_VTABLE_BASE) \ 4
+    On Error Resume Next
+    v = gFormVtable(NVForm & ":" & slot)
+    If Err.Number = 0 Then NativeFormVtableTarget = CLng(v)
 End Function
 
 Private Function NativeControlByOffset(ByVal offset As Long) As String

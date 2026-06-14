@@ -1476,6 +1476,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
     ReDim SubNamelist(0)
     'Native
     ReDim modNative.gNativeProcArray(0)
+    Set gFormVtable = New Collection
     Close
     'clear the nodes
     tvProject.Nodes.Clear
@@ -1849,6 +1850,12 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                                         'After the Get, Loc(F) = lNative(i) - ImageBase + 5, so
                                         'adding jmpOffset + ImageBase yields the procedure VA.
                                         currPos = Loc(F) + LinkNative.jmpoffset + OptHeader.ImageBase
+
+                                        'Record slot -> target so a later "call [vtable + 0x6F8 + slot*4]"
+                                        'on this object's own methods can be resolved to the method name.
+                                        On Error Resume Next
+                                        gFormVtable.Add currPos, gObjectNameArray(loopC) & ":" & i
+                                        On Error GoTo 0
 
                                         gNativeProcArray(UBound(gNativeProcArray)).sName = gObjectNameArray(loopC) & ".proc_" & Hex$(currPos)
                                         gNativeProcArray(UBound(gNativeProcArray)).offset = currPos
