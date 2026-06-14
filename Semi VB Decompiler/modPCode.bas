@@ -151,6 +151,8 @@ Global bSkipProcedure As Boolean
 Private Type subNameListType
     strName As String
     offset As Long
+    kind As String          'native only: "" (Sub), "Function", "Property Get/Let/Set"
+    visibility As String     'native only: "Public" / "Private" ("" = use default)
 End Type
 Global SubNamelist() As subNameListType
 Global ShowPCodeStringAddress As Boolean

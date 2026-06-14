@@ -82,9 +82,22 @@ Private NVLastCmp As String        'hint expression for the next If condition
 Private NVStrLits As Collection    'pending string literals (e.g. MsgBox arguments)
 Private NVSkipLabels As Collection 'branch targets that belong to dropped error-check guards
 Private NVReg(7) As String         'symbolic value currently held in each GP register (eax..edi)
+Private NVRegIsAddr(7) As Boolean  'True when a register holds &local (from LEA), for by-ref pushes
+Private NVRegAddr(7) As String     'the local name a register's LEA-address points to
+Private NVRegIsMe(7) As Boolean    'True when a register holds an object pointer (this/Me or a module global)
+Private NVRegIsFormVt(7) As Boolean 'True when a register holds an object's vtable ([objPtr])
+Private NVRegObjType(7) As String  'intrinsic-object name a register's POINTER refers to (App/Screen/Clipboard)
+Private NVRegObjVt(7) As String    'intrinsic-object name whose VTABLE a register holds ([objPtr] deref)
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
+Private NVProcEndWord As String    'closing keyword for this proc: "Sub" / "Function" / "Property"
+Private NVApiStubCache As Collection 'declared-DLL stub address -> resolved API name (global, "" = not a stub)
+Private NVCmpL As String           'pending condition: left operand (symbolic)
+Private NVCmpR As String           'pending condition: right operand (symbolic)
+Private NVCmpIsTest As Boolean     'the pending compare came from TEST (zero-compare)
+Private NVCmpSet As Boolean        'a GP TEST/CMP condition hint is pending
+Private NVPendingCall As String    'a "Call X()" deferred until we know if its result is used
 
 Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 '*****************************
@@ -118,15 +131,19 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         NVLastDisasmText = NVLastDisasmText & inst.offset & "  " & inst.dump & "  " & inst.command & vbCrLf
     Next
 
+
     'Reset per-proc state
     NVForm = NativeFormOf(addr)
+    NVProcEndWord = "Sub"
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
+    NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False
+    NVPendingCall = ""
     ReDim NVFpu(31): NVFpuTop = 0
     ReDim NVPushImm(31): NVPushTop = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
-    For r = 0 To 7: NVReg(r) = "": Next
+    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": Next
     Set NVLocal = New Collection
     Set NVStrLits = New Collection
     Set NVSkipLabels = New Collection
@@ -156,6 +173,19 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     output = NativeProcHeader(addr) & vbCrLf
 
     For Each inst In col
+        'Resolve a deferred call (from the previous instruction) based on how
+        'THIS instruction uses eax, the call's result.  Done before any block
+        'close/label so a flushed "Call X()" stays inside the right block.
+        If Len(NVPendingCall) > 0 Then
+            Dim eu As Long
+            eu = NativeEaxUse(inst)
+            If eu = 1 Then
+                NVPendingCall = ""                          'result consumed -> folded
+            ElseIf eu = 2 Then
+                output = output & NativeIndentStr() & NVPendingCall & vbCrLf
+                NVPendingCall = "": NVReg(0) = ""           'unused -> emit; result spent
+            End If
+        End If
         'Close any structured If blocks that end at this address
         NativeCloseIfs output, inst.va
         'Open a Do loop when this address is the target of a back-edge
@@ -172,8 +202,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         output = output & NativeProcessInst(inst)
     Next
 
+    'Any call still deferred is the proc's last statement - emit it.
+    If Len(NVPendingCall) > 0 Then output = output & NativeIndentStr() & NVPendingCall & vbCrLf: NVPendingCall = ""
     NativeCloseIfs output, &H7FFFFFFF
-    output = output & "End Sub" & vbCrLf
+    output = output & "End " & NVProcEndWord & vbCrLf
     DecompileNativeProcToVB = output
     Exit Function
 fail:
@@ -190,6 +222,13 @@ Private Function NativeProcessInst(inst As CInstruction) As String
     mn = NativeMnem(inst)
     ind = NativeIndentStr()
 
+    'TEST/CMP set the flags consumed by the next conditional jump.  Record the
+    'operands now (the relational operator is resolved later from the Jcc).
+    If mn = "TEST" Or mn = "CMP" Then
+        NativeDecodeCompare inst, mn
+        Exit Function
+    End If
+
     Select Case cls
 
         Case C_CAL
@@ -205,7 +244,82 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 End If
                 ann = "call " & dsmNative.GetApiByIatVa(disp)
             ElseIf hasMem Then
-                'call [reg+disp] -> a form control accessor or a property vtable call
+                'Property access on a resolved intrinsic object (e.g. App.Path):
+                'when the call's base register holds an intrinsic object's vtable
+                '(tagged by the getter chain `mov reg,[App_local]; mov vt,[reg]`),
+                'map the call offset via the intrinsic property table.  Checked
+                'first - a tagged object vtable is a strong, specific signal.
+                Dim ocb As Long, oprop As String
+                ocb = NativeMemBase(inst.dump)
+                If ocb >= 0 And ocb <= 7 Then
+                    If Len(NVRegObjVt(ocb)) > 0 Then
+                        oprop = NativeIntrinsicPropByOffset(NVRegObjVt(ocb), disp)
+                        If Len(oprop) > 0 Then
+                            Dim ochain As String
+                            ochain = NVRegObjVt(ocb) & "." & oprop
+                            NVPushTop = 0
+                            NVReg(0) = ochain
+                            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                            NVRegObjType(0) = "": NVRegObjVt(0) = ""
+                            If NVLastLeaSet Then
+                                Dim oln As String
+                                oln = "var_" & Hex$(Abs(NVLastLea))
+                                NativeSetLocalExpr NVLastLea, ochain
+                                NVLastLeaSet = False
+                                NativeProcessInst = ind & oln & " = " & ochain & vbCrLf
+                            End If
+                            Exit Function           'value flows to the consumer
+                        End If
+                    End If
+                End If
+                'call [reg+disp] -> the object's own method (via its vtable), a
+                'control accessor, or a property vtable call.
+                'VB6 intrinsic global objects (App/Screen/Clipboard) are getters
+                'at fixed low vtable offsets on the runtime "Global" object (held
+                'in a module global) or the form.  Resolve `call [objVt + 0x14]`
+                'etc. when objVt is a tracked object vtable.  These offsets are
+                'IDispatch slots on arbitrary objects, which VB never raw-calls, so
+                'the object-vtable guard keeps it safe.
+                Dim gobj As String, gcb As Long
+                gobj = NativeGlobalObjByOffset(disp)
+                If Len(gobj) > 0 Then
+                    gcb = NativeMemBase(inst.dump)
+                    If gcb >= 0 And gcb <= 7 Then
+                        If NVRegIsFormVt(gcb) Then
+                            NVPushTop = 0
+                            NVReg(0) = gobj
+                            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                            NVRegObjType(0) = gobj: NVRegObjVt(0) = ""    'eax now holds the App/Screen/Clipboard pointer
+                            'The object is written to the out-param local addressed
+                            'by the LEA just before the call - surface var_X = App.
+                            If NVLastLeaSet Then
+                                Dim gln As String
+                                gln = "var_" & Hex$(Abs(NVLastLea))
+                                NativeSetLocalExpr NVLastLea, gobj
+                                NVLastLeaSet = False
+                                NativeProcessInst = ind & gln & " = " & gobj & vbCrLf
+                            End If
+                            Exit Function           'value flows to the consumer
+                        End If
+                    End If
+                End If
+                'A form calling its own method: call [vtable + 0x6F8 + slot*4].
+                'Checked first: requiring a real gFormVtable slot is a stronger
+                'signal than the NVBase control heuristic (which the same form-method
+                'calls can otherwise mis-solve into a bogus control base).
+                Dim ftgt As Long
+                ftgt = NativeFormVtableTarget(disp)
+                If ftgt <> 0 Then
+                    'The implicit Me/this (the last push, ebx) is normally
+                    'untracked, so it never reaches the argument stack - the
+                    'tracked pushes are exactly the explicit arguments.
+                    Dim fpname As String, fargs As String
+                    fargs = NativeArgList()
+                    fpname = NativeCallTargetName(ftgt)
+                    NVReg(0) = NVForm & "." & fpname & "(" & fargs & ")"
+                    NVPendingCall = "Call " & NVForm & "." & fpname & "(" & fargs & ")"
+                    Exit Function
+                End If
                 If NVBase >= 0 And disp >= NVBase And NativeControlByOffset(disp) <> "" Then
                     NVLastControl = NVForm & "." & NativeControlByOffset(disp)
                     NVLastGuid = NativeGuidByOffset(disp)
@@ -227,10 +341,13 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     pname = NativeCallTargetName(tgt)
                     uargs = NativeArgList()
                     NVPushTop = 0
-                    'Leave the result available in case it feeds an assignment,
-                    'and also emit the call so the call graph is visible.
+                    'Keep the call as the value in eax and defer the "Call X()"
+                    'statement: if the next instruction consumes the result it
+                    'folds into an assignment / argument / condition; otherwise
+                    'the deferred call is emitted as a statement (see the decode
+                    'loop's fold/flush of NVPendingCall).
                     NVReg(0) = pname & "(" & uargs & ")"
-                    NativeProcessInst = ind & "Call " & pname & "(" & uargs & ")" & vbCrLf
+                    NVPendingCall = "Call " & pname & "(" & uargs & ")"
                     Exit Function
                 End If
                 'call <reg> -> a runtime helper previously cached into the register
@@ -255,15 +372,18 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             If inst.jmpConst <= inst.va And NativeHas(NVLoopHdr, inst.jmpConst) Then
                 'Back-edge to a loop header -> the bottom of a Do...Loop
                 If NVIndent > 0 Then NVIndent = NVIndent - 1
-                NativeProcessInst = NativeIndentStr() & "Loop While " & NativeCondExpr() & vbCrLf
+                'Loop continues while the back-jump is taken.
+                NativeProcessInst = NativeIndentStr() & "Loop While " & NativeCondExpr(mn, False) & vbCrLf
             ElseIf inst.jmpConst > inst.va Then
                 'Forward conditional branch -> a structured If guarding the block
-                'up to the branch target.
-                NativeProcessInst = ind & "If " & NativeCondExpr() & " Then" & vbCrLf
+                'up to the branch target.  The block runs when the jump is NOT
+                'taken, so negate the jump's relational.
+                NativeProcessInst = ind & "If " & NativeCondExpr(mn, True) & " Then" & vbCrLf
                 NativePushIf inst.jmpConst
             Else
                 'Backward branch (not a recognised loop header) -> conditional GoTo
-                NativeProcessInst = ind & "If " & NativeCondExpr() & " Then GoTo loc_" & Right$("00000000" & Hex$(inst.jmpConst), 8) & vbCrLf
+                '(the GoTo fires when the jump is taken).
+                NativeProcessInst = ind & "If " & NativeCondExpr(mn, False) & " Then GoTo loc_" & Right$("00000000" & Hex$(inst.jmpConst), 8) & vbCrLf
             End If
             Exit Function
 
@@ -486,7 +606,15 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             Exit Function
         Case InStr(nm, "__vbaStrCat") > 0
             aa = NativeArgPop(): bb = NativeArgPop()
-            NVReg(0) = "(" & aa & " & " & bb & ")": NativeRuntimeCall = "": Exit Function
+            NVReg(0) = NativeConcat(aa, bb): NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaStrToAnsi") > 0, InStr(nm, "__vbaStrToUnicode") > 0
+            'Charset conversion: StrToAnsi(dst, src) returns the converted string
+            'in eax.  For decompilation the value is just the source string, so
+            'fold it through to the consumer (e.g. an API argument).
+            Dim adst As String, asrc As String
+            adst = NativeArgPop(): asrc = NativeArgPop()
+            If Len(asrc) = 0 Then asrc = adst
+            NVReg(0) = asrc: NVPushTop = 0: NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrMove") > 0, InStr(nm, "__vbaStrCopy") > 0, _
              InStr(nm, "__vbaVarMove") > 0, InStr(nm, "__vbaVarCopy") > 0, _
              InStr(nm, "__vbaStrVarMove") > 0
@@ -554,20 +682,51 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
 End Function
 
 Private Function NativeMoveAssign() As String
-    'A move/copy runtime helper stores eax into the local addressed by the most
-    'recent LEA.  Surface it as "var_X = <value>" when the value is meaningful
-    '(a call/expression), and leave the local's name in eax (the helpers return
-    'the moved value) so a following concat/use references it.
+    'A move/copy runtime helper stores a value into the local addressed by the
+    'most recent LEA.  Surface it as "var_X = <value>" when the value is worth
+    'showing (a call/concat, or a string literal), and leave the local's name in
+    'eax (the helpers return the moved value) so a following use references it.
+    'Source priority: eax (computed expressions), the FPU pending arg, then edx
+    '(the register-argument form used by StrCopy for `var = "literal"`).
     Dim dn As String, src As String
     src = NVReg(0)
-    If Len(src) = 0 And Len(NVPendingArg) > 0 Then src = NVPendingArg
-    If NVLastLeaSet And Len(src) > 0 And InStr(src, "(") > 0 Then
+    If Not NativeIsExprValue(src) And Len(NVPendingArg) > 0 Then src = NVPendingArg
+    If Not NativeIsExprValue(src) And NativeIsExprValue(NVReg(2)) Then src = NVReg(2)
+    If NVLastLeaSet And NativeIsExprValue(src) Then
         dn = "var_" & Hex$(Abs(NVLastLea))
         NativeMoveAssign = dn & " = " & src
         NativeSetLocalExpr NVLastLea, dn
         NVReg(0) = dn                       'the helper returns the moved value in eax
     End If
     NVLastLeaSet = False: NVPendingArg = "": NVPushTop = 0
+End Function
+
+Private Function NativeIsExprValue(ByVal s As String) As Boolean
+    'A value worth surfacing in an assignment: a call/concat (parenthesised), a
+    'string literal, or a local variable (incl. a plain copy).  Bare numbers /
+    'register names are treated as not worth it.
+    If Len(s) = 0 Then Exit Function
+    If InStr(s, "(") > 0 Then NativeIsExprValue = True: Exit Function
+    If Left$(s, 1) = Chr$(34) Then NativeIsExprValue = True: Exit Function
+    If Left$(s, 4) = "var_" Then NativeIsExprValue = True
+End Function
+
+Private Function NativeConcat(ByVal aa As String, ByVal bb As String) As String
+    'Build "a & b", dropping a null operand (VB pushes vbNullString as 0, which
+    'would otherwise render as the spurious `0 & "x"` / `"x" & 0`).  An untracked
+    '"<arg>" operand is kept - it stands for a real value we could not recover.
+    Dim a As Boolean, b As Boolean
+    a = (Len(aa) > 0 And aa <> "0")
+    b = (Len(bb) > 0 And bb <> "0")
+    If a And b Then
+        NativeConcat = "(" & aa & " & " & bb & ")"
+    ElseIf a Then
+        NativeConcat = aa
+    ElseIf b Then
+        NativeConcat = bb
+    Else
+        NativeConcat = Chr$(34) & Chr$(34)      'empty string ""
+    End If
 End Function
 
 Private Sub NativeRuntimeSyntax(ByVal nm As String, ByRef vbName As String, ByRef arity As Long, ByRef isStmt As Boolean)
@@ -677,6 +836,23 @@ Private Function NativeBaseFits(col As Collection, ByVal base As Long) As Boolea
     NativeBaseFits = True
 End Function
 
+Private Function NativeFormVtableTarget(ByVal disp As Long) As Long
+    'Resolve "call [vtable + disp]" on the current object's own methods.  VB6
+    'lays a form's user methods in its vtable starting at offset 0x6F8 (one 4-byte
+    'slot per method, in the object's method order), so slot = (disp-0x6F8)/4.
+    'gFormVtable maps "ObjectName:slot" -> method address (filled from the
+    'event-link table).  Only forms reach an offset this large, so class/usercontrol
+    'method calls (much smaller vtables) yield a negative slot and are left alone.
+    Const FORM_VTABLE_BASE As Long = &H6F8
+    Dim slot As Long, v As Variant
+    If disp < FORM_VTABLE_BASE Then Exit Function
+    If ((disp - FORM_VTABLE_BASE) Mod 4) <> 0 Then Exit Function
+    slot = (disp - FORM_VTABLE_BASE) \ 4
+    On Error Resume Next
+    v = gFormVtable(NVForm & ":" & slot)
+    If Err.Number = 0 Then NativeFormVtableTarget = CLng(v)
+End Function
+
 Private Function NativeControlByOffset(ByVal offset As Long) As String
     If NVBase < 0 Or offset < NVBase Or ((offset - NVBase) Mod 4) <> 0 Then Exit Function
     NativeControlByOffset = NativeControlIndexName((offset - NVBase) \ 4)
@@ -754,6 +930,11 @@ Private Function NativeDecodeDisp(ByVal dump As String, ByRef disp As Long, ByRe
     If i >= n Then GoTo no
     op = NativeDumpByte(dump, i): i = i + 1
     If op = &HF Then GoTo no     '2-byte opcode (0F xx) not handled
+    'E8/E9 (call/jmp rel32) and EB (jmp rel8) carry NO ModR/M byte - the bytes
+    'that follow are a relative displacement, not a memory operand.  Treating
+    'the first rel byte as ModR/M wrongly reports a [reg+disp] memory call
+    '(e.g. "call .0"), so reject these opcodes outright.
+    If op = &HE8 Or op = &HE9 Or op = &HEB Then GoTo no
     If i >= n Then GoTo no
     modrm = NativeDumpByte(dump, i): i = i + 1
     md = (modrm \ &H40) And 3
@@ -850,7 +1031,13 @@ Private Function NativePushOperand(inst As CInstruction) As String
         Case &H6A                       'push imm8
             NativePushOperand = CStr(NativeDumpInt8(dump, i + 1))
         Case &H50 To &H57               'push reg
-            NativePushOperand = NVReg(op - &H50)
+            'A register holding &local (from LEA) is a by-reference argument:
+            'show the local itself rather than its (often 0/stale) value.
+            If NVRegIsAddr(op - &H50) Then
+                NativePushOperand = NVRegAddr(op - &H50)
+            Else
+                NativePushOperand = NVReg(op - &H50)
+            End If
         Case &HFF                       'push r/m  (FF /6)
             If NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then NativePushOperand = NativeGetLocalExpr(disp)
@@ -872,26 +1059,68 @@ Private Function NativeTrackReg(inst As CInstruction) As String
     op = NativeDumpByte(dump, i)
     Select Case op
         Case &HB8 To &HBF               'mov reg, imm32
-            NVReg(op - &HB8) = NativeNumFromBits(NativeDumpInt32(dump, i + 1))
+            Dim immv As Long, sv As String
+            immv = NativeDumpInt32(dump, i + 1)
+            If immv >= OptHeader.ImageBase Then sv = NativeStringAt(immv)
+            If Len(sv) > 0 Then NVReg(op - &HB8) = sv Else NVReg(op - &HB8) = NativeNumFromBits(immv)
+            NVRegIsAddr(op - &HB8) = False: NVRegIsMe(op - &HB8) = False: NVRegIsFormVt(op - &HB8) = False
+            NVRegObjType(op - &HB8) = "": NVRegObjVt(op - &HB8) = ""
         Case &H8B                       'mov r32, r/m32
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
             If md = 3 Then
                 NVReg(reg) = NVReg(rm)
+                NVRegIsAddr(reg) = NVRegIsAddr(rm): NVRegAddr(reg) = NVRegAddr(rm)   'address propagates on reg->reg
+                NVRegIsMe(reg) = NVRegIsMe(rm): NVRegIsFormVt(reg) = NVRegIsFormVt(rm)
+                NVRegObjType(reg) = NVRegObjType(rm): NVRegObjVt(reg) = NVRegObjVt(rm)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
+                Dim bse As Long, baseObj As Boolean
+                bse = NativeMemBase(dump)
+                If bse >= 0 And bse <= 7 Then baseObj = NVRegIsMe(bse)
                 If Not isAbs And disp < 0 Then NVReg(reg) = NativeGetLocalExpr(disp) Else NVReg(reg) = ""
+                NVRegIsAddr(reg) = False
+                'Track object pointers and their vtables so an intrinsic-global
+                'getter `call [objVt + 0x14]` can be resolved.  An object pointer
+                'comes from `[ebp+8]` (this/Me) or from a module global `[abs]`;
+                'its vtable is the deref `[objPtr]`.
+                NVRegIsMe(reg) = (Not isAbs And disp = 8 And bse = 5) Or (isAbs And disp >= OptHeader.ImageBase)
+                NVRegIsFormVt(reg) = (Not isAbs And disp = 0 And baseObj)
+                'Propagate intrinsic-object identity for property chains (App.Path):
+                'loading an App/Screen/Clipboard-typed local tags the register as
+                'that object pointer; dereferencing such a pointer ([objPtr], disp 0)
+                'tags the register as that object's vtable.
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = ""
+                If Not isAbs And disp < 0 Then
+                    If NativeIsIntrinsicObj(NVReg(reg)) Then NVRegObjType(reg) = NVReg(reg)
+                ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 Then
+                    NVRegObjVt(reg) = NVRegObjType(bse)
+                End If
             End If
-        Case &H8D                       'lea r32, [mem]
+        Case &H8D                       'lea r32, [mem]  (address-of)
             modrm = NativeDumpByte(dump, i + 1)
             reg = (modrm \ 8) And 7
             If NativeDecodeDisp(dump, disp, isAbs) Then
-                If Not isAbs And disp < 0 Then NVReg(reg) = NativeGetLocalExpr(disp) Else NVReg(reg) = ""
+                'LEA takes the ADDRESS of a local.  Keep its value in NVReg (a
+                'read of the register wants the value), but ALSO remember the
+                'local's name so that PUSHing the register - passing the local by
+                'reference - shows the local, not its (often 0/stale) value.
+                If Not isAbs And disp < 0 Then
+                    NVReg(reg) = NativeGetLocalExpr(disp)
+                    NVRegIsAddr(reg) = True: NVRegAddr(reg) = "var_" & Hex$(Abs(disp))
+                Else
+                    NVReg(reg) = "": NVRegIsAddr(reg) = False
+                End If
+                NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = ""
             End If
         Case &H89                       'mov r/m32, r32 (store)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
             If md = 3 Then
                 NVReg(rm) = NVReg(reg)
+                NVRegIsAddr(rm) = NVRegIsAddr(reg): NVRegAddr(rm) = NVRegAddr(reg)
+                NVRegIsMe(rm) = NVRegIsMe(reg): NVRegIsFormVt(rm) = NVRegIsFormVt(reg)
+                NVRegObjType(rm) = NVRegObjType(reg): NVRegObjVt(rm) = NVRegObjVt(reg)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then
                     'A stored call result (expression containing a call) is worth
@@ -904,12 +1133,19 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     Else
                         NativeSetLocalExpr disp, NVReg(reg)
                     End If
+                ElseIf isAbs And disp >= OptHeader.ImageBase Then
+                    'Store to a module-level global: mov [abs], reg.  Surface a
+                    'call / concat / string value as `global_X = ...` (without
+                    'this a deferred call folded into the store would be lost).
+                    If NativeIsExprValue(NVReg(reg)) Then
+                        NativeTrackReg = "global_" & Hex$(disp) & " = " & NVReg(reg)
+                    End If
                 End If
             End If
         Case &H33                       'xor r32, r/m32 (xor reg,reg -> 0)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
-            If md = 3 And reg = rm Then NVReg(reg) = "0"
+            If md = 3 And reg = rm Then NVReg(reg) = "0": NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False: NVRegObjType(reg) = "": NVRegObjVt(reg) = ""
     End Select
 End Function
 
@@ -1093,16 +1329,230 @@ Private Function NativeIsIfTarget(ByVal addr As Long) As Boolean
     Next
 End Function
 
-Private Function NativeCondExpr() As String
-    'Best-effort condition: the operands of the most recent compare, else a
-    'placeholder.  The exact relational operator is not recovered.
+Private Function NativeCondExpr(ByVal jmpMnem As String, ByVal blockGuard As Boolean) As String
+    'Build the source condition for a conditional jump.  jmpMnem is the Jcc
+    'mnemonic; blockGuard is True for a forward If (the block runs when the jump
+    'is NOT taken, so the condition is the negation of "jump taken") and False
+    'for a loop-continue / conditional-GoTo (condition = "jump taken").
+    Dim op As String, L As String, R As String
+    If NVCmpSet Then
+        op = NativeJccOp(jmpMnem)
+        If blockGuard Then op = NativeNegOp(op)
+        L = NVCmpL
+        If NVCmpIsTest Then R = "0" Else R = NVCmpR
+        NVCmpSet = False: NVLastCmp = ""
+        If Len(op) > 0 And Len(L) > 0 And Len(R) > 0 Then
+            NativeCondExpr = L & " " & op & " " & R
+            Exit Function
+        End If
+    End If
+    'FPU compare hint (FCOM) or nothing.
     If Len(NVLastCmp) > 0 Then
-        NativeCondExpr = NVLastCmp
-        NVLastCmp = ""
-    Else
-        NativeCondExpr = "<cond>"
+        NativeCondExpr = NVLastCmp: NVLastCmp = "": Exit Function
+    End If
+    NativeCondExpr = "<cond>"
+End Function
+
+Private Function NativeJccOp(ByVal mn As String) As String
+    'Relational operator for "the jump is taken" (left <op> right).
+    Select Case UCase$(mn)
+        Case "JE", "JZ": NativeJccOp = "="
+        Case "JNE", "JNZ": NativeJccOp = "<>"
+        Case "JL", "JNGE", "JB", "JC", "JNAE": NativeJccOp = "<"
+        Case "JLE", "JNG", "JBE", "JNA": NativeJccOp = "<="
+        Case "JG", "JNLE", "JA", "JNBE": NativeJccOp = ">"
+        Case "JGE", "JNL", "JAE", "JNB", "JNC": NativeJccOp = ">="
+        Case "JS": NativeJccOp = "<"          'sign set ~ negative
+        Case "JNS": NativeJccOp = ">="
+        Case Else: NativeJccOp = ""
+    End Select
+End Function
+
+Private Function NativeNegOp(ByVal op As String) As String
+    Select Case op
+        Case "=": NativeNegOp = "<>"
+        Case "<>": NativeNegOp = "="
+        Case "<": NativeNegOp = ">="
+        Case "<=": NativeNegOp = ">"
+        Case ">": NativeNegOp = "<="
+        Case ">=": NativeNegOp = "<"
+        Case Else: NativeNegOp = op
+    End Select
+End Function
+
+Private Function NativeRegName(ByVal idx As Long) As String
+    Select Case idx
+        Case 0: NativeRegName = "eax"
+        Case 1: NativeRegName = "ecx"
+        Case 2: NativeRegName = "edx"
+        Case 3: NativeRegName = "ebx"
+        Case 4: NativeRegName = "esp"
+        Case 5: NativeRegName = "ebp"
+        Case 6: NativeRegName = "esi"
+        Case 7: NativeRegName = "edi"
+    End Select
+End Function
+
+Private Function NativeRegVal(ByVal idx As Long) As String
+    'Tracked symbolic value of a register, else its raw name.
+    If idx >= 0 And idx <= 7 Then
+        If Len(NVReg(idx)) > 0 Then NativeRegVal = NVReg(idx) Else NativeRegVal = NativeRegName(idx)
     End If
 End Function
+
+Private Function NativeMemBase(ByVal dump As String) As Long
+    'Base register index of a single-opcode ModR/M memory operand, or -1 for an
+    'absolute / register-direct / SIB-without-base operand.
+    Dim n As Long, i As Long, op As Long, modrm As Long, md As Long, rm As Long, sib As Long
+    On Error GoTo none
+    NativeMemBase = -1
+    dump = Replace(dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i): i = i + 1
+    If op = &HF Or op = &HE8 Or op = &HE9 Or op = &HEB Then Exit Function
+    If i >= n Then Exit Function
+    modrm = NativeDumpByte(dump, i)
+    md = (modrm \ &H40) And 3: rm = modrm And 7
+    If md = 3 Then Exit Function
+    If rm = 4 Then
+        sib = NativeDumpByte(dump, i + 1)
+        If md = 0 And (sib And 7) = 5 Then Exit Function    'no base
+        NativeMemBase = sib And 7
+        Exit Function
+    End If
+    If md = 0 And rm = 5 Then Exit Function                 'abs [disp32]
+    NativeMemBase = rm
+    Exit Function
+none:
+    NativeMemBase = -1
+End Function
+
+Private Function NativeGlobalObjByOffset(ByVal disp As Long) As String
+    'VB6 form-interface vtable slots for the intrinsic global objects.
+    Select Case disp
+        Case &H14: NativeGlobalObjByOffset = "App"
+        Case &H18: NativeGlobalObjByOffset = "Screen"
+        Case &H1C: NativeGlobalObjByOffset = "Clipboard"
+    End Select
+End Function
+
+Private Function NativeIsIntrinsicObj(ByVal s As String) As Boolean
+    'True for the VB6 intrinsic global object names whose property vtables we know.
+    Select Case s
+        Case "App", "Screen", "Clipboard": NativeIsIntrinsicObj = True
+    End Select
+End Function
+
+Private Function NativeIntrinsicPropByOffset(ByVal obj As String, ByVal disp As Long) As String
+    'Property-getter vtable offsets on a VB6 intrinsic object (e.g. App.Path is
+    'call [App_vtable + 0x50]).  These offsets are part of the runtime _App
+    'interface and are stable across every VB6 program; each is verified by
+    'tracing real binaries.  Extend as more are confirmed.
+    Select Case obj
+        Case "App"
+            Select Case disp
+                Case &H50: NativeIntrinsicPropByOffset = "Path"
+                Case &H58: NativeIntrinsicPropByOffset = "EXEName"
+            End Select
+    End Select
+End Function
+
+Private Function NativeEaxUse(inst As CInstruction) As Long
+    'How this instruction uses eax (the previous call's result):
+    '  1 = reads eax as a source  -> a deferred call folds into this instruction
+    '  2 = clobbers eax / control-flow boundary -> emit the deferred call now
+    '  0 = does not touch eax      -> keep the call deferred
+    'Unknown opcodes fall through to 0 so a deferred call is never lost early - it
+    'is emitted at the next boundary or the end of the procedure instead.
+    Dim cls As Long, dump As String, n As Long, i As Long, op As Long
+    Dim modrm As Long, md As Long, reg As Long, rm As Long
+    On Error GoTo none0
+    cls = inst.cmdType And C_TYPEMASK
+    If cls = C_CAL Or cls = C_JMP Or cls = C_JMC Or cls = C_RET Then NativeEaxUse = 2: Exit Function
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If n < 1 Then Exit Function
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    Select Case op
+        Case &H50: NativeEaxUse = 1: Exit Function          'push eax (reads)
+        Case &H58: NativeEaxUse = 2: Exit Function          'pop eax (clobbers)
+        Case &HB8: NativeEaxUse = 2: Exit Function          'mov eax, imm32
+        Case &HA1: NativeEaxUse = 2: Exit Function          'mov eax, [abs]
+        Case &H3D, &HA9: NativeEaxUse = 1: Exit Function     'cmp/test eax, imm (reads)
+    End Select
+    If n >= i + 2 Then
+        modrm = NativeDumpByte(dump, i + 1)
+        md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+        Select Case op
+            Case &H89                          'mov r/m, r (store reg)
+                If reg = 0 Then NativeEaxUse = 1: Exit Function          'eax is source
+                If md = 3 And rm = 0 Then NativeEaxUse = 2: Exit Function 'eax is dest
+            Case &H8B                          'mov r, r/m
+                If reg = 0 Then NativeEaxUse = 2: Exit Function          'eax is dest
+                If md = 3 And rm = 0 Then NativeEaxUse = 1: Exit Function 'eax is source
+            Case &H85, &H3B, &H39              'test/cmp involving a register
+                If reg = 0 Or (md = 3 And rm = 0) Then NativeEaxUse = 1: Exit Function
+            Case &H83, &H81                    'grp1 r/m, imm (cmp eax, imm reads)
+                If md = 3 And rm = 0 Then NativeEaxUse = 1: Exit Function
+            Case &H01, &H03, &H09, &H0B, &H21, &H23, &H29, &H2B, &H31, &H33
+                'alu op with eax as an operand: reads then clobbers eax, and we do
+                'not model the arithmetic - emit the call rather than fold it.
+                If reg = 0 Or (md = 3 And rm = 0) Then NativeEaxUse = 2: Exit Function
+        End Select
+    End If
+none0:
+    NativeEaxUse = 0
+End Function
+
+Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As Long) As String
+    'Symbolic value of a ModR/M r/m operand: a register's tracked value, or a
+    'local stack slot.  "" when it is a memory operand we do not model.
+    Dim disp As Long, isAbs As Boolean
+    If md = 3 Then
+        NativeRmVal = NativeRegVal(rm)
+    ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
+        If Not isAbs And disp < 0 Then NativeRmVal = NativeGetLocalExpr(disp)
+    End If
+End Function
+
+Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
+    'Decode a TEST/CMP into symbolic left/right operands for the next Jcc.
+    Dim dump As String, n As Long, i As Long, op As Long
+    Dim modrm As Long, md As Long, reg As Long, rm As Long
+    Dim L As String, R As String, isTst As Boolean
+    On Error GoTo done3
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    isTst = (mn = "TEST")
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+    Select Case op
+        Case &H85                       'test r/m32, r32
+            L = NativeRmVal(dump, md, rm): R = "0": isTst = True
+        Case &HA9                       'test eax, imm32
+            L = NativeRegVal(0): R = "0": isTst = True
+        Case &HF7                       'test r/m32, imm32 (reg field = 0)
+            L = NativeRmVal(dump, md, rm): R = "0": isTst = True
+        Case &H3B                       'cmp r32, r/m32
+            L = NativeRegVal(reg): R = NativeRmVal(dump, md, rm)
+        Case &H39                       'cmp r/m32, r32
+            L = NativeRmVal(dump, md, rm): R = NativeRegVal(reg)
+        Case &H3D                       'cmp eax, imm32
+            L = NativeRegVal(0): R = NativeNumFromBits(NativeDumpInt32(dump, i + 1))
+        Case &H83                       'cmp r/m32, imm8 (sign-extended)
+            L = NativeRmVal(dump, md, rm): R = CStr(NativeDumpInt8(dump, n - 1))
+        Case &H81                       'cmp r/m32, imm32
+            L = NativeRmVal(dump, md, rm): R = NativeNumFromBits(NativeDumpInt32(dump, n - 4))
+    End Select
+    If Len(L) > 0 And Len(R) > 0 Then
+        NVCmpL = L: NVCmpR = R: NVCmpIsTest = isTst: NVCmpSet = True
+    End If
+done3:
+End Sub
 
 Private Function NativeMovStringLit(inst As CInstruction) As String
     'mov [mem], imm32 (opcode C7): if the immediate is a pointer to a readable
@@ -1155,11 +1605,106 @@ Private Function NativeCallTargetName(ByVal tgt As Long) As String
     nm = NativeLookupName(tgt)
     If Len(nm) = 0 Then nm = NativeLookupName(NativeSnapEntry(tgt))
     If Len(nm) = 0 Then
+        'Not a user procedure - it may be a declared-DLL (Win32 API) call thunk.
+        nm = NativeApiStubName(tgt)
+        If Len(nm) > 0 Then NativeCallTargetName = nm: Exit Function
         NativeCallTargetName = "proc_" & Hex$(tgt)
         Exit Function
     End If
     If Len(NVForm) > 0 And Left$(nm, Len(NVForm) + 1) = NVForm & "." Then nm = Mid$(nm, Len(NVForm) + 2)
     NativeCallTargetName = nm
+End Function
+
+Private Function NativeApiStubName(ByVal addr As Long) As String
+    'Resolve a direct call target that is a VB6 declared-DLL (Win32 API) call
+    'thunk to its API name (e.g. FindWindow, SendMessage), or "" if addr is not
+    'such a stub.
+    '
+    'A "Declare Function ... Lib ..." compiles to a DllFunctionCall thunk:
+    '    A1 <cachedPtr>          mov  eax,[cachedPtr]   (0 until first runtime call)
+    '    0B C0                   or   eax,eax
+    '    74 02                   jz   +2
+    '    FF E0                   jmp  eax
+    '    68 <descriptorVA>       push <descriptorVA>    (the import descriptor)
+    '    B8 <DllFunctionCall> / FF D0
+    'The descriptor is the VB external-library struct: +0x00 -> library-name ptr,
+    '+0x04 -> function-name ptr (ANSI, e.g. "FindWindowA").  Self-contained: no
+    'reliance on the PE import table (declared APIs are DllFunctionCall'd, not PE
+    'imports) nor on the external-table parse order.
+    On Error GoTo done
+    If NVApiStubCache Is Nothing Then Set NVApiStubCache = New Collection
+
+    Dim cached As Variant
+    On Error Resume Next
+    cached = NVApiStubCache("k" & addr)
+    If Err.Number = 0 Then NativeApiStubName = cached: Exit Function
+    Err.Clear
+    On Error GoTo done
+
+    Dim result As String
+    result = ""
+    If addr >= OptHeader.ImageBase Then
+        Dim fp As Integer, b(19) As Byte, pos As Long
+        fp = FreeFile
+        Open SFilePath For Binary Access Read As #fp
+        pos = addr + 1 - OptHeader.ImageBase
+        If pos >= 1 And pos + 19 <= LOF(fp) Then
+            Get #fp, pos, b
+            'Match the thunk signature (mov eax,[imm]; or eax,eax; jz; jmp eax; push imm32).
+            If b(0) = &HA1 And b(5) = &HB And b(6) = &HC0 And b(11) = &H68 Then
+                Dim descVA As Long, nameVA As Long
+                descVA = NativeBytesToLong(b(12), b(13), b(14), b(15))
+                If descVA >= OptHeader.ImageBase Then
+                    'Function-name pointer at descriptor+0x04.
+                    Dim np As Long
+                    np = descVA + 4 + 1 - OptHeader.ImageBase
+                    If np >= 1 And np + 3 <= LOF(fp) Then
+                        Dim nb(3) As Byte
+                        Get #fp, np, nb
+                        nameVA = NativeBytesToLong(nb(0), nb(1), nb(2), nb(3))
+                        If nameVA >= OptHeader.ImageBase Then
+                            Dim sp As Long
+                            sp = nameVA + 1 - OptHeader.ImageBase
+                            If sp >= 1 And sp <= LOF(fp) Then
+                                Seek #fp, sp
+                                result = NativeApiTrimSuffix(GetUntilNull(fp))
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+        Close #fp
+    End If
+
+    NVApiStubCache.Add result, "k" & addr
+    NativeApiStubName = result
+    Exit Function
+done:
+    On Error Resume Next
+    Close #fp
+    NativeApiStubName = ""
+End Function
+
+Private Function NativeBytesToLong(ByVal b0 As Byte, ByVal b1 As Byte, ByVal b2 As Byte, ByVal b3 As Byte) As Long
+    'Assemble a little-endian DWORD without overflow on the high bit.
+    Dim hi As Long
+    hi = b3
+    NativeBytesToLong = (CLng(b0) Or (CLng(b1) * &H100&) Or (CLng(b2) * &H10000)) Or (hi * &H1000000)
+End Function
+
+Private Function NativeApiTrimSuffix(ByVal nm As String) As String
+    'Drop a single trailing A/W (ANSI/Unicode variant suffix) so the name matches
+    'the VB Declare alias / commercial output (FindWindowA -> FindWindow).  Names
+    'without the suffix (FatalExit, IsDebuggerPresent) are returned unchanged.
+    Dim L As Long
+    L = Len(nm)
+    If L > 1 Then
+        Dim c As String
+        c = Right$(nm, 1)
+        If c = "A" Or c = "W" Then NativeApiTrimSuffix = Left$(nm, L - 1): Exit Function
+    End If
+    NativeApiTrimSuffix = nm
 End Function
 
 Private Function NativeLookupName(ByVal addr As Long) As String
@@ -1209,23 +1754,41 @@ Private Function NativeStrLitArgs() As String
     NativeStrLitArgs = s
 End Function
 
+Private Function NativeProcMatchIdx(ByVal addr As Long) As Long
+    'Index of the nearest named SubNamelist entry at or just before this entry
+    'is (the named proc list and the clickable list can differ by a few prologue
+    'bytes), or -1 if none.  Shared by NativeProcName and NativeProcHeader so the
+    'name, kind and visibility all come from the same matched entry.
+    Dim i As Long, d As Long, bestDelta As Long, best As Long
+    On Error Resume Next
+    bestDelta = 99999: best = -1
+    For i = 0 To UBound(SubNamelist)
+        d = addr - SubNamelist(i).offset
+        If d >= 0 And d <= 24 And d < bestDelta Then bestDelta = d: best = i
+    Next
+    NativeProcMatchIdx = best
+End Function
+
 Private Function NativeProcHeader(ByVal addr As Long) As String
-    Dim nm As String
+    Dim nm As String, idx As Long, vis As String, kindStr As String
     nm = NativeProcName(addr)
     If InStr(nm, "(") = 0 Then nm = nm & "()"
-    NativeProcHeader = "Private Sub " & nm & "   '" & Hex$(addr)
+    vis = "Private": kindStr = "Sub": NVProcEndWord = "Sub"
+    idx = NativeProcMatchIdx(addr)
+    If idx >= 0 Then
+        If Len(SubNamelist(idx).visibility) > 0 Then vis = SubNamelist(idx).visibility
+        If Len(SubNamelist(idx).kind) > 0 Then
+            kindStr = SubNamelist(idx).kind          '"Function" / "Property Get" / ...
+            If InStr(kindStr, "Property") > 0 Then NVProcEndWord = "Property" Else NVProcEndWord = kindStr
+        End If
+    End If
+    NativeProcHeader = vis & " " & kindStr & " " & nm & "   '" & Hex$(addr)
 End Function
 
 Private Function NativeProcName(ByVal addr As Long) As String
-    'Match the nearest named procedure at or just before this entry (the named
-    'proc table and the clickable list can differ by a few prologue bytes).
-    Dim i As Long, nm As String, p As Long, d As Long, bestDelta As Long
-    On Error Resume Next
-    bestDelta = 99999
-    For i = 0 To UBound(SubNamelist)
-        d = addr - SubNamelist(i).offset
-        If d >= 0 And d <= 24 And d < bestDelta Then bestDelta = d: nm = SubNamelist(i).strName
-    Next
+    Dim nm As String, p As Long, idx As Long
+    idx = NativeProcMatchIdx(addr)
+    If idx >= 0 Then nm = SubNamelist(idx).strName
     If Len(nm) = 0 Then nm = "proc_" & Hex$(addr)
     p = InStr(nm, ".")
     If p > 0 Then nm = Mid$(nm, p + 1)

@@ -239,6 +239,107 @@ Private Sub AddNativeProc(ByVal owner As String, ByVal va As Long)
     ReDim Preserve gNativeProcArray(UBound(gNativeProcArray) + 1)
 End Sub
 
+'*****************************
+'LinkNativeProcNames
+'Attach the real procedure names (Greet, Name, Form_Load, ...) to the native
+'procedures we decompile.
+'
+'VB6 stores, per object, a procedure-names array (tObject.aProcNamesArray): one
+'pointer-to-name per procedure, indexed in the object's procedure order, which
+'is also the order the procedures are laid out in memory (ascending address).
+'Null entries are unnamed/private procedures.  We do NOT use tObject's proc
+'address table here - in native EXEs it is a descriptor/thunk structure, not a
+'flat code-address array - so instead we take the procedure entry points we
+'already discovered for this object (gNativeProcArray, filled by the event-link
+'tables and ScanNativeProcsByPrologue), sort them ascending, and pair name index
+'i with the i-th address.
+'
+'Safety: we only map an object when the number of discovered procedures matches
+'the object's declared ProcCount exactly.  If they differ, the absolute name
+'indices can no longer be trusted to line up with address order, so we leave the
+'object's procedures as proc_<addr> (no risk of attaching a wrong name).
+'
+'Must run AFTER ScanNativeProcsByPrologue (so gNativeProcArray is complete) and
+'while the EXE file F is still open.  Adds entries to SubNamelist keyed by the
+'exact code address, so NativeProcName / NativeLookupName resolve them directly.
+'*****************************
+Public Sub LinkNativeProcNames(ByVal F As Integer)
+    On Error GoTo done
+    Dim oi As Long, nObj As Long
+    nObj = UBound(gObjectNameArray)
+
+    Dim p As Long, dotPos As Long, owner As String
+    Dim addrs() As Long, nA As Long, a As Long, b As Long, t As Long
+    Dim namesVA() As Long, pc As Long, i As Long, nm As String
+
+    For oi = 0 To nObj
+        pc = gObject(oi).ProcCount
+        If pc <= 0 Then GoTo nextObj
+        If gObject(oi).aProcNamesArray = 0 Then GoTo nextObj
+
+        'Collect this object's discovered procedure entry points.
+        ReDim addrs(UBound(gNativeProcArray))
+        nA = 0
+        For p = 0 To UBound(gNativeProcArray) - 1
+            If gNativeProcArray(p).offset <> 0 Then
+                dotPos = InStr(gNativeProcArray(p).sName, ".")
+                If dotPos > 0 Then owner = Left$(gNativeProcArray(p).sName, dotPos - 1) Else owner = ""
+                If owner = gObjectNameArray(oi) Then
+                    addrs(nA) = gNativeProcArray(p).offset
+                    nA = nA + 1
+                End If
+            End If
+        Next p
+
+        'Index alignment is only trustworthy when the counts match exactly.
+        If nA <> pc Then GoTo nextObj
+
+        'Sort the addresses ascending (procedure / name index order).
+        For a = 0 To nA - 2
+            For b = a + 1 To nA - 1
+                If addrs(b) < addrs(a) Then t = addrs(a): addrs(a) = addrs(b): addrs(b) = t
+            Next b
+        Next a
+
+        'Visibility: named members of a public-interface object (class /
+        'usercontrol - ObjectType bit 0x100000) are Public by VB6 default;
+        'everything else (forms, modules) defaults to Private.
+        Dim vis As String
+        If (gObject(oi).ObjectType And &H100000) <> 0 Then vis = "Public" Else vis = "Private"
+
+        'Read the names array (index -> name-string VA) and pair with addresses.
+        ReDim namesVA(pc - 1)
+        Seek F, gObject(oi).aProcNamesArray + 1 - OptHeader.ImageBase
+        Get F, , namesVA
+        Dim prevName As String, prevPos As Long, prevIdx As Long, pos As Long
+        prevName = "": prevPos = -1: prevIdx = -2
+        For i = 0 To pc - 1
+            nm = ""
+            If namesVA(i) <> 0 And (namesVA(i) - OptHeader.ImageBase) > 0 Then
+                Seek F, namesVA(i) + 1 - OptHeader.ImageBase
+                nm = GetUntilNull(F)
+            End If
+            If Len(nm) > 0 Then
+                pos = UBound(SubNamelist)
+                SubNamelist(pos).strName = gObjectNameArray(oi) & "." & nm
+                SubNamelist(pos).offset = addrs(i)
+                SubNamelist(pos).visibility = vis
+                SubNamelist(pos).kind = ""                  'default -> Sub
+                'A read/write property is stored as the SAME name at two adjacent
+                'indices: the first is the Get accessor, the second the Let/Set.
+                If i = prevIdx + 1 And nm = prevName And prevPos >= 0 Then
+                    SubNamelist(prevPos).kind = "Property Get"
+                    SubNamelist(pos).kind = "Property Let"
+                End If
+                ReDim Preserve SubNamelist(UBound(SubNamelist) + 1)
+                prevName = nm: prevPos = pos: prevIdx = i
+            End If
+        Next i
+nextObj:
+    Next oi
+done:
+End Sub
+
 Private Function KeyExists(ByRef col As Collection, ByVal key As String) As Boolean
     Dim v As Variant
     On Error Resume Next

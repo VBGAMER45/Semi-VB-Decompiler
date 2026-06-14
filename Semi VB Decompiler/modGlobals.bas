@@ -616,6 +616,11 @@ Private Type typeControlName
 End Type
 Global gControlNameArray() As typeControlName
 
+'Maps an object's own method slot to its code address, keyed "ObjectName:slot",
+'so a native "call [vtable + 0x6F8 + slot*4]" (a form calling its own method)
+'resolves to the method.  Populated from the event-link table during OpenVBExe.
+Global gFormVtable As Collection
+
 
 'For Controls
 Public Type typeStandardControlSize
