@@ -2012,6 +2012,10 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
         'so scan the native code for procedure prologues and add the rest.
         If gProjectInfo.aNativeCode <> 0 Then
             Call modNative.ScanNativeProcsByPrologue(F)
+            'Now that every native procedure address is known, attach the real
+            'procedure names (from each object's aProcNamesArray) by pairing the
+            'name index with the i-th procedure address in ascending order.
+            Call modNative.LinkNativeProcNames(F)
         End If
 
         'Main Loop to Get all Form's Properties
