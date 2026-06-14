@@ -1,17 +1,17 @@
 VERSION 5.00
-Object = "{F9043C88-F6F2-101A-A3C9-08002B2F49FB}#1.2#0"; "Comdlg32.ocx"
+Object = "{F9043C88-F6F2-101A-A3C9-08002B2F49FB}#1.2#0"; "COMDLG32.OCX"
 Begin VB.Form frmNativeDecompile 
    BorderStyle     =   3  'Fixed Dialog
    Caption         =   "Native Procedure Decompile (Beta)"
    ClientHeight    =   5085
    ClientLeft      =   45
    ClientTop       =   330
-   ClientWidth     =   6840
+   ClientWidth     =   8655
    LinkTopic       =   "Form1"
    MaxButton       =   0   'False
    MinButton       =   0   'False
    ScaleHeight     =   5085
-   ScaleWidth      =   6840
+   ScaleWidth      =   8655
    ShowInTaskbar   =   0   'False
    StartUpPosition =   1  'CenterOwner
    Begin VB.CommandButton cmdExportList 
@@ -61,11 +61,11 @@ Begin VB.Form frmNativeDecompile
       Left            =   0
       TabIndex        =   4
       Top             =   240
-      Width           =   1695
+      Width           =   3495
    End
    Begin VB.TextBox txtView 
       Height          =   3570
-      Left            =   1800
+      Left            =   3600
       MultiLine       =   -1  'True
       ScrollBars      =   3  'Both
       TabIndex        =   3
@@ -129,7 +129,7 @@ Begin VB.Form frmNativeDecompile
    Begin VB.Label Label1 
       Caption         =   "Just click on a procedure in the list to disassemble it."
       Height          =   255
-      Left            =   1800
+      Left            =   3720
       TabIndex        =   5
       Top             =   0
       Width           =   4215
@@ -235,7 +235,7 @@ On Error GoTo errHandle
     txtView.Text = ""
 
     'Native Asm -> VB reconstruction path
-    If optNativeToVB.Value = True Then
+    If optNativeToVB.value = True Then
         txtView.Text = modNativeToVB.DecompileNativeProcToVB(selAddr)
         Exit Sub
     End If
