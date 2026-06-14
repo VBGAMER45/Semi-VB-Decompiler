@@ -82,6 +82,8 @@ Private NVLastCmp As String        'hint expression for the next If condition
 Private NVStrLits As Collection    'pending string literals (e.g. MsgBox arguments)
 Private NVSkipLabels As Collection 'branch targets that belong to dropped error-check guards
 Private NVReg(7) As String         'symbolic value currently held in each GP register (eax..edi)
+Private NVRegIsAddr(7) As Boolean  'True when a register holds &local (from LEA), for by-ref pushes
+Private NVRegAddr(7) As String     'the local name a register's LEA-address points to
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
@@ -136,7 +138,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     ReDim NVPushImm(31): NVPushTop = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
-    For r = 0 To 7: NVReg(r) = "": Next
+    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": Next
     Set NVLocal = New Collection
     Set NVStrLits = New Collection
     Set NVSkipLabels = New Collection
@@ -967,7 +969,13 @@ Private Function NativePushOperand(inst As CInstruction) As String
         Case &H6A                       'push imm8
             NativePushOperand = CStr(NativeDumpInt8(dump, i + 1))
         Case &H50 To &H57               'push reg
-            NativePushOperand = NVReg(op - &H50)
+            'A register holding &local (from LEA) is a by-reference argument:
+            'show the local itself rather than its (often 0/stale) value.
+            If NVRegIsAddr(op - &H50) Then
+                NativePushOperand = NVRegAddr(op - &H50)
+            Else
+                NativePushOperand = NVReg(op - &H50)
+            End If
         Case &HFF                       'push r/m  (FF /6)
             If NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then NativePushOperand = NativeGetLocalExpr(disp)
@@ -993,25 +1001,38 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             immv = NativeDumpInt32(dump, i + 1)
             If immv >= OptHeader.ImageBase Then sv = NativeStringAt(immv)
             If Len(sv) > 0 Then NVReg(op - &HB8) = sv Else NVReg(op - &HB8) = NativeNumFromBits(immv)
+            NVRegIsAddr(op - &HB8) = False
         Case &H8B                       'mov r32, r/m32
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
             If md = 3 Then
                 NVReg(reg) = NVReg(rm)
+                NVRegIsAddr(reg) = NVRegIsAddr(rm): NVRegAddr(reg) = NVRegAddr(rm)   'address propagates on reg->reg
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then NVReg(reg) = NativeGetLocalExpr(disp) Else NVReg(reg) = ""
+                NVRegIsAddr(reg) = False
             End If
-        Case &H8D                       'lea r32, [mem]
+        Case &H8D                       'lea r32, [mem]  (address-of)
             modrm = NativeDumpByte(dump, i + 1)
             reg = (modrm \ 8) And 7
             If NativeDecodeDisp(dump, disp, isAbs) Then
-                If Not isAbs And disp < 0 Then NVReg(reg) = NativeGetLocalExpr(disp) Else NVReg(reg) = ""
+                'LEA takes the ADDRESS of a local.  Keep its value in NVReg (a
+                'read of the register wants the value), but ALSO remember the
+                'local's name so that PUSHing the register - passing the local by
+                'reference - shows the local, not its (often 0/stale) value.
+                If Not isAbs And disp < 0 Then
+                    NVReg(reg) = NativeGetLocalExpr(disp)
+                    NVRegIsAddr(reg) = True: NVRegAddr(reg) = "var_" & Hex$(Abs(disp))
+                Else
+                    NVReg(reg) = "": NVRegIsAddr(reg) = False
+                End If
             End If
         Case &H89                       'mov r/m32, r32 (store)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
             If md = 3 Then
                 NVReg(rm) = NVReg(reg)
+                NVRegIsAddr(rm) = NVRegIsAddr(reg): NVRegAddr(rm) = NVRegAddr(reg)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then
                     'A stored call result (expression containing a call) is worth
@@ -1029,7 +1050,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H33                       'xor r32, r/m32 (xor reg,reg -> 0)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
-            If md = 3 And reg = rm Then NVReg(reg) = "0"
+            If md = 3 And reg = rm Then NVReg(reg) = "0": NVRegIsAddr(reg) = False
     End Select
 End Function
 
