@@ -1715,6 +1715,23 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                             Exit For
                         End If
                     Next iAPILoop
+                    'The external table stores the ANSI export name (e.g. FindWindowA);
+                    'winapi.dat is keyed by the VB Declare name (FindWindow), whose
+                    'Definition already carries Alias "FindWindowA".  Retry with the
+                    'A/W suffix trimmed when the exact name is not found.
+                    If gApiList(UBound(gApiList)).strFunctionName = vbNullString And Len(sTempFunctionName) > 1 Then
+                        Dim suff As String
+                        suff = UCase$(Right$(sTempFunctionName, 1))
+                        If suff = "A" Or suff = "W" Then
+                            For iAPILoop = 1 To APIRecTotal
+                                Get #APIFile, iAPILoop, tAPIRec
+                                If UCase$(tAPIRec.Function) = UCase$(Left$(sTempFunctionName, Len(sTempFunctionName) - 1)) Then
+                                    gApiList(UBound(gApiList)).strFunctionName = tAPIRec.Definition
+                                    Exit For
+                                End If
+                            Next iAPILoop
+                        End If
+                    End If
                     If gApiList(UBound(gApiList)).strFunctionName = vbNullString Then
                         gApiList(UBound(gApiList)).strFunctionName = sTempFunctionName
                         Seek F, gExternalLibrary.aLibraryName + 1 - OptHeader.ImageBase

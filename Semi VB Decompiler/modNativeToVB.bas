@@ -902,19 +902,55 @@ End Sub
 '---------------------------------------------------------------------------
 
 Private Function NativeIsControlCall(inst As CInstruction, ByRef disp As Long) As Boolean
-    'A call [reg+disp] (not absolute) whose displacement is in the large
-    'control-block range - a candidate control accessor.
+    'A call [reg+disp] (not absolute) whose displacement is in the control-accessor
+    'range of the form vtable.  Control accessors sit BELOW the user-method block
+    '(which starts at 0x6F8); a call at 0x6F8+ is a form method, not a control, and
+    'must be excluded or it poisons the base solve (no control maps to its index).
     Dim isAbs As Boolean
     If (inst.cmdType And C_TYPEMASK) <> C_CAL Then Exit Function
     If Not NativeDecodeDisp(inst.dump, disp, isAbs) Then Exit Function
     If isAbs Then Exit Function
-    NativeIsControlCall = (disp >= &H250)
+    NativeIsControlCall = (disp >= &H250 And disp < &H6F8)
 End Function
 
 Private Function NativeSolveControlBase(col As Collection) As Long
+    'VB6 lays a form's control accessors in its vtable starting at a FIXED offset:
+    'control with index i (controls are 1-based) is at 0x2F8 + i*4.  This base is a
+    'standard of the VB6 form interface - verified identical across binaries (Step2
+    'and pMasterMaker both 0x2F8) - and sits a constant 0x400 below the user-method
+    'block at 0x6F8.  Solving the base by aligning offsets to control indices is
+    'ambiguous (with contiguous indices many bases "fit", so it mis-names controls),
+    'so use the constant whenever it maps at least one of this proc's control calls
+    'to a real control; fall back to the old per-proc solve only for a non-standard
+    'layout (e.g. a UserControl) where the constant maps nothing.
+    Const FORM_CONTROL_BASE As Long = &H2F8
+    If NativeBaseHits(col, FORM_CONTROL_BASE) > 0 Then
+        NativeSolveControlBase = FORM_CONTROL_BASE
+    Else
+        NativeSolveControlBase = NativeSolveControlBasePerProc(col)
+    End If
+End Function
+
+Private Function NativeBaseHits(col As Collection, ByVal base As Long) As Long
+    'How many of the proc's control-accessor calls map, at this base, to a REAL
+    'control of the current form.  A positive count means the base is the right one.
+    Dim inst As CInstruction, off As Long, idx As Long, c As Long
+    On Error Resume Next
+    For Each inst In col
+        If NativeIsControlCall(inst, off) Then
+            idx = off - base
+            If idx >= 0 And (idx Mod 4) = 0 Then
+                If NativeControlIndexName(idx \ 4) <> "" Then c = c + 1
+            End If
+        End If
+    Next
+    NativeBaseHits = c
+End Function
+
+Private Function NativeSolveControlBasePerProc(col As Collection) As Long
     Dim inst As CInstruction, k As Long, idx As Long, cand As Long, firstOff As Long, d As Long
     On Error Resume Next
-    NativeSolveControlBase = -1
+    NativeSolveControlBasePerProc = -1
     firstOff = -1
     For Each inst In col
         If NativeIsControlCall(inst, d) Then firstOff = d: Exit For
@@ -925,7 +961,7 @@ Private Function NativeSolveControlBase(col As Collection) As Long
             idx = gControlNameArray(k).lControlIndex
             cand = firstOff - idx * 4
             If cand >= 0 Then
-                If NativeBaseFits(col, cand) Then NativeSolveControlBase = cand: Exit Function
+                If NativeBaseFits(col, cand) Then NativeSolveControlBasePerProc = cand: Exit Function
             End If
         End If
     Next
