@@ -68,6 +68,7 @@ Private NVLastGuid As String      'its GUID (for property name resolution)
 Private NVFpu() As String         'FPU expression stack
 Private NVFpuTop As Long
 Private NVLocal As Collection      'local stack slot (disp) -> expression
+Private NVLocalGuid As Collection  'local stack slot (disp) -> control GUID, when the slot holds a control object
 Private NVLastLea As Long          'displacement of the most recent LEA (GET out-param)
 Private NVLastLeaSet As Boolean
 Private NVPendingArg As String     'value fstp'd into the outgoing argument area
@@ -86,8 +87,10 @@ Private NVRegIsAddr(7) As Boolean  'True when a register holds &local (from LEA)
 Private NVRegAddr(7) As String     'the local name a register's LEA-address points to
 Private NVRegIsMe(7) As Boolean    'True when a register holds an object pointer (this/Me or a module global)
 Private NVRegIsFormVt(7) As Boolean 'True when a register holds an object's vtable ([objPtr])
-Private NVRegObjType(7) As String  'intrinsic-object name a register's POINTER refers to (App/Screen/Clipboard)
-Private NVRegObjVt(7) As String    'intrinsic-object name whose VTABLE a register holds ([objPtr] deref)
+Private NVRegObjType(7) As String  'object NAME a register's POINTER refers to (App/Screen/Clipboard, or a control like Form1.File1)
+Private NVRegObjVt(7) As String    'object NAME whose VTABLE a register holds ([objPtr] deref)
+Private NVRegObjGuid(7) As String  'control GUID a register's object POINTER refers to ("" = intrinsic global / none)
+Private NVRegObjVtGuid(7) As String 'control GUID whose VTABLE a register holds (resolves control props via GetProperty)
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
@@ -143,8 +146,9 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     ReDim NVPushImm(31): NVPushTop = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
-    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": Next
+    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": Next
     Set NVLocal = New Collection
+    Set NVLocalGuid = New Collection
     Set NVStrLits = New Collection
     Set NVSkipLabels = New Collection
     Set NVLoopHdr = New Collection
@@ -200,6 +204,19 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
             output = output & "loc_" & Right$("00000000" & Hex$(inst.va), 8) & ":" & vbCrLf
         End If
         output = output & NativeProcessInst(inst)
+        'A call breaks object-identity tracking: a control/object pointer can be
+        'reloaded across a call by a path this lightweight tracker does not model,
+        'leaving a STALE identity on a callee-saved register (which then mis-names a
+        'later property access).  Drop every register's object/control identity
+        'except eax (which carries a getter's result) after each call, so a property
+        'resolves only from a tight load->deref->call chain with no intervening call
+        '- the reliable case - never from a stale tag.
+        If (inst.cmdType And C_TYPEMASK) = C_CAL Then
+            Dim cr As Long
+            For cr = 1 To 7
+                NVRegObjType(cr) = "": NVRegObjVt(cr) = "": NVRegObjGuid(cr) = "": NVRegObjVtGuid(cr) = ""
+            Next
+        End If
     Next
 
     'Any call still deferred is the proc's last statement - emit it.
@@ -272,6 +289,18 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         End If
                     End If
                 End If
+                'Property access on a tracked CONTROL object: its vtable register
+                'carries the control GUID (set when the control was fetched via a
+                'form accessor and stored through __vbaObjSet).  Reuse NativeProperty
+                'by seeding the last-control/guid from the per-register tracking, so
+                'a Get folds into `var = Form1.File1.Prop` and a Let/Set into
+                '`Form1.File1.Prop = value`.
+                If ocb >= 0 And ocb <= 7 Then
+                    If Len(NVRegObjVtGuid(ocb)) > 0 Then
+                        vb = NativeControlProp(NVRegObjVt(ocb), NVRegObjVtGuid(ocb), disp)
+                        If Len(vb) > 0 Then NVPushTop = 0: NativeProcessInst = ind & vb & vbCrLf: Exit Function
+                    End If
+                End If
                 'call [reg+disp] -> the object's own method (via its vtable), a
                 'control accessor, or a property vtable call.
                 'VB6 intrinsic global objects (App/Screen/Clipboard) are getters
@@ -324,12 +353,22 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     NVLastControl = NVForm & "." & NativeControlByOffset(disp)
                     NVLastGuid = NativeGuidByOffset(disp)
                     NVPushTop = 0
-                    NativeProcessInst = ind & "' get control -> " & NVLastControl & vbCrLf
+                    'Tag the returned control object (in eax) with its identity so a
+                    'following __vbaObjSet store binds the local's GUID and a direct
+                    'property call on it resolves.  The value flows to the consumer.
+                    NVReg(0) = NVLastControl
+                    NVRegObjType(0) = NVLastControl: NVRegObjGuid(0) = NVLastGuid
+                    NVRegObjVt(0) = "": NVRegObjVtGuid(0) = ""
+                    NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
                     Exit Function
                 Else
-                    vb = NativeProperty(disp)
+                    'A property vtable call that the per-register control tracking
+                    'above did NOT resolve.  The old single-slot NVLastControl is
+                    'stale-prone (it names whatever control was fetched last, not the
+                    'one this call is on), so leave the call raw rather than emit a
+                    'wrong Form.Control.Prop.  Correct resolutions come only from the
+                    'tracked-vtable path (NativeControlProp).
                     NVPushTop = 0
-                    If Len(vb) > 0 Then NativeProcessInst = ind & vb & vbCrLf: Exit Function
                     ann = "call ." & Hex$(disp)
                 End If
             Else
@@ -532,6 +571,22 @@ Private Function NativeGetLocalExpr(ByVal disp As Long) As String
     If Len(NativeGetLocalExpr) = 0 Then NativeGetLocalExpr = "var_" & Hex$(Abs(disp))
 End Function
 
+Private Sub NativeSetLocalGuid(ByVal disp As Long, ByVal guid As String)
+    'Remember that a local stack slot holds a control object of a given GUID, so a
+    'later `mov reg,[slot]; mov vt,[reg]; call [vt+off]` can resolve its property.
+    Dim k As String
+    k = "L" & disp
+    On Error Resume Next
+    NVLocalGuid.Remove k
+    On Error GoTo 0
+    If Len(guid) > 0 Then NVLocalGuid.Add guid, k
+End Sub
+
+Private Function NativeGetLocalGuid(ByVal disp As Long) As String
+    On Error Resume Next
+    NativeGetLocalGuid = NVLocalGuid("L" & disp)
+End Function
+
 '---------------------------------------------------------------------------
 ' Idiom helpers
 '---------------------------------------------------------------------------
@@ -541,6 +596,7 @@ Private Function NativeProperty(ByVal vtOffset As Long) As String
     Dim p As String, propName As String, kind As String, valExpr As String
     If Len(NVLastGuid) = 0 Then Exit Function
     p = modPCode.GetProperty(NVLastGuid, vtOffset)
+    If InStr(p, "Unknown GUID") > 0 Then Exit Function   'GUID/offset not in a loaded TypeLib - leave raw
     NativeSplitProp p, propName, kind
     If Len(propName) = 0 Then Exit Function
 
@@ -557,6 +613,45 @@ Private Function NativeProperty(ByVal vtOffset As Long) As String
             NativeResetValue
         Case Else
             NativeProperty = "' " & NVLastControl & "." & propName & "()"
+    End Select
+End Function
+
+Private Function NativeControlProp(ByVal ctlName As String, ByVal guid As String, ByVal vtOffset As Long) As String
+'Resolve a property call on a tracked control object (its vtable carries the
+'control GUID).  Like NativeProperty but takes the control/guid explicitly (from
+'the per-register tracking) and reads a Let's value from the pushed argument
+'rather than NVReg(0) (which holds the control object itself, not the value).
+    Dim p As String, propName As String, kind As String, valExpr As String
+    If Len(guid) = 0 Then Exit Function
+    p = modPCode.GetProperty(guid, vtOffset)
+    If InStr(p, "Unknown GUID") > 0 Then Exit Function   'GUID/offset not in a loaded TypeLib - leave raw
+    NativeSplitProp p, propName, kind
+    If Len(propName) = 0 Then Exit Function
+
+    Select Case kind
+        Case "Get"
+            valExpr = ctlName & "." & propName
+            If NVLastLeaSet Then NativeSetLocalExpr NVLastLea, valExpr
+            NVLastLeaSet = False
+            NativeControlProp = "' get " & valExpr
+        Case "Let", "Set"
+            'Property Let compiles to `push value; push this; call [vt+off]`.  The TOP
+            'push is the control `this` itself - never the value - so take the push
+            'just below it (or a pending RGB()/FPU value).  Do NOT fall back to
+            'NVReg(0)/NVLastImm: those hold the control object and would leak it as
+            'the right-hand side.  Leave a placeholder when no value was tracked.
+            If Len(NVPendingArg) > 0 Then
+                valExpr = NVPendingArg
+            ElseIf NVFpuTop > 0 Then
+                valExpr = NativeFpuPop()
+            ElseIf NVPushTop >= 2 Then
+                valExpr = NVPushImm(NVPushTop - 2)
+            End If
+            If Len(valExpr) = 0 Then valExpr = "<value>"
+            NativeControlProp = ctlName & "." & propName & " = " & valExpr
+            NativeResetValue
+        Case Else
+            NativeControlProp = "' " & ctlName & "." & propName & "()"
     End Select
 End Function
 
@@ -593,7 +688,21 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
         Case InStr(nm, "__vbaHresultCheckObj") > 0
             NativeRuntimeCall = "": Exit Function           'automatic error check - drop
         Case InStr(nm, "__vbaObjSet") > 0, InStr(nm, "__vbaObjSetAddref") > 0
-            NVPushTop = 0: NativeRuntimeCall = "": Exit Function    'object-store plumbing - drop
+            'Object store: __vbaObjSet(&dest, srcObj).  When the source is a tracked
+            'control object (eax still carries the accessor result's identity),
+            'remember the destination local's control GUID - so a later property
+            'access through that local resolves - and surface the Set statement.
+            Dim osGuid As String, osName As String
+            osGuid = NVRegObjGuid(0): osName = NVRegObjType(0)
+            NVPushTop = 0
+            If NVLastLeaSet And Len(osGuid) > 0 Then
+                NativeSetLocalGuid NVLastLea, osGuid
+                NativeSetLocalExpr NVLastLea, osName
+                NativeRuntimeCall = "Set var_" & Hex$(Abs(NVLastLea)) & " = " & osName
+                NVLastLeaSet = False
+                Exit Function
+            End If
+            NativeRuntimeCall = "": Exit Function    'object-store plumbing - drop
         Case InStr(nm, "__vbaOnError") > 0
             'On Error setup. The handler label is recovered structurally (the
             'block after the VB error epilogue) rather than from this call's args.
@@ -1064,7 +1173,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             If immv >= OptHeader.ImageBase Then sv = NativeStringAt(immv)
             If Len(sv) > 0 Then NVReg(op - &HB8) = sv Else NVReg(op - &HB8) = NativeNumFromBits(immv)
             NVRegIsAddr(op - &HB8) = False: NVRegIsMe(op - &HB8) = False: NVRegIsFormVt(op - &HB8) = False
-            NVRegObjType(op - &HB8) = "": NVRegObjVt(op - &HB8) = ""
+            NVRegObjType(op - &HB8) = "": NVRegObjVt(op - &HB8) = "": NVRegObjGuid(op - &HB8) = "": NVRegObjVtGuid(op - &HB8) = ""
         Case &H8B                       'mov r32, r/m32
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
@@ -1073,6 +1182,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 NVRegIsAddr(reg) = NVRegIsAddr(rm): NVRegAddr(reg) = NVRegAddr(rm)   'address propagates on reg->reg
                 NVRegIsMe(reg) = NVRegIsMe(rm): NVRegIsFormVt(reg) = NVRegIsFormVt(rm)
                 NVRegObjType(reg) = NVRegObjType(rm): NVRegObjVt(reg) = NVRegObjVt(rm)
+                NVRegObjGuid(reg) = NVRegObjGuid(rm): NVRegObjVtGuid(reg) = NVRegObjVtGuid(rm)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 Dim bse As Long, baseObj As Boolean
                 bse = NativeMemBase(dump)
@@ -1089,11 +1199,17 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 'loading an App/Screen/Clipboard-typed local tags the register as
                 'that object pointer; dereferencing such a pointer ([objPtr], disp 0)
                 'tags the register as that object's vtable.
-                NVRegObjType(reg) = "": NVRegObjVt(reg) = ""
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
                 If Not isAbs And disp < 0 Then
                     If NativeIsIntrinsicObj(NVReg(reg)) Then NVRegObjType(reg) = NVReg(reg)
+                    'Loading a local that holds a control object tags this register
+                    'with the control's identity + GUID (for a later property call).
+                    Dim lguid As String
+                    lguid = NativeGetLocalGuid(disp)
+                    If Len(lguid) > 0 Then NVRegObjGuid(reg) = lguid: NVRegObjType(reg) = NVReg(reg)
                 ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 Then
                     NVRegObjVt(reg) = NVRegObjType(bse)
+                    NVRegObjVtGuid(reg) = NVRegObjGuid(bse)   'deref of a control pointer -> its vtable carries the GUID
                 End If
             End If
         Case &H8D                       'lea r32, [mem]  (address-of)
@@ -1111,7 +1227,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NVReg(reg) = "": NVRegIsAddr(reg) = False
                 End If
                 NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
-                NVRegObjType(reg) = "": NVRegObjVt(reg) = ""
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
             End If
         Case &H89                       'mov r/m32, r32 (store)
             modrm = NativeDumpByte(dump, i + 1)
@@ -1121,6 +1237,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 NVRegIsAddr(rm) = NVRegIsAddr(reg): NVRegAddr(rm) = NVRegAddr(reg)
                 NVRegIsMe(rm) = NVRegIsMe(reg): NVRegIsFormVt(rm) = NVRegIsFormVt(reg)
                 NVRegObjType(rm) = NVRegObjType(reg): NVRegObjVt(rm) = NVRegObjVt(reg)
+                NVRegObjGuid(rm) = NVRegObjGuid(reg): NVRegObjVtGuid(rm) = NVRegObjVtGuid(reg)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then
                     'A stored call result (expression containing a call) is worth
@@ -1145,7 +1262,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H33                       'xor r32, r/m32 (xor reg,reg -> 0)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
-            If md = 3 And reg = rm Then NVReg(reg) = "0": NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False: NVRegObjType(reg) = "": NVRegObjVt(reg) = ""
+            If md = 3 And reg = rm Then NVReg(reg) = "0": NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False: NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
     End Select
 End Function
 
