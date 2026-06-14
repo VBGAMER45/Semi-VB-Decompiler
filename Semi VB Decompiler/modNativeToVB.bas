@@ -1045,6 +1045,13 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     Else
                         NativeSetLocalExpr disp, NVReg(reg)
                     End If
+                ElseIf isAbs And disp >= OptHeader.ImageBase Then
+                    'Store to a module-level global: mov [abs], reg.  Surface a
+                    'call / concat / string value as `global_X = ...` (without
+                    'this a deferred call folded into the store would be lost).
+                    If NativeIsExprValue(NVReg(reg)) Then
+                        NativeTrackReg = "global_" & Hex$(disp) & " = " & NVReg(reg)
+                    End If
                 End If
             End If
         Case &H33                       'xor r32, r/m32 (xor reg,reg -> 0)
