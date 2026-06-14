@@ -183,6 +183,14 @@ Private VBCurrentForm As String     'form/object that owns the procedure being d
 Private VBCtlForm() As String       'recorded control accesses - parent form
 Private VBCtlOff() As Long          'recorded control accesses - instance offset
 Private VBCtlCnt As Long            'number of recorded control accesses
+
+'Per-object decompiled VB code, so the project tree can show a form/module/
+'class's P-Code-decompiled source in txtCode (mirrors gNativeCodeCache).
+'Keyed "OBJ_<UPPER-OBJECT-NAME>".  gPcodeOwner maps a procedure address to its
+'owning object name, built from the object procedure tables.
+Public gPcodeCodeCache As Collection
+Private gPcodeOwner As Collection
+
 Public Sub Decode(ByVal Filename As String)
 '*****************************
 'Purpose: To decode a P-Code excutable and return all procedures in P-Code tokens
@@ -195,6 +203,8 @@ Public Sub Decode(ByVal Filename As String)
     Dim g As Long
     ReDim ProcList(0)
     ProcCnt = 0
+    Set gPcodeCodeCache = New Collection
+    Set gPcodeOwner = New Collection
 
     LoadPE2 Filename
 
@@ -215,6 +225,10 @@ Public Sub Decode(ByVal Filename As String)
                 If ProcAddr(g) < UBound(SubName) And ProcAddr(g) > LBound(SubName) Then
                 SubName(ProcAddr(g)) = gObjectNameArray(i) & ".Proc" & ProcAddr(g)
                 AddProc ProcAddr(g)
+                'Remember which object owns this procedure address.
+                On Error Resume Next
+                gPcodeOwner.Add gObjectNameArray(i), "A" & ProcAddr(g)
+                On Error GoTo 0
                 End If
             End If
         Next
@@ -262,7 +276,11 @@ Public Sub Decode(ByVal Filename As String)
         frmMain.txtStatus.Refresh
         'Accumulate the VB output so control offsets can be resolved to names
         'in a single post-pass once every procedure of each form is decoded.
+        'Also accumulate per owning object so the tree can show each object's
+        'code in txtCode (like native code does).
         Dim strVBAll As String
+        Dim objNames() As String, objCode() As String, objCount As Long
+        ReDim objNames(64): ReDim objCode(64): objCount = 0
         VBResetControlCollection
         Do
             c = 0
@@ -277,8 +295,25 @@ Public Sub Decode(ByVal Filename As String)
                     Print #f2, DecompileProc(ProcList(a))
                     Print #f2, ""
                     bEndOfProcedure = False
-                    strVBAll = strVBAll & DecompileProcToVB(ProcList(a)) & vbCrLf
+                    Dim vb As String
+                    vb = DecompileProcToVB(ProcList(a))
+                    strVBAll = strVBAll & vb & vbCrLf
 
+                    'Group this procedure under its owning object.
+                    Dim owner As String, oi As Long, found As Long
+                    owner = PcodeOwnerOf(ProcList(a))
+                    found = -1
+                    For oi = 0 To objCount - 1
+                        If objNames(oi) = owner Then found = oi: Exit For
+                    Next
+                    If found = -1 Then
+                        If objCount > UBound(objNames) Then
+                            ReDim Preserve objNames(objCount + 64): ReDim Preserve objCode(objCount + 64)
+                        End If
+                        objNames(objCount) = owner: objCode(objCount) = ""
+                        found = objCount: objCount = objCount + 1
+                    End If
+                    objCode(found) = objCode(found) & vb & vbCrLf
 
                     ProcList(a) = 0
                     c = 1
@@ -288,11 +323,67 @@ Public Sub Decode(ByVal Filename As String)
         'Resolve control tokens (offset -> index -> name) then write the result
         VBApplyControlNames strVBAll
         Print #F, strVBAll
+        'Resolve control names per object and cache for the project tree.
+        Dim oj As Long
+        For oj = 0 To objCount - 1
+            Dim oc As String
+            oc = objCode(oj)
+            VBApplyControlNames oc
+            On Error Resume Next
+            gPcodeCodeCache.Add oc, "OBJ_" & UCase$(objNames(oj))
+            On Error GoTo 0
+        Next
     Close #f2
     Close #F
 
     frmMain.cmdSkipProcedure.Visible = False
 End Sub
+
+'Owning object name (UPPER) for a procedure address: from the object proc
+'tables when known, otherwise the prefix of the procedure's name.
+Private Function PcodeOwnerOf(ByVal addr As Long) As String
+    On Error Resume Next
+    Dim o As String
+    o = ""
+    o = gPcodeOwner("A" & addr)
+    If Len(o) > 0 Then
+        PcodeOwnerOf = UCase$(o)
+        Exit Function
+    End If
+    Dim nm As String, dp As Long
+    nm = DecompileProcToVB(addr, True)
+    dp = InStr(nm, ".")
+    If dp > 0 Then
+        PcodeOwnerOf = UCase$(Left$(nm, dp - 1))
+    Else
+        PcodeOwnerOf = "MODULE1"
+    End If
+End Function
+
+'Return the P-Code-decompiled VB source for an object (form / module / class),
+'so the project tree can show it in txtCode the same way native code does.
+'Falls back to signature-only stubs when the P-Code engine has not run
+'(P-Code decompiling can be disabled under Options).
+Public Function GetPcodeObjectCode(ByVal objName As String) As String
+    Dim code As String, p As Long
+    On Error Resume Next
+    If Not gPcodeCodeCache Is Nothing Then
+        code = gPcodeCodeCache("OBJ_" & UCase$(objName))
+        If Len(code) > 0 Then GetPcodeObjectCode = code: Exit Function
+    End If
+    For p = 0 To UBound(gProcedureList)
+        If UCase$(gProcedureList(p).strParent) = UCase$(objName) And gProcedureList(p).strProcedureName <> "" Then
+            If Right$(gProcedureList(p).strProcedureName, 1) = ")" Then
+                code = code & "Private Sub " & gProcedureList(p).strProcedureName & vbCrLf
+            Else
+                code = code & "Private Sub " & gProcedureList(p).strProcedureName & "()" & vbCrLf
+            End If
+            code = code & "End Sub" & vbCrLf
+        End If
+    Next
+    GetPcodeObjectCode = code
+End Function
+
 Sub LoadPE2(ByVal strFileName As String)
 '*****************************
 'Purpose: To get the PE data of the filename
