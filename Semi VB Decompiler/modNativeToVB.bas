@@ -107,6 +107,8 @@ Private NVCmpIsTest As Boolean     'the pending compare came from TEST (zero-com
 Private NVCmpSet As Boolean        'a GP TEST/CMP condition hint is pending
 Private NVFpuChk As Boolean        'an FPU status-word check (fnstsw;test al,imm) is pending -> drop its Jcc
 Private NVPendingCall As String    'a "Call X()" deferred until we know if its result is used
+Private NVErrObjPending As Boolean  'set by rtcErrObj: the next __vbaObjSet stores the Err object (re-tag eax)
+Private NVKeepPushStack As Boolean  'set by a runtime-call handler that manages NVPushTop itself (concat chain) so the dispatch does not wipe the remaining arguments
 
 'Sentinel for a "missing optional argument" Variant (VT_ERROR / DISP_E_PARAMNOTFOUND),
 'used while reconstructing rtcMsgBox / rtcInputBox by-reference Variant argument lists.
@@ -151,7 +153,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVFpuChk = False
-    NVPendingCall = ""
+    NVPendingCall = "": NVErrObjPending = False
     ReDim NVFpu(31): NVFpuTop = 0
     ReDim NVPushImm(31): ReDim NVPushDisp(31): NVPushTop = 0: NVLastPushDisp = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
@@ -295,7 +297,7 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             If hasMem And isAbs Then
                 'call [abs] -> msvbvm60 runtime helper / imported API (IAT)
                 vb = NativeRuntimeCall(inst, dsmNative.GetApiByIatVa(disp))
-                NVPushTop = 0
+                If Not NVKeepPushStack Then NVPushTop = 0
                 If NVCallHandled Then
                     If Len(vb) > 0 Then NativeProcessInst = ind & vb & vbCrLf
                     Exit Function
@@ -309,6 +311,28 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 'first - a tagged object vtable is a strong, specific signal.
                 Dim ocb As Long, oprop As String
                 ocb = NativeMemBase(inst.dump)
+                'Property GET on the VB6 Err object (call [ErrVt + offset]).  The Err
+                'vtable was tagged by the rtcErrObj -> __vbaObjSet -> deref chain.
+                'Resolve to Err.Number / Err.Description and flow the value quietly to
+                'the out-param local (it is normally consumed by an error-message
+                'concatenation, so no standalone statement is emitted).
+                If ocb >= 0 And ocb <= 7 Then
+                    If NVRegObjVt(ocb) = "Err" Then
+                        Dim eprop As String
+                        eprop = NativeErrPropByOffset(disp)
+                        If Len(eprop) > 0 Then
+                            NVPushTop = 0
+                            NVReg(0) = "Err." & eprop
+                            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                            NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                            If NVLastLeaSet Then
+                                NativeSetLocalExpr NVLastLea, "Err." & eprop
+                                NVLastLeaSet = False
+                            End If
+                            Exit Function
+                        End If
+                    End If
+                End If
                 If ocb >= 0 And ocb <= 7 Then
                     If Len(NVRegObjVt(ocb)) > 0 Then
                         oprop = NativeIntrinsicPropByOffset(NVRegObjVt(ocb), disp)
@@ -433,7 +457,7 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 'call <reg> -> a runtime helper previously cached into the register
                 rn = NativeCallRegName(inst)
                 vb = NativeRuntimeCall(inst, rn)
-                NVPushTop = 0
+                If Not NVKeepPushStack Then NVPushTop = 0
                 If NVCallHandled Then
                     If Len(vb) > 0 Then NativeProcessInst = ind & vb & vbCrLf
                     Exit Function
@@ -766,6 +790,7 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
 'eax / NVReg(0) for the consumer), or a dropped no-op.  Sets NVCallHandled.
     Dim nm As String, vbName As String, arity As Long, isStmt As Boolean, args As String, aa As String, bb As String
     NVCallHandled = False
+    NVKeepPushStack = False
     nm = apiName
     If Len(nm) = 0 Then Exit Function
     NVCallHandled = True
@@ -779,6 +804,18 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             'control object (eax still carries the accessor result's identity),
             'remember the destination local's control GUID - so a later property
             'access through that local resolves - and surface the Set statement.
+            '__vbaObjSet returns its source object in eax.  When the source is the
+            'Err object (rtcErrObj just ran, even if a `lea eax,[dest]` clobbered the
+            'tag in between), re-tag eax so the following `mov reg,[eax]; call
+            '[reg+0x1C]` chain resolves to Err.Number / Err.Description.
+            If NVErrObjPending Then
+                NVErrObjPending = False
+                NVPushTop = 0
+                NVReg(0) = "Err": NVRegObjType(0) = "Err": NVRegObjGuid(0) = ""
+                NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                NVRegObjVt(0) = "": NVRegObjVtGuid(0) = ""
+                NativeRuntimeCall = "": Exit Function
+            End If
             Dim osGuid As String, osName As String
             osGuid = NVRegObjGuid(0): osName = NVRegObjType(0)
             'The source control's identity is often cleared off eax by a `lea eax,
@@ -811,9 +848,32 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 NativeRuntimeCall = "On Error GoTo <handler>"
             End If
             Exit Function
+        Case nm = "Err", InStr(nm, "rtcErrObj") > 0
+            'rtcErrObj returns the VB6 Err object in eax.  Tag the register so the
+            'following vtable property GETs (call [ErrVt + 0x1C/0x2C]) resolve to
+            'Err.Number / Err.Description; emit nothing.
+            NVPushTop = 0
+            NVReg(0) = "Err": NVRegObjType(0) = "Err": NVRegObjGuid(0) = ""
+            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+            NVRegObjVt(0) = "": NVRegObjVtGuid(0) = ""
+            NVErrObjPending = True   'the following __vbaObjSet stores this Err object
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaStrI4") > 0, InStr(nm, "__vbaStrI2") > 0, _
+             InStr(nm, "__vbaStrR4") > 0, InStr(nm, "__vbaStrR8") > 0, _
+             InStr(nm, "__vbaStrBool") > 0, InStr(nm, "__vbaStrDate") > 0
+            'Numeric/typed value -> its string form (one stack argument).  Used to
+            'render `& number &` operands in string concatenations.  Folds to eax.
+            aa = NativeArgPop()
+            If Len(aa) = 0 Then aa = "<arg>"
+            NVReg(0) = "CStr(" & aa & ")": NVKeepPushStack = True
+            NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrCat") > 0
+            '__vbaStrCat(p1, p2) returns p1 & p2.  p1 is pushed first (deeper on the
+            'argument stack) and p2 last (on top), so the deeper operand is the LEFT
+            'side of the concatenation: pop top (p2) then deeper (p1) and join p1 & p2.
             aa = NativeArgPop(): bb = NativeArgPop()
-            NVReg(0) = NativeConcat(aa, bb): NativeRuntimeCall = "": Exit Function
+            NVReg(0) = NativeConcat(bb, aa): NVKeepPushStack = True
+            NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrToAnsi") > 0, InStr(nm, "__vbaStrToUnicode") > 0
             'Charset conversion: StrToAnsi(dst, src) returns the converted string
             'in eax.  For decompilation the value is just the source string, so
@@ -933,7 +993,10 @@ Private Function NativeMoveAssign() As String
         NativeSetLocalExpr NVLastLea, dn
         NVReg(0) = dn                       'the helper returns the moved value in eax
     End If
-    NVLastLeaSet = False: NVPendingArg = "": NVPushTop = 0
+    'These move/copy helpers are fastcall (ecx/edx) and take no stack arguments, so
+    'pending pushes belong to an enclosing expression (e.g. a string-literal operand
+    'awaiting a later __vbaStrCat) and must be preserved, not discarded.
+    NVLastLeaSet = False: NVPendingArg = "": NVKeepPushStack = True
 End Function
 
 Private Function NativeIsExprValue(ByVal s As String) As Boolean
@@ -1770,6 +1833,20 @@ Private Function NativeGlobalObjByOffset(ByVal disp As Long) As String
         Case &H14: NativeGlobalObjByOffset = "App"
         Case &H18: NativeGlobalObjByOffset = "Screen"
         Case &H1C: NativeGlobalObjByOffset = "Clipboard"
+    End Select
+End Function
+
+Private Function NativeErrPropByOffset(ByVal disp As Long) As String
+    'Read-only property GETTER vtable offsets on the VB6 Err object (the _ErrObject
+    'interface).  Err.Number is call [ErrVt + 0x1C], Err.Description is [ErrVt + 0x2C]
+    '- stable across VB6 programs, verified against VB6LangTest.
+    Select Case disp
+        Case &H1C: NativeErrPropByOffset = "Number"
+        Case &H2C: NativeErrPropByOffset = "Description"
+        Case &H20: NativeErrPropByOffset = "Source"
+        Case &H30: NativeErrPropByOffset = "HelpFile"
+        Case &H34: NativeErrPropByOffset = "HelpContext"
+        Case &H28: NativeErrPropByOffset = "LastDllError"
     End Select
 End Function
 
