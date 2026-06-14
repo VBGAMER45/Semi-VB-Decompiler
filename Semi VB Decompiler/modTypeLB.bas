@@ -11,7 +11,7 @@ Attribute VB_Name = "modTypeLB"
 '=========================================================================================
 Option Explicit
 
-Private Type GUID
+Private Type guid
     Data1 As Long
     Data2 As Integer
     Data3 As Integer
@@ -20,7 +20,7 @@ End Type
 
 Private Declare Function LoadTypeLib Lib "oleaut32.dll" (pFileName As Byte, pptlib As Object) As Long
 Private Declare Function RegisterTypeLib Lib "oleaut32.dll" (ByVal ptlib As Object, szFullPath As Byte, szHelpFile As Byte) As Long
-Private Declare Function CLSIDFromString Lib "ole32.dll" (lpsz As Byte, pclsid As GUID) As Long
+Private Declare Function CLSIDFromString Lib "ole32.dll" (lpsz As Byte, pCLSID As guid) As Long
 Private Declare Function GetFileTitle Lib "comdlg32.dll" Alias "GetFileTitleA" (ByVal lpszFile As String, ByVal lpszTitle As String, ByVal cbBuf As Integer) As Integer
 '============================================================================================
 Public Sub RegisterOLB(strFileName As String)
@@ -54,6 +54,6 @@ Private Sub RegisterMe(FilePath As String, Filename As String)
   If ResultMessage = 0 Then
     'MsgBox "Successful Registration of Type Library: " & Filename, vbInformation, "Registration Successful"
   Else
-    MsgBox "Registration of Type Library: " & Filename & " Unsuccessful", vbInformation, "Registration Unsuccessful"
+  '  MsgBox "Registration of Type Library: " & Filename & " Unsuccessful", vbInformation, "Registration Unsuccessful"
   End If
 End Sub ' RegisterMe(FilePath As String, FileName As String)
