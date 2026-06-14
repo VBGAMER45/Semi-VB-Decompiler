@@ -100,6 +100,7 @@ Private NVCmpL As String           'pending condition: left operand (symbolic)
 Private NVCmpR As String           'pending condition: right operand (symbolic)
 Private NVCmpIsTest As Boolean     'the pending compare came from TEST (zero-compare)
 Private NVCmpSet As Boolean        'a GP TEST/CMP condition hint is pending
+Private NVFpuChk As Boolean        'an FPU status-word check (fnstsw;test al,imm) is pending -> drop its Jcc
 Private NVPendingCall As String    'a "Call X()" deferred until we know if its result is used
 
 Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
@@ -140,7 +141,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVProcEndWord = "Sub"
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
-    NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False
+    NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVFpuChk = False
     NVPendingCall = ""
     ReDim NVFpu(31): NVFpuTop = 0
     ReDim NVPushImm(31): NVPushTop = 0
@@ -401,6 +402,14 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             End If
 
         Case C_JMC
+            'A Jcc guarding VB6's automatic FPU overflow check (preceded by
+            'fnstsw ax; test al,imm) jumps to the error handler - drop it (it can be
+            'a FAR jump, so it is not covered by the short error-check rule below).
+            If NVFpuChk Then
+                NativeAddUnique NVSkipLabels, inst.jmpConst
+                NVFpuChk = False: NVCmpSet = False: NVLastCmp = ""
+                Exit Function
+            End If
             'A short forward jge/jns/jae after a call is VB's automatic
             'HRESULT error-check guard around __vbaHresultCheckObj - drop it so
             'it does not turn into a bogus If block.
@@ -441,6 +450,12 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             Exit Function
 
         Case C_FLT
+            'fnstsw ax (DF E0) / fstsw ax (9B DF E0) stores the FPU status word for
+            'VB6's automatic overflow check (fnstsw; test al,imm; jcc <handler>).
+            'Flag it so the following Jcc is dropped instead of becoming an If.
+            Dim fdump As String
+            fdump = UCase$(Replace(inst.dump, " ", ""))
+            If Left$(fdump, 4) = "DFE0" Or Left$(fdump, 6) = "9BDFE0" Then NVFpuChk = True
             NativeFpuOp inst, mn
             Exit Function       'FPU ops build expressions silently
 
@@ -694,7 +709,18 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             'access through that local resolves - and surface the Set statement.
             Dim osGuid As String, osName As String
             osGuid = NVRegObjGuid(0): osName = NVRegObjType(0)
+            'The source control's identity is often cleared off eax by a `lea eax,
+            '[dest]` placed just before the call; fall back to the last control
+            'accessor (the __vbaObjSet source is always the just-fetched control).
+            If Len(osGuid) = 0 And Len(NVLastGuid) > 0 Then osGuid = NVLastGuid: osName = NVLastControl
             NVPushTop = 0
+            'Re-tag eax with the control identity: __vbaObjSet returns the same
+            'object, so a following `mov [tempLocal], eax` (the property LET target)
+            'keeps the GUID and the LET through that local resolves.
+            If Len(osGuid) > 0 Then
+                NVReg(0) = osName: NVRegObjType(0) = osName: NVRegObjGuid(0) = osGuid
+                NVRegObjVt(0) = "": NVRegObjVtGuid(0) = ""
+            End If
             If NVLastLeaSet And Len(osGuid) > 0 Then
                 NativeSetLocalGuid NVLastLea, osGuid
                 NativeSetLocalExpr NVLastLea, osName
@@ -1286,6 +1312,10 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     Else
                         NativeSetLocalExpr disp, NVReg(reg)
                     End If
+                    'Storing a tracked control object to a local (plain mov, not
+                    '__vbaObjSet) - remember its GUID so a later property access
+                    'through that local resolves (e.g. the LET target temp).
+                    If Len(NVRegObjGuid(reg)) > 0 Then NativeSetLocalGuid disp, NVRegObjGuid(reg)
                 ElseIf isAbs And disp >= OptHeader.ImageBase Then
                     'Store to a module-level global: mov [abs], reg.  Surface a
                     'call / concat / string value as `global_X = ...` (without
