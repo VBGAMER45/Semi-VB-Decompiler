@@ -86,6 +86,7 @@ Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge t
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
 Private NVProcEndWord As String    'closing keyword for this proc: "Sub" / "Function" / "Property"
+Private NVApiStubCache As Collection 'declared-DLL stub address -> resolved API name (global, "" = not a stub)
 
 Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 '*****************************
@@ -1157,11 +1158,106 @@ Private Function NativeCallTargetName(ByVal tgt As Long) As String
     nm = NativeLookupName(tgt)
     If Len(nm) = 0 Then nm = NativeLookupName(NativeSnapEntry(tgt))
     If Len(nm) = 0 Then
+        'Not a user procedure - it may be a declared-DLL (Win32 API) call thunk.
+        nm = NativeApiStubName(tgt)
+        If Len(nm) > 0 Then NativeCallTargetName = nm: Exit Function
         NativeCallTargetName = "proc_" & Hex$(tgt)
         Exit Function
     End If
     If Len(NVForm) > 0 And Left$(nm, Len(NVForm) + 1) = NVForm & "." Then nm = Mid$(nm, Len(NVForm) + 2)
     NativeCallTargetName = nm
+End Function
+
+Private Function NativeApiStubName(ByVal addr As Long) As String
+    'Resolve a direct call target that is a VB6 declared-DLL (Win32 API) call
+    'thunk to its API name (e.g. FindWindow, SendMessage), or "" if addr is not
+    'such a stub.
+    '
+    'A "Declare Function ... Lib ..." compiles to a DllFunctionCall thunk:
+    '    A1 <cachedPtr>          mov  eax,[cachedPtr]   (0 until first runtime call)
+    '    0B C0                   or   eax,eax
+    '    74 02                   jz   +2
+    '    FF E0                   jmp  eax
+    '    68 <descriptorVA>       push <descriptorVA>    (the import descriptor)
+    '    B8 <DllFunctionCall> / FF D0
+    'The descriptor is the VB external-library struct: +0x00 -> library-name ptr,
+    '+0x04 -> function-name ptr (ANSI, e.g. "FindWindowA").  Self-contained: no
+    'reliance on the PE import table (declared APIs are DllFunctionCall'd, not PE
+    'imports) nor on the external-table parse order.
+    On Error GoTo done
+    If NVApiStubCache Is Nothing Then Set NVApiStubCache = New Collection
+
+    Dim cached As Variant
+    On Error Resume Next
+    cached = NVApiStubCache("k" & addr)
+    If Err.Number = 0 Then NativeApiStubName = cached: Exit Function
+    Err.Clear
+    On Error GoTo done
+
+    Dim result As String
+    result = ""
+    If addr >= OptHeader.ImageBase Then
+        Dim fp As Integer, b(19) As Byte, pos As Long
+        fp = FreeFile
+        Open SFilePath For Binary Access Read As #fp
+        pos = addr + 1 - OptHeader.ImageBase
+        If pos >= 1 And pos + 19 <= LOF(fp) Then
+            Get #fp, pos, b
+            'Match the thunk signature (mov eax,[imm]; or eax,eax; jz; jmp eax; push imm32).
+            If b(0) = &HA1 And b(5) = &HB And b(6) = &HC0 And b(11) = &H68 Then
+                Dim descVA As Long, nameVA As Long
+                descVA = NativeBytesToLong(b(12), b(13), b(14), b(15))
+                If descVA >= OptHeader.ImageBase Then
+                    'Function-name pointer at descriptor+0x04.
+                    Dim np As Long
+                    np = descVA + 4 + 1 - OptHeader.ImageBase
+                    If np >= 1 And np + 3 <= LOF(fp) Then
+                        Dim nb(3) As Byte
+                        Get #fp, np, nb
+                        nameVA = NativeBytesToLong(nb(0), nb(1), nb(2), nb(3))
+                        If nameVA >= OptHeader.ImageBase Then
+                            Dim sp As Long
+                            sp = nameVA + 1 - OptHeader.ImageBase
+                            If sp >= 1 And sp <= LOF(fp) Then
+                                Seek #fp, sp
+                                result = NativeApiTrimSuffix(GetUntilNull(fp))
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+        Close #fp
+    End If
+
+    NVApiStubCache.Add result, "k" & addr
+    NativeApiStubName = result
+    Exit Function
+done:
+    On Error Resume Next
+    Close #fp
+    NativeApiStubName = ""
+End Function
+
+Private Function NativeBytesToLong(ByVal b0 As Byte, ByVal b1 As Byte, ByVal b2 As Byte, ByVal b3 As Byte) As Long
+    'Assemble a little-endian DWORD without overflow on the high bit.
+    Dim hi As Long
+    hi = b3
+    NativeBytesToLong = (CLng(b0) Or (CLng(b1) * &H100&) Or (CLng(b2) * &H10000)) Or (hi * &H1000000)
+End Function
+
+Private Function NativeApiTrimSuffix(ByVal nm As String) As String
+    'Drop a single trailing A/W (ANSI/Unicode variant suffix) so the name matches
+    'the VB Declare alias / commercial output (FindWindowA -> FindWindow).  Names
+    'without the suffix (FatalExit, IsDebuggerPresent) are returned unchanged.
+    Dim L As Long
+    L = Len(nm)
+    If L > 1 Then
+        Dim c As String
+        c = Right$(nm, 1)
+        If c = "A" Or c = "W" Then NativeApiTrimSuffix = Left$(nm, L - 1): Exit Function
+    End If
+    NativeApiTrimSuffix = nm
 End Function
 
 Private Function NativeLookupName(ByVal addr As Long) As String
