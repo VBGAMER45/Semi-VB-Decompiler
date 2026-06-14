@@ -95,6 +95,7 @@ Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge t
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
 Private NVProcEndWord As String    'closing keyword for this proc: "Sub" / "Function" / "Property"
+Private NVRetN As Long             'the proc's `ret imm16` operand (callee-popped arg bytes), -1 if none
 Private NVApiStubCache As Collection 'declared-DLL stub address -> resolved API name (global, "" = not a stub)
 Private NVCmpL As String           'pending condition: left operand (symbolic)
 Private NVCmpR As String           'pending condition: right operand (symbolic)
@@ -160,6 +161,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'block starts at the instruction immediately after that JMP.
     Set labels = New Collection
     NVErrHandler = 0
+    NVRetN = -1
     Dim prevWasResumePush As Boolean
     prevWasResumePush = False
     For Each inst In col
@@ -171,9 +173,38 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         If cls = C_JMP And prevWasResumePush And NVErrHandler = 0 Then
             NVErrHandler = inst.va + inst.instLen        'handler = fall-through of the JMP
         End If
+        'A `ret imm16` (C2) pops the callee's argument bytes - the parameter count.
+        'Take the FIRST one: the disassembly window runs past this proc into the
+        'next, so a later ret belongs to a different procedure.  All of one proc's
+        'exits pop the same N, so the first ret is this proc's.
+        If cls = C_RET And NVRetN = -1 Then
+            Dim rdmp As String
+            rdmp = UCase$(Replace(inst.dump, " ", ""))
+            If Left$(rdmp, 2) = "C2" And Len(rdmp) >= 6 Then NVRetN = NativeDumpByte(rdmp, 1) + NativeDumpByte(rdmp, 2) * 256
+        End If
         prevWasResumePush = NativeIsResumePush(inst, addr)
     Next
     If NVErrHandler <> 0 Then NativeAddUnique labels, NVErrHandler
+
+    'Fallback for procs the linear disassembly mis-aligns on (e.g. SEH/On Error
+    'handlers): byte-scan the proc's own range for its epilogue `ret N`.  The range
+    'ends at the next discovered procedure; the last C2 before it (padding is not
+    'C2) is the epilogue, and every exit pops the same N.
+    If NVRetN = -1 Then
+        Dim nextAddr As Long, pp As Long, scanLen As Long, jj As Long, nn As Long
+        nextAddr = addr + 8190
+        For pp = 0 To UBound(gNativeProcArray) - 1
+            If gNativeProcArray(pp).offset > addr And gNativeProcArray(pp).offset < nextAddr Then nextAddr = gNativeProcArray(pp).offset
+        Next
+        scanLen = nextAddr - addr
+        If scanLen > 8190 Then scanLen = 8190
+        For jj = scanLen - 3 To 0 Step -1
+            If b(jj) = &HC2 Then
+                nn = b(jj + 1) + b(jj + 2) * 256&
+                If nn >= 0 And nn <= 256 Then NVRetN = nn: Exit For
+            End If
+        Next
+    End If
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -1970,7 +2001,6 @@ End Function
 Private Function NativeProcHeader(ByVal addr As Long) As String
     Dim nm As String, idx As Long, vis As String, kindStr As String
     nm = NativeProcName(addr)
-    If InStr(nm, "(") = 0 Then nm = nm & "()"
     vis = "Private": kindStr = "Sub": NVProcEndWord = "Sub"
     idx = NativeProcMatchIdx(addr)
     If idx >= 0 Then
@@ -1980,7 +2010,31 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
             If InStr(kindStr, "Property") > 0 Then NVProcEndWord = "Property" Else NVProcEndWord = kindStr
         End If
     End If
+    'Add the parameter list when the name carries no signature yet (event handlers
+    'already get a typed one from getEventComplete).  Parameters are named generically
+    'arg_<ebp offset> with the count from the proc's `ret N`.
+    If InStr(nm, "(") = 0 Then nm = nm & "(" & NativeProcParams(kindStr) & ")"
     NativeProcHeader = vis & " " & kindStr & " " & nm & "   '" & Hex$(addr)
+End Function
+
+Private Function NativeProcParams(ByVal kindStr As String) As String
+    'Reconstruct the (generic) parameter list from `ret N`.  N is the bytes the
+    'callee pops = all stack arguments: a hidden Me/this (form & class methods) at
+    'ebp+8, then the user parameters at ebp+0xC, ebp+0x10, ...  A Function also
+    'reserves a hidden return-value slot.  Names are arg_<ebp offset> (the offset
+    'convention the commercial decompiler uses).
+    Dim slots As Long, nParams As Long, i As Long, off As Long, s As String
+    If NVRetN < 4 Then Exit Function           '-1 (plain ret) or ret 0/ret 4 -> no user params
+    slots = NVRetN \ 4
+    nParams = slots - 1                         'drop the hidden Me/this slot
+    If InStr(kindStr, "Function") > 0 Then nParams = nParams - 1   'drop the return-value slot
+    If nParams < 0 Then nParams = 0
+    For i = 0 To nParams - 1
+        off = &HC + i * 4
+        If Len(s) > 0 Then s = s & ", "
+        s = s & "arg_" & Hex$(off)
+    Next
+    NativeProcParams = s
 End Function
 
 Private Function NativeProcName(ByVal addr As Long) As String
