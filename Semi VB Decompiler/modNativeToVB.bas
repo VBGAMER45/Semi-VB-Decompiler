@@ -1445,15 +1445,30 @@ Private Function NativeIsIntrinsicObj(ByVal s As String) As Boolean
 End Function
 
 Private Function NativeIntrinsicPropByOffset(ByVal obj As String, ByVal disp As Long) As String
-    'Property-getter vtable offsets on a VB6 intrinsic object (e.g. App.Path is
-    'call [App_vtable + 0x50]).  These offsets are part of the runtime _App
-    'interface and are stable across every VB6 program; each is verified by
-    'tracing real binaries.  Extend as more are confirmed.
+    'Read-only property GETTER vtable offsets on a VB6 intrinsic object (e.g.
+    'App.Path is call [App_vtable + 0x50]).  These offsets are part of the runtime
+    '_App / _Screen interfaces and are stable across every VB6 program; each is
+    'verified by tracing real binaries (pMasterMaker, VB6LangTest).  Offsets are
+    'per-interface, so Screen.Height (0x50) and App.Path (0x50) legitimately
+    'coincide - keying by object name keeps them distinct.  Only read-only GETs
+    'belong here: the resolver surfaces them as `var_X = obj.Prop`, so a writable
+    'property (e.g. Screen.MousePointer, a Let) or an arg-taking method (Clipboard
+    'SetText/GetText) must NOT be listed - it would drop the assignment/args.
     Select Case obj
         Case "App"
             Select Case disp
                 Case &H50: NativeIntrinsicPropByOffset = "Path"
                 Case &H58: NativeIntrinsicPropByOffset = "EXEName"
+                Case &H60: NativeIntrinsicPropByOffset = "Title"
+                Case &HB8: NativeIntrinsicPropByOffset = "Major"
+                Case &HC0: NativeIntrinsicPropByOffset = "Minor"
+                Case &HC8: NativeIntrinsicPropByOffset = "Revision"
+            End Select
+        Case "Screen"
+            Select Case disp
+                Case &H98: NativeIntrinsicPropByOffset = "Width"
+                Case &H50: NativeIntrinsicPropByOffset = "Height"
+                Case &H80: NativeIntrinsicPropByOffset = "TwipsPerPixelX"
             End Select
     End Select
 End Function
