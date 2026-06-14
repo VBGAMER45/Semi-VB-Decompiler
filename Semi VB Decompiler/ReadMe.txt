@@ -1,21 +1,25 @@
 -------------------------------
 Semi VB Decompiler - VisualBasicZone.com
 Version: 2.0
-Build: 2.0.0
+Build: 2.0.7
 Website: http://www.visualbasiczone.com/products/semivbdecompiler
 -------------------------------
 Contents
 1. What's New?
 2. Features
-3. Questions?
-4. Bugs
-5. Contact
-6. Credits
+3. Command Line Options
+4. Questions?
+5. Bugs
+6. Contact
+7. Credits
 
 1. What's New?
 
+   Version 2.0 Build 2.0.7
+   .Net decompiler rebuilt.  It now reconstructs classes, fields, properties and methods to C# and VB.NET (in addition to a full IL disassembly).  The reconstructed types are browsable under a new ".Net Classes" node in the project tree, with C#, VB.NET and IL views per class and the method list for navigation.  Method bodies are reconstructed including if/else, while/do-while, switch and try/catch/finally, falling back to labeled goto for control flow that cannot be structured.  Added File > Build .Net Solution to export a Visual Studio solution (.sln with C# and VB.NET projects, one source file per class).  Added a headless command-line mode for decompiling and generating projects/solutions without the UI - see "3. Command Line Options" below.  The .Net helper DLL is no longer required (its BitConverter helpers are now implemented in pure VB6).
+
    Version 2.0
-   Native decompiler now finds procedure offsets for modules and classes, recovers .bas module procedures, lists them in the project tree, exports the decompiled code into the generated project, and adds a raw disassembly (Dism) tab.
+   Native decompiler now finds procedure offsets for modules and classes, recovers .bas module procedures, shows them in the project tree, exports decompiled code into the generated project, and adds a raw disassembly (Dism) tab.
 
    Version 0.09
    Added a new tool. Api Add allows you to add Api's to the Semi VB Decompiler Api Database.
@@ -148,6 +152,10 @@ Contents
 
 2. Features
      Decompiling the P-Code/native vb 4/5/6 exe's, dll's, and ocx's
+     Decompiling .Net assemblies to C# and VB.NET, with a full IL disassembly
+     Browse reconstructed .Net classes (C# / VB.NET / IL) in the project tree
+     Build a .Net solution (.sln with C# and VB.NET projects) from an assembly
+     Command line / batch mode for headless decompiling and project generation
      Form Generation
      Resource extraction wmf, ico, cur, gif, bmp, jpg, dib
      Control/Form Editor
@@ -161,7 +169,49 @@ Contents
      Memory Map of the exe file, so you can see what's going on.
      Advanced decompiling using COM instead of hard coding property opcodes.
 
-3. Questions?
+3. Command Line Options
+
+   Semi VB Decompiler can run without its window (headless) so you can
+   decompile files and generate projects from a script or batch file.
+
+   Usage:
+     SemiVBDecompiler.exe <inputfile> [/out <dir>] [/vbp] [/dism] [/solution]
+
+   <inputfile>   The VB 4/5/6 or .Net exe, dll or ocx to decompile.  This is
+                 the first argument that is not a switch.
+   /out <dir>    Directory to write the generated VB project or .Net solution
+                 into.  If omitted it defaults to the file's dump folder.
+                 (The intermediate decompile output - IL, file report, P-Code,
+                 images - is always written under the dump\<filename> folder
+                 next to the program, the same as the GUI.)
+   /vbp          Generate a VB project (.vbp plus all forms, modules, classes,
+                 user controls, property pages, user documents and designers).
+   /dism         Generate a VB project that uses the raw native disassembly for
+                 each procedure instead of the decompiled VB code.
+   /solution     For a .Net assembly, build a Visual Studio solution containing
+                 a C# project and a VB.NET project, one source file per class.
+   /?            Show usage.
+
+   Notes:
+   - The correct action is chosen automatically for the file type: a VB 4/5/6
+     file always produces a .vbp project and a .Net assembly always produces a
+     solution, regardless of which generate switch is passed.
+   - With no generate switch the file is only decompiled (its dump folder is
+     populated); no project or solution is written.
+   - No message boxes or prompts appear in command line mode.  A decompile.log
+     is written to the output directory, the program returns an exit code of 0
+     on success or non-zero on error, and then closes automatically.
+   - Quote any path that contains spaces.
+   - Run the program from (or alongside) its install folder so it can find its
+     data files (languages, API list, vb6.olb, required OCX/DLLs, etc).
+
+   Examples:
+     SemiVBDecompiler.exe "C:\Apps\MyApp.exe" /out "C:\Out" /vbp
+     SemiVBDecompiler.exe "C:\Apps\MyApp.exe" /out "C:\Out" /dism
+     SemiVBDecompiler.exe "C:\Libs\MyNet.dll" /out "C:\Out" /solution
+     SemiVBDecompiler.exe "C:\Apps\MyApp.exe"
+
+4. Questions?
    Q. What about Native Code Decompiling?
    A. It is in the works. Right now I have offsets for all the events and can do a disassembly of each event but I need to work on an assembly to VB engine still.
    Q. What the heck are the P-Code Tokens?
@@ -193,20 +243,17 @@ Contents
       All of the above files need to be registered(the installer should auto register the files.)
       If you are examining a .Net file then you need to have the .Net framework installed.
    Q. Where can I learn more about Visual Basic 5/6 Decompiling?
-   A. Head over to http://www.vb-decompiler.com  tons of information on vb decompiling.
+   A. Head over to https://sandsprite.com/vb-reversing/  tons of information on vb decompiling.
 
-4. Bugs
+5. Bugs
      Some properties aren't handled yet such as dataformat
      P-Code decoding may hang use the disable P-Code option under options.
-     If you would wish to report a bug email me at
-     support@visualbasiczone.com
      Please include as much information as possible so we can try to fix it and even better send us the file if possible.
 
-5. Contact/Support
-     Email=support@visualbasiczone.com
+6. Contact/Support
      Semi VB Decompiler Website:
      http://www.visualbasiczone.com/products/semivbdecompiler/
 
-6. Credits
+7. Credits
      I would like to thank the following people for helping me with this project.
      Sarge, Mr. Unleaded, Moogman, _aLfa_, Alex Ionescu, Warning and many others.
