@@ -3462,8 +3462,10 @@ On Error Resume Next
                             Else
                                 strBuffer = strBuffer & "'This application is compiled to Native refer to Native Procedure Decompile under the Tools Menu" & vbCrLf
                             End If
-                            
+
                             If VBVersion <> 4 Then
+                                'API Declares (if this form hosts them) + recovered field declarations
+                                strBuffer = strBuffer & modOutput.GetCodeHeaderDecls(tblPath(2), False)
                                 'Decompiled bodies (native) or signature stubs (P-Code)
                                 strBuffer = strBuffer & GetObjectCode(tblPath(2))
                             End If
@@ -3549,7 +3551,12 @@ On Error Resume Next
                     Else
                         strBuffer = strBuffer & "'This application is compiled to Native refer to Native Procedure Decompile under the Tools Menu" & vbCrLf
                     End If
-                    strBuffer = strBuffer & GetObjectCode(tblPath(2))
+                    'Decompile first (populates this module's referenced globals),
+                    'then build the declaration header from the collected globals.
+                    Dim sModBody As String
+                    sModBody = GetObjectCode(tblPath(2))
+                    strBuffer = strBuffer & modOutput.GetCodeHeaderDecls(tblPath(2), True)
+                    strBuffer = strBuffer & sModBody
                     txtCode.Text = strBuffer
                     ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
@@ -3572,7 +3579,8 @@ On Error Resume Next
                     Else
                         strBuffer = strBuffer & "'This application is compiled to Native refer to Native Procedure Decompile under the Tools Menu" & vbCrLf
                     End If
-                    
+
+                    strBuffer = strBuffer & modOutput.GetCodeHeaderDecls(tblPath(2), False)
                     strBuffer = strBuffer & GetObjectCode(tblPath(2))
                     txtCode.Text = strBuffer
                     ShowObjectDisassembly tblPath(2)

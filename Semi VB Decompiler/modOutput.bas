@@ -807,6 +807,47 @@ Public Function GetApiDeclareBlock(Optional ByVal scope As String = "Private") A
     GetApiDeclareBlock = s
 End Function
 
+Public Function ApiDeclareHost(ByRef isMod As Boolean) As String
+    'The object that hosts the project-wide API Declare block: the first standard
+    'module (Public), else the first form (Private).  Used so the Code tab shows the
+    'Declare block in the same place the file output puts it.
+    Dim i As Long, g As Long
+    isMod = True
+    For i = 0 To UBound(gObject)
+        For g = 0 To UBound(gObjectTypeList)
+            If gObject(i).ObjectType = gObjectTypeList(g).value And gObjectTypeList(g).strType = 2 Then
+                ApiDeclareHost = gObjectNameArray(i): isMod = True: Exit Function
+            End If
+        Next g
+    Next
+    For i = 0 To UBound(gObject)
+        For g = 0 To UBound(gObjectTypeList)
+            If gObject(i).ObjectType = gObjectTypeList(g).value And gObjectTypeList(g).strType = 1 Then
+                ApiDeclareHost = gObjectNameArray(i): isMod = False: Exit Function
+            End If
+        Next g
+    Next
+End Function
+
+Public Function GetCodeHeaderDecls(ByVal objectName As String, ByVal isModule As Boolean) As String
+    'The declaration block shown at the top of an object's Code-tab listing,
+    'matching the file output: the API Declare block (only on its host object, with
+    'the right scope), then this object's variable declarations (module globals for
+    'a standard module, recovered fields for a form/class).
+    Dim s As String, hostMod As Boolean, host As String
+    On Error Resume Next
+    host = ApiDeclareHost(hostMod)
+    If Len(host) > 0 And UCase$(host) = UCase$(objectName) Then
+        s = GetApiDeclareBlock(IIf(hostMod, "Public", "Private"))
+    End If
+    If isModule Then
+        s = s & GetModuleGlobalDeclBlock(objectName)
+    Else
+        s = s & GetFieldDeclBlock(objectName)
+    End If
+    GetCodeHeaderDecls = s
+End Function
+
 Public Function GetFieldDeclBlock(ByVal owner As String) As String
     'The reconstructed "Public <var> As <Type>" declaration block for an object,
     'recovered from its typeinfo VarDesc array (modNative.LinkNativePublicParams).
