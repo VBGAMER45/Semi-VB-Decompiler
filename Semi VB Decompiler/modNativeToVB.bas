@@ -1093,6 +1093,53 @@ Private Function NativeIsNegReg(inst As CInstruction, ByVal reg As Long) As Bool
     NativeIsNegReg = ((modrm \ &H40) = 3) And (((modrm \ 8) And 7) = 3) And ((modrm And 7) = reg)
 End Function
 
+Private Function NativeIsSetcc(inst As CInstruction, ByRef op As String, ByRef reg As Long) As Boolean
+    'Match SETcc r/m8 (0F 9x, reg-direct).  Returns the relational the condition
+    'represents (reg = 1 when true) and the 32-bit parent register index.
+    Dim dump As String, nn As Long, i As Long, cc As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    If NativeDumpByte(dump, i) <> &HF Then Exit Function
+    cc = NativeDumpByte(dump, i + 1)
+    Select Case cc
+        Case &H9C, &H92: op = "<"        'setl / setb
+        Case &H9F, &H97: op = ">"        'setg / seta
+        Case &H9E, &H96: op = "<="       'setle / setbe
+        Case &H9D, &H93: op = ">="       'setge / setae
+        Case &H94: op = "="              'sete
+        Case &H95: op = "<>"             'setne
+        Case Else: Exit Function
+    End Select
+    modrm = NativeDumpByte(dump, i + 2)
+    If (modrm \ &H40) <> 3 Then Exit Function       'register operand only
+    reg = (modrm And 7) And 3                        'al/cl/dl/bl + ah/ch/dh/bh -> eax/ecx/edx/ebx
+    NativeIsSetcc = True
+End Function
+
+Private Function NativeIsBoolOrAnd(inst As CInstruction, ByRef op As String, ByRef dst As Long, ByRef src As Long) As Boolean
+    'Match `or/and r32, r32` (reg-direct).  Returns "Or"/"And" and the dest + source
+    'register indices (dest is the register read by the following test/Jcc).
+    Dim dump As String, nn As Long, i As Long, opc As Long, modrm As Long, reg As Long, rm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    opc = NativeDumpByte(dump, i)
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) <> 3 Then Exit Function
+    reg = (modrm \ 8) And 7: rm = modrm And 7
+    Select Case opc
+        Case &HB: op = "Or": dst = reg: src = rm           'or  r32, r/m32
+        Case &H9: op = "Or": dst = rm: src = reg           'or  r/m32, r32
+        Case &H23: op = "And": dst = reg: src = rm         'and r32, r/m32
+        Case &H21: op = "And": dst = rm: src = reg         'and r/m32, r32
+        Case Else: Exit Function
+    End Select
+    NativeIsBoolOrAnd = True
+End Function
+
 Private Function NativeFpRelation(ByVal mask As Long, ByVal jcc As String) As String
     'Relational the materialised Boolean represents (REG True <=> jcc NOT taken).
     'fcom sets C0(0x01)=A<B, C3(0x40)=A=B, C2(0x04)=unordered.  je selects the
@@ -1205,6 +1252,41 @@ Private Function NativeProcessInst(inst As CInstruction) As String
     If mn = "TEST" Or mn = "CMP" Then
         NativeDecodeCompare inst, mn
         Exit Function
+    End If
+
+    'SETcc materialises a relational into a register: bind "(L <op> R)" from the
+    'pending compare so the value flows into a following boolean combine / test.
+    Dim ccOp As String, ccReg As Long
+    If NativeIsSetcc(inst, ccOp, ccReg) Then
+        If NVCmpSet And Len(NVCmpL) > 0 Then
+            Dim ccR As String
+            If NVCmpIsTest Then ccR = "0" Else ccR = NVCmpR
+            If Len(ccR) > 0 Then NVReg(ccReg) = "(" & NVCmpL & " " & ccOp & " " & ccR & ")" Else NVReg(ccReg) = ""
+        Else
+            NVReg(ccReg) = ""
+        End If
+        NVRegIsAddr(ccReg) = False: NVRegIsMe(ccReg) = False: NVRegIsFormVt(ccReg) = False
+        NVRegObjType(ccReg) = "": NVRegObjVt(ccReg) = "": NVRegObjGuid(ccReg) = "": NVRegObjVtGuid(ccReg) = ""
+        NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False
+        Exit Function
+    End If
+
+    'OR / AND of two relational-Boolean registers is a compound condition
+    '(`x <= 0 And x >= -10000` compiles to setl/setg/or; the OR/AND also sets the
+    'flags the following Jcc reads).  Combine them and arm the Boolean condition.
+    Dim boolOp As String, bDst As Long, bSrc As Long
+    If NativeIsBoolOrAnd(inst, boolOp, bDst, bSrc) Then
+        Dim bv1 As String, bv2 As String
+        bv1 = NVReg(bDst): bv2 = NVReg(bSrc)
+        If NativeLooksRelational(bv1) And NativeLooksRelational(bv2) Then
+            Dim combined As String
+            combined = "(" & bv1 & " " & boolOp & " " & bv2 & ")"
+            NVReg(bDst) = combined
+            NVRegIsAddr(bDst) = False: NVRegIsMe(bDst) = False: NVRegIsFormVt(bDst) = False
+            NVRegObjType(bDst) = "": NVRegObjVt(bDst) = "": NVRegObjGuid(bDst) = "": NVRegObjVtGuid(bDst) = ""
+            NVCmpL = combined: NVCmpIsBool = True: NVCmpSet = True: NVCmpIsTest = False
+            Exit Function
+        End If
     End If
 
     Select Case cls
