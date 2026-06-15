@@ -305,18 +305,18 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
             output = output & "loc_" & Right$("00000000" & Hex$(inst.va), 8) & ":" & vbCrLf
         End If
         output = output & NativeProcessInst(inst)
-        'A call breaks object-identity tracking: a control/object pointer can be
-        'reloaded across a call by a path this lightweight tracker does not model,
-        'leaving a STALE identity on a callee-saved register (which then mis-names a
-        'later property access).  Drop every register's object/control identity
-        'except eax (which carries a getter's result) after each call, so a property
-        'resolves only from a tight load->deref->call chain with no intervening call
-        '- the reliable case - never from a stale tag.
+        'A call clobbers the CALLER-SAVED registers (ecx, edx; eax holds the return
+        'and is re-tagged by the call handler), so their tracked object/control
+        'identity is invalid afterwards - drop it.  The CALLEE-SAVED registers
+        '(ebx, esi, edi, ebp) are preserved across the call by the callee, and the
+        'mov tracker already clears their identity on any in-proc reload, so their
+        'tag stays valid - keeping it lets a control-property LET resolve when the
+        'value is built by intervening helper calls (e.g.
+        'Label1.Caption = "a" & vbCrLf & "b": ebx holds Label1's vtable across the
+        '__vbaStrCat calls between the load and put_Caption).
         If (inst.cmdType And C_TYPEMASK) = C_CAL Then
-            Dim cr As Long
-            For cr = 1 To 7
-                NVRegObjType(cr) = "": NVRegObjVt(cr) = "": NVRegObjGuid(cr) = "": NVRegObjVtGuid(cr) = ""
-            Next
+            NVRegObjType(1) = "": NVRegObjVt(1) = "": NVRegObjGuid(1) = "": NVRegObjVtGuid(1) = ""   'ecx
+            NVRegObjType(2) = "": NVRegObjVt(2) = "": NVRegObjGuid(2) = "": NVRegObjVtGuid(2) = ""   'edx
         End If
 nextInst:
     Next
