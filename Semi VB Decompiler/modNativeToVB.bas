@@ -62,6 +62,7 @@ Public NVLastDisasmText As String
 
 '--- Per-procedure data-flow state ---
 Private NVForm As String          'owning form/object (for control resolution)
+Private NVHasMe As Boolean        'current proc is a class/form method (receives Me at ebp+8), not a .bas module sub
 Private NVBase As Long            'solved control-block base for this form (-1 = unknown)
 Private NVLastControl As String   'most recently accessed control name
 Private NVLastGuid As String      'its GUID (for property name resolution)
@@ -160,6 +161,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 
     'Reset per-proc state
     NVForm = NativeFormOf(addr)
+    NVHasMe = NativeProcHasMe(addr)
     NVProcEndWord = "Sub"
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
@@ -685,6 +687,10 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     'wrong Form.Control.Prop.  Correct resolutions come only from the
                     'tracked-vtable path (NativeControlProp).
                     NVPushTop = 0
+                    'Drop the COM lifetime/identity plumbing VB6 emits around every
+                    'object use - QueryInterface / AddRef / Release at the IUnknown
+                    'vtable slots 0 / 4 / 8 - which is pure noise, never user code.
+                    If disp = 0 Or disp = 4 Or disp = 8 Then Exit Function
                     ann = "call ." & Hex$(disp)
                 End If
             Else
@@ -1674,6 +1680,57 @@ Private Function NativeDumpInt32(ByVal dump As String, ByVal idx As Long) As Lon
     NativeDumpInt32 = v
 End Function
 
+Private Function NativeDumpInt16(ByVal dump As String, ByVal idx As Long) As Long
+    'Signed little-endian 16-bit value (so a Boolean True word 0xFFFF reads as -1).
+    Dim v As Long
+    v = NativeDumpByte(dump, idx) + NativeDumpByte(dump, idx + 1) * &H100&
+    If v >= &H8000& Then v = v - &H10000
+    NativeDumpInt16 = v
+End Function
+
+Private Function NativeHas66(ByVal dump As String) As Boolean
+    'True when the instruction carries the 0x66 operand-size prefix (a 16-bit
+    'store), so an immediate is read as a word, not a dword.
+    Dim i As Long, n As Long
+    n = Len(dump) \ 2
+    For i = 0 To n - 1
+        Select Case NativeDumpByte(dump, i)
+            Case &H66: NativeHas66 = True: Exit Function
+            Case &H67, &HF0, &HF2, &HF3, &H26, &H2E, &H36, &H3E, &H64, &H65   'skip other prefixes
+            Case Else: Exit Function
+        End Select
+    Next
+End Function
+
+Private Function NativeFieldName(ByVal disp As Long) As String
+    'Name of an instance FIELD at byte offset `disp` of the current form/class
+    'instance (the Me pointer).  Prefers the public-variable name recovered from
+    'the object's typeinfo (gFieldName, keyed Owner:offset); falls back to a
+    'synthetic field_<off> until those names are linked.
+    On Error Resume Next
+    Dim s As String
+    s = gFieldName(NVForm & ":" & disp)
+    If Len(s) > 0 Then NativeFieldName = s Else NativeFieldName = "field_" & Hex$(disp)
+End Function
+
+Private Function NativeFieldStoreLHS(ByVal base As Long, ByVal off As Long) As String
+    'Left-hand side for a store `mov [base + off], value` (off > 0):
+    '  - an instance field of Me (this/self) in a class/form method -> the public
+    '    variable name (or synthetic field_<off>);
+    '  - else a field of a UDT the base register holds BY REFERENCE (a ByRef param
+    '    or tracked pointer) -> base(off), the same deref-with-offset form a read
+    '    renders as.
+    'Empty when the base is neither, so an unmodelled store is left dropped.  The
+    'Me case is gated to NVHasMe so a .bas module's ByRef param (also at ebp+8) is
+    'never mistaken for an instance field.
+    If base < 0 Or base > 7 Then Exit Function
+    If NVHasMe And NVRegIsMe(base) Then
+        NativeFieldStoreLHS = NativeFieldName(off)
+    ElseIf NativeIsDerefBase(NVReg(base)) Then
+        NativeFieldStoreLHS = NVReg(base) & "(" & CStr(off) & ")"
+    End If
+End Function
+
 Private Function NativeIsResumePush(inst As CInstruction, ByVal procStart As Long) As Boolean
     'A "push imm32" of an address inside this procedure - the resume address VB
     'pushes immediately before jumping over the On Error handler block.
@@ -1871,6 +1928,16 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     If Len(NVReg(reg)) > 0 Then
                         NativeTrackReg = NativeGlobalName(disp) & " = " & NVReg(reg)
                     End If
+                ElseIf Not isAbs And disp > 0 And disp < &H2000 Then
+                    'Store to a struct FIELD: mov [base + off], reg - an instance
+                    'field of Me, or a ByRef-passed UDT field (see NativeFieldStoreLHS).
+                    Dim lhs89 As String, fv89 As String
+                    lhs89 = NativeFieldStoreLHS(NativeMemBase(dump), disp)
+                    If Len(lhs89) > 0 Then
+                        fv89 = NVReg(reg)
+                        If Len(fv89) = 0 Then fv89 = NativeRegName(reg)
+                        NativeTrackReg = lhs89 & " = " & fv89
+                    End If
                 End If
             End If
         Case &HC7                       'mov r/m32, imm32 (store immediate)
@@ -1882,6 +1949,17 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     If c7imm >= OptHeader.ImageBase Then c7s = NativeStringAt(c7imm)
                     If Len(c7s) = 0 Then c7s = NativeNumFromBits(c7imm)
                     NativeTrackReg = NativeGlobalName(disp) & " = " & c7s
+                ElseIf Not isAbs And disp > 0 And disp < &H2000 Then
+                    'Store an immediate to a struct FIELD: mov [base + off], imm.
+                    'A 0x66-prefixed store writes a word (Boolean True = 0xFFFF -> -1).
+                    Dim lhsC7 As String, fimm As Long, fis As String
+                    lhsC7 = NativeFieldStoreLHS(NativeMemBase(dump), disp)
+                    If Len(lhsC7) > 0 Then
+                        If NativeHas66(dump) Then fimm = NativeDumpInt16(dump, n - 2) Else fimm = NativeDumpInt32(dump, n - 4)
+                        If fimm >= OptHeader.ImageBase Then fis = NativeStringAt(fimm)
+                        If Len(fis) = 0 Then fis = NativeNumFromBits(fimm)
+                        NativeTrackReg = lhsC7 & " = " & fis
+                    End If
                 End If
             End If
         Case &H33                       'xor r32, r/m32 (xor reg,reg -> 0)

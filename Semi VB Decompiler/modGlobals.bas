@@ -629,6 +629,12 @@ Global gMethodSig As Collection
 'the same FuncDesc, so the header and End keyword match the source.
 Global gMethodKind As Collection
 
+'Maps a form/class instance FIELD to its public-variable name, keyed
+'"Owner:<decimal instance offset>" (e.g. "frmMainMenu:52" -> "flgExit"), so a
+'native store `mov [Me + off], value` renders as `name = value` instead of a
+'synthetic field_<off>.  Populated from the object's typeinfo VarDesc records.
+Global gFieldName As Collection
+
 
 'For Controls
 Public Type typeStandardControlSize
