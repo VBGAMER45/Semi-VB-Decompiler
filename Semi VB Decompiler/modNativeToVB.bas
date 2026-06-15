@@ -483,7 +483,7 @@ nextInst:
     If Len(NVPendingCall) > 0 Then output = output & NativeIndentStr() & NVPendingCall & vbCrLf: NVPendingCall = ""
     NativeCloseIfs output, &H7FFFFFFF
     output = output & "End " & NVProcEndWord & vbCrLf
-    DecompileNativeProcToVB = NativeStripOrphanLabels(NativeSubstituteArgNames(output))
+    DecompileNativeProcToVB = NativeStripOrphanLabels(NativeSubstituteConstants(NativeSubstituteArgNames(output)))
     Exit Function
 fail:
     DecompileNativeProcToVB = "' Error decompiling " & Hex$(addr) & ": " & Err.Description & vbCrLf
@@ -3013,6 +3013,34 @@ Private Function NativeSubstituteArgNames(ByVal src As String) As String
     For i = 0 To NVArgN - 1
         NativeSubstituteArgNames = NativeReplaceToken(NativeSubstituteArgNames, NVArgTok(i), NVArgNm(i))
     Next
+End Function
+
+Private Function NativeSubstituteConstants(ByVal src As String) As String
+    'Replace distinctive Win32 magic numbers with their constant names.  The ternary
+    'raster-ops (SRCCOPY etc.) are 24-bit structured codes that can't plausibly be an
+    'ordinary number, but to be safe the substitution is scoped to procedures that
+    'call a blit API (where the dwRop argument lives) - so a coincidental identical
+    'value elsewhere (e.g. an RGB colour) is never renamed.  Whole-number-token match.
+    NativeSubstituteConstants = src
+    If InStr(src, "BitBlt") = 0 And InStr(src, "StretchBlt") = 0 And InStr(src, "PatBlt") = 0 _
+       And InStr(src, "MaskBlt") = 0 And InStr(src, "PlgBlt") = 0 Then Exit Function
+    Dim r As String
+    r = src
+    r = NativeReplaceToken(r, "13369376", "SRCCOPY")       '0x00CC0020
+    r = NativeReplaceToken(r, "15597702", "SRCPAINT")      '0x00EE0086
+    r = NativeReplaceToken(r, "8913094", "SRCAND")         '0x008800C6
+    r = NativeReplaceToken(r, "6684742", "SRCINVERT")      '0x00660046
+    r = NativeReplaceToken(r, "4456232", "SRCERASE")       '0x00440328
+    r = NativeReplaceToken(r, "3342344", "NOTSRCCOPY")     '0x00330008
+    r = NativeReplaceToken(r, "1114278", "NOTSRCERASE")    '0x001100A6
+    r = NativeReplaceToken(r, "12583114", "MERGECOPY")     '0x00C000CA
+    r = NativeReplaceToken(r, "12255782", "MERGEPAINT")    '0x00BB0226
+    r = NativeReplaceToken(r, "15728673", "PATCOPY")       '0x00F00021
+    r = NativeReplaceToken(r, "16452617", "PATPAINT")      '0x00FB0A09
+    r = NativeReplaceToken(r, "5898313", "PATINVERT")      '0x005A0049
+    r = NativeReplaceToken(r, "5570569", "DSTINVERT")      '0x00550009
+    r = NativeReplaceToken(r, "16711778", "WHITENESS")     '0x00FF0062
+    NativeSubstituteConstants = r
 End Function
 
 Private Function NativeReplaceToken(ByVal src As String, ByVal tok As String, ByVal repl As String) As String
