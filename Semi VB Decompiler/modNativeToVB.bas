@@ -100,6 +100,9 @@ Private NVForJmp As Collection     '"F"&backedgeVA -> headerVA (string) - emit "
 Private NVForSkip As Collection    '"F"&va -> "1" - suppress this instruction (the exit Jcc)
 Private NVForName As Collection    '"F"&headerVA -> the loop variable name assigned at emit time
 Private NVForCnt As Long           'per-proc loop-variable name allocation index
+'--- Floating-point comparison idiom (fcom/fnstsw/test ah,mask/jcc -> boolean) ---
+Private NVFpCmp As Collection      '"P"&testVA -> "<relOp>|<regIdx>" - set NVReg(reg) to the relational
+Private NVFpSkip As Collection     '"P"&va -> "1" - suppress this scaffolding instruction
 Private NVLastCmp As String        'hint expression for the next If condition
 Private NVStrLits As Collection    'pending string literals (e.g. MsgBox arguments)
 Private NVSkipLabels As Collection 'branch targets that belong to dropped error-check guards
@@ -122,6 +125,7 @@ Private NVApiStubCache As Collection 'declared-DLL stub address -> resolved API 
 Private NVCmpL As String           'pending condition: left operand (symbolic)
 Private NVCmpR As String           'pending condition: right operand (symbolic)
 Private NVCmpIsTest As Boolean     'the pending compare came from TEST (zero-compare)
+Private NVCmpIsBool As Boolean     'NVCmpL is already a relational Boolean (render it directly, no "<> 0")
 Private NVCmpSet As Boolean        'a GP TEST/CMP condition hint is pending
 Private NVFpuChk As Boolean        'an FPU status-word check (fnstsw;test al,imm) is pending -> drop its Jcc
 Private NVPendingCall As String    'a "Call X()" deferred until we know if its result is used
@@ -171,7 +175,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVProcEndWord = "Sub"
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
-    NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVFpuChk = False
+    NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVCmpIsBool = False: NVFpuChk = False
     NVPendingCall = "": NVErrObjPending = False
     ReDim NVFpu(31): NVFpuTop = 0
     ReDim NVPushImm(31): ReDim NVPushDisp(31): NVPushTop = 0: NVLastPushDisp = 0
@@ -193,6 +197,8 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVForSkip = New Collection
     Set NVForName = New Collection
     NVForCnt = 0
+    Set NVFpCmp = New Collection
+    Set NVFpSkip = New Collection
     ReDim NVSelStkBase(31): NVSelTop = 0
     NVBase = NativeSolveControlBase(col)
 
@@ -255,6 +261,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'rather than an If <cond> ... GoTo back-edge.
     NativeDetectForLoops col
 
+    'Detect floating-point comparison idioms (fcom/fnstsw/test ah,mask/jcc + the
+    'boolean materialization) so they yield a real relational instead of <cond>.
+    NativeDetectFpCompares col
+
     output = NativeProcHeader(addr) & vbCrLf
 
     For Each inst In col
@@ -306,6 +316,32 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         End If
         'Suppress the dispatch jump / bound Jcc / case-end jumps (replaced above).
         If Len(NativeColGet(NVSelSkip, svaKey)) > 0 Then GoTo nextInst
+
+        '--- Floating-point comparison idiom ---
+        'At the `test ah,mask` head: bind the recovered relational into the target
+        'register (using the fcom operands captured in NVLastCmp) and cancel the
+        'overflow-check flag the preceding fnstsw set.  The je/mov/jmp/xor/neg
+        'scaffolding is suppressed via NVFpSkip.
+        Dim fpRec As String
+        fpRec = NativeColGet(NVFpCmp, "P" & inst.va)
+        If Len(fpRec) > 0 Then
+            Dim fpBar As Long, fpOp As String, fpReg As Long, fpExpr As String
+            fpBar = InStr(fpRec, "|")
+            fpOp = Left$(fpRec, fpBar - 1)
+            fpReg = CLng(Mid$(fpRec, fpBar + 1))
+            If Len(NVLastCmp) > 0 Then
+                fpExpr = Replace(NVLastCmp, " ? ", " " & fpOp & " ")
+            Else
+                fpExpr = "(st0 " & fpOp & " 0)"
+            End If
+            NVReg(fpReg) = fpExpr
+            NVRegIsAddr(fpReg) = False: NVRegIsMe(fpReg) = False: NVRegIsFormVt(fpReg) = False
+            NVRegObjType(fpReg) = "": NVRegObjVt(fpReg) = "": NVRegObjGuid(fpReg) = "": NVRegObjVtGuid(fpReg) = ""
+            NVFpuChk = False: NVLastCmp = ""
+            GoTo nextInst
+        End If
+        'Suppress the fp-compare boolean-materialization scaffolding.
+        If Len(NativeColGet(NVFpSkip, "P" & inst.va)) > 0 Then GoTo nextInst
 
         '--- For loop transitions ---
         'Suppress a recognised For loop's exit Jcc (the For header below replaces it).
@@ -659,6 +695,143 @@ Private Function NativeLoopVarName(ByVal idx As Long) As String
     Else
         NativeLoopVarName = "i" & CStr(idx)
     End If
+End Function
+
+Private Sub NativeDetectFpCompares(col As Collection)
+    'Recognise VB6's floating-point relational, which materialises a Boolean:
+    '    fcom(p) B ; fnstsw ax ; test ah,MASK ; j(e|ne) L1 ; mov REG,1 ;
+    '    jmp L2 ; L1: xor REG,REG ; L2: [neg REG]
+    'Record at the `test ah` VA the recovered relational operator + target REG,
+    'and mark the je/jne/mov/jmp/xor/neg scaffolding for suppression.  The fcom's
+    'operands are captured at run time (NVLastCmp); only the operator + structure
+    'come from here.  Strict shape match - anything off leaves the code as-is.
+    On Error GoTo done
+    Dim n As Long, k As Long, i As Long, inst As CInstruction
+    n = col.Count
+    If n < 6 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For k = 1 To n - 6
+        'fnstsw ax / fstsw ax
+        Dim fd As String
+        fd = UCase$(Replace(arr(k).dump, " ", ""))
+        If Left$(fd, 4) <> "DFE0" And Left$(fd, 6) <> "9BDFE0" Then GoTo nextk2
+        'test ah, imm8  (F6 C4 imm)
+        Dim mask As Long
+        If Not NativeIsTestAh(arr(k + 1), mask) Then GoTo nextk2
+        'j(e|ne)
+        If (arr(k + 2).cmdType And C_TYPEMASK) <> C_JMC Then GoTo nextk2
+        Dim jm As String
+        jm = NativeMnem(arr(k + 2))
+        If jm <> "JE" And jm <> "JZ" And jm <> "JNE" And jm <> "JNZ" Then GoTo nextk2
+        'mov REG, 1
+        Dim regI As Long
+        regI = NativeMovReg1(arr(k + 3))
+        If regI < 0 Then GoTo nextk2
+        'jmp
+        If (arr(k + 4).cmdType And C_TYPEMASK) <> C_JMP Then GoTo nextk2
+        'xor REG, REG  (same register that mov targeted)
+        If Not NativeIsXorSelf(arr(k + 5), regI) Then GoTo nextk2
+        Dim op As String
+        op = NativeFpRelation(mask, jm)
+        If Len(op) = 0 Then GoTo nextk2
+        'Record the relational at the `test ah` instruction; suppress the rest.
+        NativeColPut NVFpCmp, "P" & arr(k + 1).va, op & "|" & regI
+        NativeColPut NVFpSkip, "P" & arr(k + 2).va, "1"      'je/jne
+        NativeColPut NVFpSkip, "P" & arr(k + 3).va, "1"      'mov REG,1
+        NativeColPut NVFpSkip, "P" & arr(k + 4).va, "1"      'jmp
+        NativeColPut NVFpSkip, "P" & arr(k + 5).va, "1"      'xor REG,REG
+        NativeAddUnique NVSkipLabels, arr(k + 2).jmpConst    'L1 (xor) label
+        NativeAddUnique NVSkipLabels, arr(k + 4).jmpConst    'L2 label
+        'Optional `neg REG` immediately after the xor's join point.
+        If k + 6 <= n - 1 Then
+            If NativeIsNegReg(arr(k + 6), regI) Then NativeColPut NVFpSkip, "P" & arr(k + 6).va, "1"
+        End If
+nextk2:
+    Next k
+done:
+End Sub
+
+Private Function NativeIsTestAh(inst As CInstruction, ByRef mask As Long) As Boolean
+    'Match `test ah, imm8` (F6 /0 with ModRM 0xC4 -> md=3, reg=0 test, rm=4 = AH).
+    Dim dump As String, nn As Long, i As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    If NativeDumpByte(dump, i) <> &HF6 Then Exit Function
+    If NativeDumpByte(dump, i + 1) <> &HC4 Then Exit Function
+    mask = NativeDumpByte(dump, i + 2)
+    NativeIsTestAh = True
+End Function
+
+Private Function NativeMovReg1(inst As CInstruction) As Long
+    'Match `mov r32, 1` (B8+reg, imm32 = 1) -> the register index, else -1.
+    Dim dump As String, nn As Long, i As Long, op As Long
+    NativeMovReg1 = -1
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op < &HB8 Or op > &HBF Then Exit Function
+    If NativeDumpInt32(dump, i + 1) <> 1 Then Exit Function
+    NativeMovReg1 = op - &HB8
+End Function
+
+Private Function NativeIsXorSelf(inst As CInstruction, ByVal reg As Long) As Boolean
+    'Match `xor reg,reg` / `sub reg,reg` (md=3, reg field = rm = reg).
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &H33 And op <> &H31 And op <> &H2B And op <> &H29 Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) <> 3 Then Exit Function
+    NativeIsXorSelf = (((modrm \ 8) And 7) = reg) And ((modrm And 7) = reg)
+End Function
+
+Private Function NativeIsNegReg(inst As CInstruction, ByVal reg As Long) As Boolean
+    'Match `neg reg` (F7 /3, ModRM md=3 reg-field=3 rm=reg).
+    Dim dump As String, nn As Long, i As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    If NativeDumpByte(dump, i) <> &HF7 Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    NativeIsNegReg = ((modrm \ &H40) = 3) And (((modrm \ 8) And 7) = 3) And ((modrm And 7) = reg)
+End Function
+
+Private Function NativeFpRelation(ByVal mask As Long, ByVal jcc As String) As String
+    'Relational the materialised Boolean represents (REG True <=> jcc NOT taken).
+    'fcom sets C0(0x01)=A<B, C3(0x40)=A=B, C2(0x04)=unordered.  je selects the
+    'base relation (ah&mask)!=0; jne selects its negation.
+    Dim base As String
+    Select Case mask
+        Case &H1, &H5: base = "<"        'C0 [|C2]
+        Case &H40, &H44: base = "="      'C3 [|C2]
+        Case &H41, &H45: base = "<="     'C0|C3 [|C2]
+        Case Else: Exit Function
+    End Select
+    If jcc = "JE" Or jcc = "JZ" Then
+        NativeFpRelation = base
+    Else
+        NativeFpRelation = NativeNegOp(base)
+    End If
+End Function
+
+Private Function NativeLooksRelational(ByVal s As String) As Boolean
+    'True when s contains a relational operator (so it is a Boolean value, not a
+    'plain arithmetic expression) - used to render `If <bool>` instead of the
+    'redundant `If (<bool>) <> 0`.
+    NativeLooksRelational = (InStr(s, " > ") > 0) Or (InStr(s, " < ") > 0) _
+        Or (InStr(s, " >= ") > 0) Or (InStr(s, " <= ") > 0) _
+        Or (InStr(s, " <> ") > 0) Or (InStr(s, " = ") > 0)
 End Function
 
 Private Function NVProcEndApprox(ByVal addr As Long) As Long
@@ -2605,12 +2778,28 @@ Private Function NativeCondExpr(ByVal jmpMnem As String, ByVal blockGuard As Boo
     'is NOT taken, so the condition is the negation of "jump taken") and False
     'for a loop-continue / conditional-GoTo (condition = "jump taken").
     Dim op As String, L As String, R As String
+    'NVCmpL is already a relational Boolean (recovered fp compare): render it
+    'directly, negated with "Not" only when the block runs on its FALSE side.
+    If NVCmpSet And NVCmpIsBool Then
+        Dim jumpWhenTrue As Boolean
+        Select Case UCase$(jmpMnem)
+            Case "JNE", "JNZ": jumpWhenTrue = True       'jump taken when Boolean <> 0 (True)
+            Case "JE", "JZ": jumpWhenTrue = False        'jump taken when Boolean = 0 (False)
+            Case Else: GoTo notBool
+        End Select
+        Dim wantTrue As Boolean
+        If blockGuard Then wantTrue = Not jumpWhenTrue Else wantTrue = jumpWhenTrue
+        NVCmpSet = False: NVCmpIsBool = False: NVLastCmp = ""
+        If wantTrue Then NativeCondExpr = NVCmpL Else NativeCondExpr = "Not " & NVCmpL
+        Exit Function
+    End If
+notBool:
     If NVCmpSet Then
         op = NativeJccOp(jmpMnem)
         If blockGuard Then op = NativeNegOp(op)
         L = NVCmpL
         If NVCmpIsTest Then R = "0" Else R = NVCmpR
-        NVCmpSet = False: NVLastCmp = ""
+        NVCmpSet = False: NVCmpIsBool = False: NVLastCmp = ""
         If Len(op) > 0 And Len(L) > 0 And Len(R) > 0 Then
             NativeCondExpr = L & " " & op & " " & R
             Exit Function
@@ -2959,6 +3148,25 @@ Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
     isTst = (mn = "TEST")
     modrm = NativeDumpByte(dump, i + 1)
     md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+    'test reg,reg where the register holds a recovered EXPRESSION (a relational
+    'Boolean from an fp comparison, or a folded value): test it for non-zero.
+    'This is the standard "If <fp compare> Then" tail (test ax,ax / test eax,eax)
+    'and resolves what the 0x66-register guard below would otherwise drop.
+    If op = &H85 And md = 3 And reg = rm Then
+        Dim bv As String
+        bv = NVReg(rm)
+        If Len(bv) > 0 And Left$(bv, 1) = "(" Then
+            If NativeLooksRelational(bv) Then
+                'Already a relational Boolean (recovered fp compare) - render it
+                'directly, without the redundant "<> 0".
+                NVCmpL = bv: NVCmpIsBool = True: NVCmpSet = True
+            Else
+                'A folded value (e.g. an arithmetic sum) - test it for non-zero.
+                NVCmpL = bv: NVCmpR = "0": NVCmpIsTest = True: NVCmpSet = True
+            End If
+            Exit Sub
+        End If
+    End If
     'A 16-bit (0x66) compare whose operand is a REGISTER is part of VB6's Boolean
     'evaluation juggling (setcc/neg/mov si,ax/cmp si,bx) - its register operands are
     'low-word partials our 32-bit model can't follow, so resolving them yields
