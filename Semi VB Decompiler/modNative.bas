@@ -347,6 +347,13 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
                 If namesVA(i) <> 0 And (namesVA(i) - OptHeader.ImageBase) > 0 Then GoTo nextObj
             Next i
         End If
+        'A class/usercontrol exposes its methods through a COM vtable: IUnknown(3) +
+        'IDispatch(4) = 7 slots, then the user methods at 0x1C + namedSeq*4 (in name
+        'order).  Record that map so a "call [Me_vtable + off]" self-call resolves to
+        'the method (parallel to the form 0x6F8 path).  Keyed "Owner:off<offset>".
+        Dim isClass As Boolean, namedSeq As Long
+        isClass = ((gObject(oi).ObjectType And &H100000) <> 0)
+        namedSeq = 0
         Dim prevName As String, prevPos As Long, prevIdx As Long, pos As Long, ai As Long
         prevName = "": prevPos = -1: prevIdx = -2
         For i = 0 To pc - 1
@@ -369,6 +376,12 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
                     SubNamelist(pos).kind = "Property Let"
                 End If
                 ReDim Preserve SubNamelist(UBound(SubNamelist) + 1)
+                If isClass Then
+                    On Error Resume Next
+                    gFormVtable.Add addrs(ai), gObjectNameArray(oi) & ":off" & (&H1C + namedSeq * 4)
+                    On Error GoTo done
+                End If
+                namedSeq = namedSeq + 1
                 prevName = nm: prevPos = pos: prevIdx = i
             End If
         Next i

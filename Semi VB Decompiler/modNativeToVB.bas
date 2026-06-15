@@ -414,6 +414,26 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     NVPendingCall = "Call " & NVForm & "." & fpname & "(" & fargs & ")"
                     Exit Function
                 End If
+                'A class calling its OWN method: call [Me_vtable + off] where off is a
+                'COM-vtable user-method slot (>=0x1C).  ocb holds Me's vtable
+                '(NVRegIsFormVt, the deref of the Me pointer), which guards against
+                'mis-resolving a call on some other object's vtable.
+                Dim ctgt As Long
+                ctgt = NativeClassVtableTarget(disp)
+                If ctgt <> 0 And ocb >= 0 And ocb <= 7 Then
+                    If NVRegIsFormVt(ocb) Then
+                        'Emitted directly (not deferred): a COM method returns its
+                        'result through a hidden by-reference buffer, leaving an HRESULT
+                        'in eax that VB immediately error-checks (cmp eax,0) - which
+                        'would otherwise fold/consume a deferred call and lose it.
+                        Dim cpname As String, cargs As String
+                        cargs = NativeArgList()
+                        cpname = NativeCallTargetName(ctgt)
+                        NVPushTop = 0: NativeResetValue
+                        NativeProcessInst = ind & "Call " & NVForm & "." & cpname & "(" & cargs & ")" & vbCrLf
+                        Exit Function
+                    End If
+                End If
                 If NVBase >= 0 And disp >= NVBase And NativeControlByOffset(disp) <> "" Then
                     NVLastControl = NVForm & "." & NativeControlByOffset(disp)
                     NVLastGuid = NativeGuidByOffset(disp)
@@ -1240,6 +1260,17 @@ Private Function NativeFormVtableTarget(ByVal disp As Long) As Long
     On Error Resume Next
     v = gFormVtable(NVForm & ":" & slot)
     If Err.Number = 0 Then NativeFormVtableTarget = CLng(v)
+End Function
+
+Private Function NativeClassVtableTarget(ByVal disp As Long) As Long
+    'Resolve "call [Me_vtable + disp]" on a CLASS's own methods.  A COM class vtable
+    'is IUnknown(3) + IDispatch(4) = 7 slots, so user methods begin at 0x1C; the map
+    '(filled in LinkNativeProcNames for class/usercontrol objects) is keyed by the
+    'absolute offset: "Owner:off<disp>" -> method address.
+    Dim v As Variant
+    On Error Resume Next
+    v = gFormVtable(NVForm & ":off" & disp)
+    If Err.Number = 0 Then NativeClassVtableTarget = CLng(v)
 End Function
 
 Private Function NativeControlByOffset(ByVal offset As Long) As String
