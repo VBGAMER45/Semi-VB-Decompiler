@@ -2052,6 +2052,37 @@ Private Function NativeNumConvWrap(ByVal v As String, ByVal conv As String) As S
     NativeNumConvWrap = conv & "(" & v & ")"
 End Function
 
+Private Function NativeIsFoldableArith(ByVal v As String) As Boolean
+    'A FUNCTION-CALL result worth extending with `+ N` / `- N` - a numeric value such
+    'as Len(s), InStr(...), Asc(...) where the immediate is a real computation (so
+    '`Right$(s, Len(s) - 4)` keeps the "- 4").  Deliberately narrow: a deref chain
+    '(arg_8(96) / global_X(12)) is usually address/field arithmetic and a bare local
+    '(var_38) is often a loop counter/limit, so both are excluded - folding onto them
+    'produced misleading `(arg_8(96) + 4)` / off-by-one `(var_38 + 1)` expressions.
+    If Len(v) = 0 Then Exit Function
+    If Left$(v, 1) = Chr$(34) Then Exit Function                    'a string literal
+    If InStr(v, "(") < 2 Then Exit Function                         'need a name before "("
+    'reject synthetic-local derefs (those are pointer/field math, not a call result)
+    If Left$(v, 4) = "var_" Or Left$(v, 4) = "arg_" Or Left$(v, 4) = "loc_" _
+       Or Left$(v, 7) = "global_" Or Left$(v, 6) = "field_" Then Exit Function
+    NativeIsFoldableArith = True
+End Function
+
+Private Function NativeFoldArith(ByVal val As String, ByVal isSub As Boolean, ByVal imm As Long) As String
+    'Render (val - imm) / (val + imm), normalising a negative immediate (so `+ -4`
+    'reads `- 4`) and capping length so repeated folds cannot blow up.
+    Dim op As String
+    NativeFoldArith = val
+    If imm = 0 Then Exit Function                                   'no-op add/sub 0
+    If isSub Then op = " - " Else op = " + "
+    If imm < 0 Then
+        imm = -imm
+        If isSub Then op = " + " Else op = " - "
+    End If
+    If Len(val) > 70 Then Exit Function                             'avoid runaway nesting
+    NativeFoldArith = "(" & val & op & CStr(imm) & ")"
+End Function
+
 Private Function NativeIsCleanNamedVal(ByVal s As String) As Boolean
     'A clean tracked variable reference - a local, parameter, or module global
     '(optionally a deref chain like global_X(12)).  Deliberately conservative: bare
@@ -3649,6 +3680,27 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         'earlier, so they never reach here.  (Kept deliberately narrow: broad
         'clears on every arithmetic op regressed resolved control-property /
         'call-result registers, so only add/sub - the struct-offset idiom - folds.)
+        Case &H83, &H81                 'add/sub r/m32, imm8/imm32 -> fold onto a tracked value
+            modrm = NativeDumpByte(dump, i + 1)
+            md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+            'reg-field 0 = ADD, 5 = SUB; rm = the destination register (md=3).  Extend a
+            'meaningful tracked value (a call result like Len(s), or a clean variable)
+            'with the immediate so `Right$(s, Len(s) - 4)` keeps the "- 4".  Skip esp/ebp.
+            If md = 3 And (reg = 0 Or reg = 5) And rm <> 4 And rm <> 5 Then
+                If NativeIsFoldableArith(NVReg(rm)) Then
+                    Dim aimm As Long
+                    If op = &H83 Then aimm = NativeDumpInt8(dump, n - 1) Else aimm = NativeDumpInt32(dump, n - 4)
+                    NVReg(rm) = NativeFoldArith(NVReg(rm), (reg = 5), aimm)
+                    NVRegIsAddr(rm) = False: NVRegIsMe(rm) = False: NVRegIsFormVt(rm) = False
+                    NVRegObjType(rm) = "": NVRegObjVt(rm) = "": NVRegObjGuid(rm) = "": NVRegObjVtGuid(rm) = ""
+                End If
+            End If
+        Case &H2D, &H5                  'sub/add eax, imm32
+            If NativeIsFoldableArith(NVReg(0)) Then
+                NVReg(0) = NativeFoldArith(NVReg(0), (op = &H2D), NativeDumpInt32(dump, i + 1))
+                NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+            End If
         Case &H03, &H2B                 'add / sub  r32, r/m32  -> fold into reg dest
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
