@@ -3784,6 +3784,12 @@ Private Function NativeVariantArgList(ByVal trimZero As Boolean) As String
         idx = idx + 1
     Next
     NVPushTop = 0
+    'MsgBox's second argument is the Buttons bitfield (vbYesNoCancel Or vbInformation
+    'etc.) - decompose a plain numeric value into its vb* constants.  trimZero marks
+    'the MsgBox form (InputBox's 2nd arg is the title string, not buttons).
+    If trimZero And idx >= 2 Then
+        If IsNumeric(vals(1)) Then vals(1) = NativeMsgBoxButtons(CLng(vals(1)))
+    End If
     last = idx - 1
     Do While last >= 0
         If vals(last) = NV_MISSING Then
@@ -3799,6 +3805,42 @@ Private Function NativeVariantArgList(ByVal trimZero As Boolean) As String
         If vals(k) <> NV_MISSING Then s = s & vals(k)
     Next
     NativeVariantArgList = s
+End Function
+
+Private Function NativeMsgBoxButtons(ByVal v As Long) As String
+    'Decompose a MsgBox Buttons bitfield into its vb* constants joined by " Or ".
+    'Falls back to the raw number when the value does not decode cleanly (so no bit
+    'is ever silently dropped).  vbOKOnly (0) contributes nothing and is omitted.
+    Dim parts(8) As String, np As Long, recon As Long, grp As Long, icon As Long, dft As Long, i As Long, s As String
+    grp = v And &HF
+    Select Case grp
+        Case 1: parts(np) = "vbOKCancel": np = np + 1: recon = recon Or grp
+        Case 2: parts(np) = "vbAbortRetryIgnore": np = np + 1: recon = recon Or grp
+        Case 3: parts(np) = "vbYesNoCancel": np = np + 1: recon = recon Or grp
+        Case 4: parts(np) = "vbYesNo": np = np + 1: recon = recon Or grp
+        Case 5: parts(np) = "vbRetryCancel": np = np + 1: recon = recon Or grp
+        Case 0:                                  'vbOKOnly - the default, omit
+    End Select
+    icon = v And &H70
+    Select Case icon
+        Case &H10: parts(np) = "vbCritical": np = np + 1: recon = recon Or icon
+        Case &H20: parts(np) = "vbQuestion": np = np + 1: recon = recon Or icon
+        Case &H30: parts(np) = "vbExclamation": np = np + 1: recon = recon Or icon
+        Case &H40: parts(np) = "vbInformation": np = np + 1: recon = recon Or icon
+    End Select
+    dft = v And &H300
+    Select Case dft
+        Case &H100: parts(np) = "vbDefaultButton2": np = np + 1: recon = recon Or dft
+        Case &H200: parts(np) = "vbDefaultButton3": np = np + 1: recon = recon Or dft
+    End Select
+    If (v And &H1000) <> 0 Then parts(np) = "vbSystemModal": np = np + 1: recon = recon Or &H1000
+    'Unrecognised bits remain -> keep the raw number rather than lose them.
+    If recon <> v Or np = 0 Then NativeMsgBoxButtons = CStr(v): Exit Function
+    For i = 0 To np - 1
+        If Len(s) > 0 Then s = s & " Or "
+        s = s & parts(i)
+    Next
+    NativeMsgBoxButtons = s
 End Function
 
 Private Function NativeArgPop() As String
