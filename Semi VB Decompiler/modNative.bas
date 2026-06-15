@@ -310,8 +310,16 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
             End If
         Next p
 
-        'Index alignment is only trustworthy when the counts match exactly.
-        If nA <> pc Then GoTo nextObj
+        'The names array is indexed by the object's FULL procedure table, which can
+        'include leading non-code "phantom" slots (interface/property descriptors VB6
+        'counts in ProcCount but emits no body for).  The real procedures we
+        'discovered occupy the LAST nA slots, so name-array index i maps to discovered
+        'address (i - base) with base = pc - nA.  When pc = nA (no phantoms) this is
+        'the original 1:1 alignment.  We cannot align when more procs were discovered
+        'than the array can hold.
+        If nA > pc Then GoTo nextObj
+        Dim base As Long
+        base = pc - nA
 
         'Sort the addresses ascending (procedure / name index order).
         For a = 0 To nA - 2
@@ -330,7 +338,16 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
         ReDim namesVA(pc - 1)
         Seek F, gObject(oi).aProcNamesArray + 1 - OptHeader.ImageBase
         Get F, , namesVA
-        Dim prevName As String, prevPos As Long, prevIdx As Long, pos As Long
+        'Safety: every NAMED slot must fall in the tail region [base, pc) that aligns
+        'with the discovered addresses.  A name in the leading phantom region means
+        'the index model is untrustworthy here - leave the object unnamed rather than
+        'attach a wrong name.
+        If base > 0 Then
+            For i = 0 To base - 1
+                If namesVA(i) <> 0 And (namesVA(i) - OptHeader.ImageBase) > 0 Then GoTo nextObj
+            Next i
+        End If
+        Dim prevName As String, prevPos As Long, prevIdx As Long, pos As Long, ai As Long
         prevName = "": prevPos = -1: prevIdx = -2
         For i = 0 To pc - 1
             nm = ""
@@ -338,10 +355,11 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
                 Seek F, namesVA(i) + 1 - OptHeader.ImageBase
                 nm = GetUntilNull(F)
             End If
-            If Len(nm) > 0 Then
+            ai = i - base                                   'discovered-address index
+            If Len(nm) > 0 And ai >= 0 And ai <= nA - 1 Then
                 pos = UBound(SubNamelist)
                 SubNamelist(pos).strName = gObjectNameArray(oi) & "." & nm
-                SubNamelist(pos).offset = addrs(i)
+                SubNamelist(pos).offset = addrs(ai)
                 SubNamelist(pos).visibility = vis
                 SubNamelist(pos).kind = ""                  'default -> Sub
                 'A read/write property is stored as the SAME name at two adjacent
