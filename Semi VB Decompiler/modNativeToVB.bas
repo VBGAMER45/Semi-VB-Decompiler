@@ -82,6 +82,17 @@ Private NVVSlot As Collection      'variant stack slot (disp) -> last value stor
 Private NVIndent As Long           'current block-indent level
 Private NVIfTarget() As Long       'addresses where open If blocks must close
 Private NVIfTop As Long
+'--- Select Case (jump-table) reconstruction ---
+Private NVSelExprReg As Collection  '"S"&dispatchVA -> index register (the Select expression) - emit "Select Case <reg>"
+Private NVSelCaseVal As Collection  '"S"&caseVA -> case value(s) CSV, or "Else" - emit "Case ..."
+Private NVSelEnd As Collection      '"S"&endVA -> "1" - emit "End Select"
+Private NVSelSkip As Collection     '"S"&va -> "1" - suppress this instruction (the bound Jcc / case-end jumps)
+'Open-Select stack (handles multiple / nested Selects per proc). NVSelTop = depth
+'(0 = none, index of innermost). NVSelStkBase(level) = the indent level at which that
+'Select's "Select Case" line was emitted; Case arms emit at base+1, bodies at base+2,
+'End Select restores NVIndent to base. Absolute baselines need no per-arm caseOpen flag.
+Private NVSelStkBase() As Long
+Private NVSelTop As Long
 Private NVLastCmp As String        'hint expression for the next If condition
 Private NVStrLits As Collection    'pending string literals (e.g. MsgBox arguments)
 Private NVSkipLabels As Collection 'branch targets that belong to dropped error-check guards
@@ -165,6 +176,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVVSlot = New Collection
     Set NVSkipLabels = New Collection
     Set NVLoopHdr = New Collection
+    Set NVSelExprReg = New Collection
+    Set NVSelCaseVal = New Collection
+    Set NVSelEnd = New Collection
+    Set NVSelSkip = New Collection
+    ReDim NVSelStkBase(31): NVSelTop = 0
     NVBase = NativeSolveControlBase(col)
 
     'Collect branch targets (for labels), and detect the On Error handler:
@@ -217,6 +233,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         Next
     End If
 
+    'Detect Select Case jump tables so the dispatch + case bodies reconstruct as a
+    'Select Case block rather than a bogus indirect GoTo.
+    NativeDetectSelects col, b, addr
+
     output = NativeProcHeader(addr) & vbCrLf
 
     For Each inst In col
@@ -235,15 +255,51 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         End If
         'Close any structured If blocks that end at this address
         NativeCloseIfs output, inst.va
+
+        '--- Select Case transitions (after If-close so case-body Ifs close first) ---
+        Dim svaKey As String, selCV As String, selExpr As String
+        svaKey = "S" & inst.va
+        'End Select: close the innermost open Select, restoring its indent baseline.
+        If NVSelTop > 0 And Len(NativeColGet(NVSelEnd, svaKey)) > 0 Then
+            NVIndent = NVSelStkBase(NVSelTop)
+            output = output & NativeIndentStr() & "End Select" & vbCrLf
+            NVSelTop = NVSelTop - 1
+        End If
+        'Case / Case Else: a new arm of the innermost open Select.
+        selCV = NativeColGet(NVSelCaseVal, svaKey)
+        If NVSelTop > 0 And Len(selCV) > 0 Then
+            NVIndent = NVSelStkBase(NVSelTop) + 1
+            If selCV = "Else" Then
+                output = output & NativeIndentStr() & "Case Else" & vbCrLf
+            Else
+                output = output & NativeIndentStr() & "Case " & selCV & vbCrLf
+            End If
+            NVIndent = NVSelStkBase(NVSelTop) + 2
+        End If
+        'Select Case open: push a new block onto the stack.
+        selExpr = NativeColGet(NVSelExprReg, svaKey)
+        If Len(selExpr) > 0 Then
+            output = output & NativeIndentStr() & "Select Case " & NativeRegVal(CLng(selExpr)) & vbCrLf
+            NVSelTop = NVSelTop + 1
+            If NVSelTop > UBound(NVSelStkBase) Then ReDim Preserve NVSelStkBase(NVSelTop + 8)
+            NVSelStkBase(NVSelTop) = NVIndent
+            NVIndent = NVIndent + 1
+            NVCmpSet = False                'the bound cmp's flags fed the suppressed bound jump
+        End If
+        'Suppress the dispatch jump / bound Jcc / case-end jumps (replaced above).
+        If Len(NativeColGet(NVSelSkip, svaKey)) > 0 Then GoTo nextInst
+
         'Open a Do loop when this address is the target of a back-edge
         If NativeHas(NVLoopHdr, inst.va) Then
             output = output & NativeIndentStr() & "Do" & vbCrLf
             NVIndent = NVIndent + 1
         End If
         'A label is only needed when it is a real jump target (not an If close
-        'point, a loop header, or a dropped error-check guard target)
+        'point, a loop header, a dropped error-check guard target, or a Select
+        'Case / Case / End Select point already emitted above)
         If NativeHas(labels, inst.va) And Not NativeIsIfTarget(inst.va) _
-           And Not NativeHas(NVSkipLabels, inst.va) And Not NativeHas(NVLoopHdr, inst.va) Then
+           And Not NativeHas(NVSkipLabels, inst.va) And Not NativeHas(NVLoopHdr, inst.va) _
+           And Len(selCV) = 0 And Len(NativeColGet(NVSelEnd, svaKey)) = 0 Then
             output = output & "loc_" & Right$("00000000" & Hex$(inst.va), 8) & ":" & vbCrLf
         End If
         output = output & NativeProcessInst(inst)
@@ -260,8 +316,15 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
                 NVRegObjType(cr) = "": NVRegObjVt(cr) = "": NVRegObjGuid(cr) = "": NVRegObjVtGuid(cr) = ""
             Next
         End If
+nextInst:
     Next
 
+    'Close any Select Cases left open (their End fell outside the decoded range).
+    Do While NVSelTop > 0
+        NVIndent = NVSelStkBase(NVSelTop)
+        output = output & NativeIndentStr() & "End Select" & vbCrLf
+        NVSelTop = NVSelTop - 1
+    Loop
     'Any call still deferred is the proc's last statement - emit it.
     If Len(NVPendingCall) > 0 Then output = output & NativeIndentStr() & NVPendingCall & vbCrLf: NVPendingCall = ""
     NativeCloseIfs output, &H7FFFFFFF
@@ -270,6 +333,171 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Exit Function
 fail:
     DecompileNativeProcToVB = "' Error decompiling " & Hex$(addr) & ": " & Err.Description & vbCrLf
+End Function
+
+Private Function NativeColGet(c As Collection, ByVal key As String) As String
+    On Error Resume Next
+    NativeColGet = c(key)
+End Function
+
+Private Sub NativeColPut(c As Collection, ByVal key As String, ByVal v As String)
+    On Error Resume Next
+    c.Remove key
+    On Error GoTo 0
+    On Error Resume Next
+    c.Add v, key
+End Sub
+
+Private Function NativeBDword(ByRef b() As Byte, ByVal addr As Long, ByVal va As Long) As Long
+    'Read a little-endian dword from the proc byte buffer b() (loaded at addr).
+    Dim o As Long
+    o = va - addr
+    On Error GoTo bad
+    If o < 0 Or o + 3 > UBound(b) Then GoTo bad
+    NativeBDword = b(o) + b(o + 1) * &H100& + b(o + 2) * &H10000 + b(o + 3) * &H1000000
+    Exit Function
+bad:
+End Function
+
+Private Sub NativeDetectSelects(col As Collection, ByRef b() As Byte, ByVal addr As Long)
+    'Recognise VB6's Select Case jump table:
+    '    mov reg,<expr> ; [sub reg,base] ; cmp reg,RANGE ; ja DEFAULT ; jmp [reg*4 + TBL]
+    'TBL is RANGE+1 dword case-body addresses; each case body ends with jmp END; the
+    'ja target is the Case Else body (which falls through to END).  Populate the
+    'NVSel* maps so the main loop emits Select Case / Case / Case Else / End Select.
+    On Error GoTo done
+    Dim n As Long, k As Long, i As Long, inst As CInstruction
+    n = col.Count
+    If n < 3 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For k = 2 To n - 1
+        Dim idxReg As Long, tbl As Long
+        If Not NativeJmpTableInfo(arr(k), idxReg, tbl) Then GoTo nextk
+        If (arr(k - 1).cmdType And C_TYPEMASK) <> C_JMC Then GoTo nextk   'a conditional bound jump precedes
+        Dim defAddr As Long, rangeC As Long
+        defAddr = arr(k - 1).jmpConst
+        If Not NativeCmpRegImm(arr(k - 2), idxReg, rangeC) Then GoTo nextk
+        If rangeC < 0 Or rangeC > 4096 Then GoTo nextk
+        Dim baseV As Long
+        baseV = 0
+        If k >= 3 Then
+            Dim sv As Long
+            If NativeSubRegImm(arr(k - 3), idxReg, sv) Then baseV = sv
+        End If
+        'Find END = target of the first case-body jump after the dispatch.
+        Dim endVA As Long
+        endVA = 0
+        For i = k + 1 To n - 1
+            If (arr(i).cmdType And C_TYPEMASK) = C_JMP And arr(i).jmpConst <> 0 Then endVA = arr(i).jmpConst: Exit For
+        Next i
+        If endVA = 0 Then GoTo nextk
+        'Read the jump table; require every entry inside the proc.
+        Dim caseVA As Long, ok As Boolean, prevCV As String
+        ok = True
+        For i = 0 To rangeC
+            caseVA = NativeBDword(b, addr, tbl + i * 4)
+            If caseVA < addr Or caseVA >= NVProcEndApprox(addr) Then ok = False: Exit For
+        Next i
+        If Not ok Then GoTo nextk
+        'Populate.  Same target at consecutive indices -> a value list (Case 0, 1, 2).
+        NativeColPut NVSelExprReg, "S" & arr(k).va, CStr(idxReg)
+        NativeColPut NVSelSkip, "S" & arr(k).va, "1"          'the dispatch jmp itself
+        NativeColPut NVSelSkip, "S" & arr(k - 1).va, "1"      'the bound ja
+        For i = 0 To rangeC
+            caseVA = NativeBDword(b, addr, tbl + i * 4)
+            If caseVA = defAddr Then GoTo nexti               'a gap case -> Else, skip
+            prevCV = NativeColGet(NVSelCaseVal, "S" & caseVA)
+            If Len(prevCV) > 0 Then
+                NativeColPut NVSelCaseVal, "S" & caseVA, prevCV & ", " & CStr(baseV + i)
+            Else
+                NativeColPut NVSelCaseVal, "S" & caseVA, CStr(baseV + i)
+            End If
+nexti:
+        Next i
+        NativeColPut NVSelCaseVal, "S" & defAddr, "Else"
+        NativeColPut NVSelEnd, "S" & endVA, "1"
+        'Suppress the case-body jumps to END (between dispatch and END).
+        For i = k + 1 To n - 1
+            If arr(i).va >= endVA Then Exit For
+            If (arr(i).cmdType And C_TYPEMASK) = C_JMP And arr(i).jmpConst = endVA Then
+                NativeColPut NVSelSkip, "S" & arr(i).va, "1"
+            End If
+        Next i
+nextk:
+    Next k
+done:
+End Sub
+
+Private Function NVProcEndApprox(ByVal addr As Long) As Long
+    'Upper bound for case-target validation: the next discovered proc, else +8KB.
+    Dim pe As Long, e As Long
+    NVProcEndApprox = addr + 8190
+    On Error Resume Next
+    For pe = 0 To UBound(gNativeProcArray) - 1
+        e = gNativeProcArray(pe).offset
+        If e > addr And e < NVProcEndApprox Then NVProcEndApprox = e
+    Next
+End Function
+
+Private Function NativeJmpTableInfo(inst As CInstruction, ByRef idxReg As Long, ByRef tbl As Long) As Boolean
+    'Detect `jmp dword ptr [idxReg*4 + disp32]` (FF /4, ModRM 0x24, SIB scale=4 base=none).
+    Dim dump As String, nn As Long, i As Long, modrm As Long, sib As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    If i + 7 > nn Then Exit Function           'need FF + ModRM + SIB + disp32
+    If NativeDumpByte(dump, i) <> &HFF Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    If modrm <> &H24 Then Exit Function                 'md=0, reg=4 (jmp), rm=4 (SIB)
+    sib = NativeDumpByte(dump, i + 2)
+    If (sib \ &H40) <> 2 Then Exit Function             'scale must be *4
+    If (sib And 7) <> 5 Then Exit Function              'base = 5 -> disp32 (no base reg)
+    idxReg = (sib \ 8) And 7
+    If idxReg = 4 Then Exit Function                    'no index
+    tbl = NativeDumpInt32(dump, i + 3)
+    NativeJmpTableInfo = (tbl >= OptHeader.ImageBase)
+End Function
+
+Private Function NativeCmpRegImm(inst As CInstruction, ByVal reg As Long, ByRef imm As Long) As Boolean
+    'Match `cmp reg, imm` (83 /7 imm8, 81 /7 imm32, or 3D imm32 for eax).
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op = &H3D Then
+        If reg <> 0 Then Exit Function
+        imm = NativeDumpInt32(dump, i + 1): NativeCmpRegImm = True: Exit Function
+    End If
+    If op <> &H83 And op <> &H81 Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) <> 3 Then Exit Function            'md=3 (register)
+    If ((modrm \ 8) And 7) <> 7 Then Exit Function       'reg field = 7 (cmp)
+    If (modrm And 7) <> reg Then Exit Function
+    If op = &H83 Then imm = NativeDumpInt8(dump, i + 2) Else imm = NativeDumpInt32(dump, i + 2)
+    NativeCmpRegImm = True
+End Function
+
+Private Function NativeSubRegImm(inst As CInstruction, ByVal reg As Long, ByRef imm As Long) As Boolean
+    'Match `sub reg, imm` (83 /5 imm8 or 81 /5 imm32) for a Select Case lower-bound base.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &H83 And op <> &H81 Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) <> 3 Then Exit Function
+    If ((modrm \ 8) And 7) <> 5 Then Exit Function       'reg field = 5 (sub)
+    If (modrm And 7) <> reg Then Exit Function
+    If op = &H83 Then imm = NativeDumpInt8(dump, i + 2) Else imm = NativeDumpInt32(dump, i + 2)
+    NativeSubRegImm = True
 End Function
 
 Private Function NativeProcessInst(inst As CInstruction) As String
