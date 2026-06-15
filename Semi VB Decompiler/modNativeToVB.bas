@@ -2571,6 +2571,13 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     '__vbaObjSet) - remember its GUID so a later property access
                     'through that local resolves (e.g. the LET target temp).
                     If Len(NVRegObjGuid(reg)) > 0 Then NativeSetLocalGuid disp, NVRegObjGuid(reg)
+                    'If the register held NO symbolic value, it now MIRRORS this local
+                    '(after `mov [var_X], reg` the register equals var_X).  Name it so
+                    'a following read/compare shows var_X instead of a raw register -
+                    'e.g. a register-allocated loop counter `cmp eax,edi` right after
+                    '`mov [var_20],eax`.  Gated to empty NVReg so a meaningful tracked
+                    'expression is never replaced by the bare local name.
+                    If Len(NVReg(reg)) = 0 Then NVReg(reg) = "var_" & Hex$(Abs(disp))
                 ElseIf isAbs And NativeIsGlobalAddr(disp) Then
                     'Store to a module-level global: mov [abs], reg.  Surface any
                     'tracked value (number / local / global / string / call / concat)
