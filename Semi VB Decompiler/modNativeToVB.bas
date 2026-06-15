@@ -1782,6 +1782,12 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NVReg(reg) = "arg_" & Hex$(disp)         'a procedure parameter (ebp+positive)
                 ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 And Left$(NVReg(bse), 4) = "arg_" Then
                     NVReg(reg) = NVReg(bse)                  'deref of a ByRef parameter pointer -> its value
+                ElseIf Not isAbs And NativeMemIndex(dump) < 0 And bse >= 0 And bse <= 7 And NativeIsDerefBase(NVReg(bse)) Then
+                    'Deref-with-offset of a tracked DATA pointer (NativeIsDerefBase
+                    'excludes bare-constant / control / property / folded bases):
+                    'reg = <baseVal>(disp).  Builds the chained struct / SAFEARRAY
+                    'field expressions the operand renderer emits as global_X(12)(20).
+                    If disp = 0 Then NVReg(reg) = NVReg(bse) Else NVReg(reg) = NVReg(bse) & "(" & CStr(disp) & ")"
                 Else
                     NVReg(reg) = ""
                 End If
@@ -1882,6 +1888,42 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
             If md = 3 And reg = rm Then NVReg(reg) = "0": NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False: NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+        '--- Arithmetic folding (Option 1c) ---------------------------------------
+        'Fold add/sub of a tracked operand so a compare LHS reads as the real
+        'expression, e.g. (arg_C - global_X(20)).  When either side is unknown the
+        'register is cleared, never left stale.  TEST/CMP are decoded and Exit'd
+        'earlier, so they never reach here.  (Kept deliberately narrow: broad
+        'clears on every arithmetic op regressed resolved control-property /
+        'call-result registers, so only add/sub - the struct-offset idiom - folds.)
+        Case &H03, &H2B                 'add / sub  r32, r/m32  -> fold into reg dest
+            modrm = NativeDumpByte(dump, i + 1)
+            md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+            Dim rhsv As String, oprt As String, lhsv As String
+            lhsv = NVReg(reg)
+            rhsv = NativeRmVal(dump, md, rm)
+            If op = &H2B Then oprt = " - " Else oprt = " + "
+            'Fold ONLY a meaningful, bounded expression: both operands must be a
+            'data-pointer expression or a numeric constant (never a bare register
+            'or control/property name), at least one must be a real pointer
+            'reference, and the result is length-capped so repeated `add reg,reg`
+            'in float/constant code cannot blow up into nested noise.  Otherwise
+            'the register's value is dropped (the operand falls back to its raw name).
+            If (NativeIsPtrExpr(lhsv) Or NativeIsNumLit(lhsv)) _
+               And (NativeIsPtrExpr(rhsv) Or NativeIsNumLit(rhsv)) _
+               And (NativeIsPtrExpr(lhsv) Or NativeIsPtrExpr(rhsv)) _
+               And Len(lhsv) + Len(rhsv) <= 60 Then
+                NVReg(reg) = "(" & lhsv & oprt & rhsv & ")"
+                NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+            ElseIf NativeIsDerefBase(lhsv) Then
+                'A data pointer was modified but the result is unfoldable: clear it
+                'so a later deref can never render a STALE field (e.g. arg_C(20)).
+                NVReg(reg) = ""
+                NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+            End If
+            'Otherwise leave the register untouched - a control / property / constant
+            'value matches prior behaviour and Change A will never deref it anyway.
     End Select
 End Function
 
@@ -2285,6 +2327,62 @@ none:
     NativeMemBase = -1
 End Function
 
+Private Function NativeMemIndex(ByVal dump As String) As Long
+    'Index register (0..7) of a SIB memory operand, or -1 if none / no SIB byte.
+    'Used to keep the deref-with-offset rendering (base(offset)) off genuinely
+    'indexed array-element operands [base + index*scale + disp], which we leave
+    'unmodelled (the commercial decompiler also punts on those).
+    Dim n As Long, i As Long, op As Long, modrm As Long, md As Long, rm As Long, sib As Long, idx As Long
+    On Error GoTo none
+    NativeMemIndex = -1
+    dump = Replace(dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i): i = i + 1
+    If op = &HF Or op = &HE8 Or op = &HE9 Or op = &HEB Then Exit Function
+    If i >= n Then Exit Function
+    modrm = NativeDumpByte(dump, i)
+    md = (modrm \ &H40) And 3: rm = modrm And 7
+    If md = 3 Or rm <> 4 Then Exit Function              'register-direct or no SIB
+    sib = NativeDumpByte(dump, i + 1)
+    idx = (sib \ 8) And 7
+    If idx <> 4 Then NativeMemIndex = idx                'idx = 4 encodes "no index"
+    Exit Function
+none:
+    NativeMemIndex = -1
+End Function
+
+Private Function NativeIsPtrExpr(ByVal s As String) As Boolean
+    'True when s is a DATA-pointer expression we are willing to dereference at a
+    'byte offset: a module global / parameter / local / code label, optionally
+    'already a chained deref (global_X(12)).  Deliberately EXCLUDES bare registers
+    '(edx), pure numbers, and property / control expressions (frmMain.Text1) - for
+    'those a byte-offset deref would be misleading, so they stay as their raw form.
+    Dim p As String
+    If Len(s) = 0 Then Exit Function
+    If Left$(s, 1) = "(" Then p = Mid$(s, 2) Else p = s      'peel a leading paren of a folded expr
+    NativeIsPtrExpr = (Left$(p, 7) = "global_") Or (Left$(p, 4) = "arg_") _
+                   Or (Left$(p, 4) = "var_") Or (Left$(p, 4) = "loc_")
+End Function
+
+Private Function NativeIsNumLit(ByVal s As String) As Boolean
+    'True when s is a plain numeric constant (leading sign or digit).
+    Dim c As String
+    If Len(s) = 0 Then Exit Function
+    c = Left$(s, 1)
+    NativeIsNumLit = (c = "-") Or (c >= "0" And c <= "9")
+End Function
+
+Private Function NativeIsDerefBase(ByVal s As String) As Boolean
+    'True when s may be DEREFERENCED at a byte offset - a genuine data pointer or a
+    'pointer-deref chain (global_X, arg_C, var_18, global_X(12)).  Unlike
+    'NativeIsPtrExpr it does NOT peel a leading paren, so a FOLDED arithmetic result
+    '(arg_C - global_X(20)) - a value, not a pointer - is rejected and never
+    'rendered as the misleading (arg_C - global_X(20))(16).
+    NativeIsDerefBase = (Left$(s, 7) = "global_") Or (Left$(s, 4) = "arg_") _
+                     Or (Left$(s, 4) = "var_") Or (Left$(s, 4) = "loc_")
+End Function
+
 Private Function NativeGlobalObjByOffset(ByVal disp As Long) As String
     'VB6 form-interface vtable slots for the intrinsic global objects.
     Select Case disp
@@ -2393,9 +2491,10 @@ none0:
 End Function
 
 Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As Long) As String
-    'Symbolic value of a ModR/M r/m operand: a register's tracked value, or a
-    'local stack slot.  "" when it is a memory operand we do not model.
-    Dim disp As Long, isAbs As Boolean
+    'Symbolic value of a ModR/M r/m operand: a register's tracked value, a local
+    'stack slot, or a deref-with-offset of a tracked pointer register rendered in
+    'the commercial decompiler's base(offset) style.  "" when we cannot model it.
+    Dim disp As Long, isAbs As Boolean, bse As Long
     If md = 3 Then
         NativeRmVal = NativeRegVal(rm)
     ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
@@ -2405,8 +2504,25 @@ Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As
             NativeRmVal = NativeGlobalName(disp)
         ElseIf Not isAbs And disp >= 8 And disp <= &H200 And NativeMemBase(dump) = 5 Then
             NativeRmVal = "arg_" & Hex$(disp)        'a procedure parameter (ebp+positive)
-        ElseIf Not isAbs And disp = 0 And md = 0 And rm <> 4 And rm <> 5 Then
-            If Left$(NVReg(rm), 4) = "arg_" Then NativeRmVal = NVReg(rm)   'deref of a ByRef param
+        ElseIf Not isAbs And NativeMemIndex(dump) < 0 Then
+            'Deref-with-offset of a tracked pointer: [base + disp] -> <baseVal>(disp),
+            'or just <baseVal> at disp 0.  Gated to a single base register (no SIB
+            'index) currently holding a known value, so it never fires on an operand
+            'we have not modelled.  Subsumes the old ByRef-param deref ([arg_reg])
+            'and adds struct / SAFEARRAY field reads ([global_ptr + fieldOff]); the
+            'chain global_X -> global_X(12) -> global_X(12)(20) forms via NVReg.
+            'The base must be a DATA-pointer expression (global / arg / var / loc,
+            'incl. chained derefs), enforced by NativeIsPtrExpr: a constant "0"
+            'base would render the nonsense 0(20), and a control/property base a
+            'misleading frmMain.Text1(20) - both stay as their raw register instead.
+            bse = NativeMemBase(dump)
+            If bse >= 0 And bse <= 7 And NativeIsDerefBase(NVReg(bse)) Then
+                If disp = 0 Then
+                    NativeRmVal = NVReg(bse)
+                Else
+                    NativeRmVal = NVReg(bse) & "(" & CStr(disp) & ")"
+                End If
+            End If
         End If
     End If
 End Function
