@@ -748,6 +748,16 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             End If
 
         Case C_JMC
+            'A jo/jno integer-overflow check: VB6 emits one after arithmetic on
+            'Integer/Long operands, jumping to an overflow-error stub appended
+            'after the proc epilogue.  No VB source construct produces jo/jno, so
+            'this is never user code - drop it (target -> skip label) rather than
+            'let it become a bogus If block.
+            If mn = "JO" Or mn = "JNO" Then
+                NativeAddUnique NVSkipLabels, inst.jmpConst
+                NVCmpSet = False: NVLastCmp = ""
+                Exit Function
+            End If
             'A Jcc guarding VB6's automatic FPU overflow check (preceded by
             'fnstsw ax; test al,imm) jumps to the error handler - drop it (it can be
             'a FAR jump, so it is not covered by the short error-check rule below).

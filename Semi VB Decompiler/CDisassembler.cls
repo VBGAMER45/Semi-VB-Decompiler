@@ -150,8 +150,17 @@ Public Function DisasmProc(b() As Byte, ByVal va As Long, ByVal maxLen As Long) 
         If d.instLen <= 0 Then Exit Do
         ret.Add d
         cls = d.cmdType And C_TYPEMASK
-        'Track the furthest forward branch target inside the proc
-        If (cls = C_JMP Or cls = C_JMC) And d.jmpConst > farTarget Then farTarget = d.jmpConst
+        'Track the furthest forward branch target inside the proc.  Exclude
+        'jo/jno (integer-overflow checks): VB6 emits these after arithmetic and
+        'jumps to an overflow-error stub appended AFTER the function epilogue, so
+        'counting their target would run the scan off the proc end into the next
+        'function's padding/data.
+        If (cls = C_JMP Or cls = C_JMC) And d.jmpConst > farTarget Then
+            Dim mnm As String, sp As Long
+            mnm = Trim$(d.command): sp = InStr(mnm, " ")
+            If sp > 0 Then mnm = UCase$(Left$(mnm, sp - 1)) Else mnm = UCase$(mnm)
+            If mnm <> "JO" And mnm <> "JNO" Then farTarget = d.jmpConst
+        End If
         va = va + d.instLen
         pointer = pointer + d.instLen
         'Stop once we hit a RET that is at or past every forward branch target
