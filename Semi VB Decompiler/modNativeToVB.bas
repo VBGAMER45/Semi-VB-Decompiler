@@ -1691,11 +1691,13 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 Dim ftgt As Long
                 ftgt = NativeFormVtableTarget(disp)
                 If ftgt <> 0 Then
-                    'The implicit Me/this (the last push, ebx) is normally
-                    'untracked, so it never reaches the argument stack - the
-                    'tracked pushes are exactly the explicit arguments.
-                    Dim fpname As String, fargs As String
-                    fargs = NativeArgList()
+                    'A COM-style form-method call leads with the implicit Me/this (the
+                    'form pointer, tracked as arg_8 when it reaches the arg stack); drop
+                    'it and the trailing retbuf, keeping the real parameters (count from
+                    'the method's typeinfo signature) - so `Update_Status()` no longer
+                    'renders as frmMain.Update_Status(arg_8).
+                    Dim fpname As String, fargs As String, fRetbuf As String
+                    fargs = NativeDropThisArgs(NativeArgList(), ftgt, fRetbuf)
                     fpname = NativeCallTargetName(ftgt)
                     NVReg(0) = NVForm & "." & fpname & "(" & fargs & ")"
                     NVPendingCall = "Call " & NVForm & "." & fpname & "(" & fargs & ")"
@@ -3065,6 +3067,31 @@ Private Function NativeTakeArgs(ByVal csv As String, ByVal n As Long) As String
         s = s & parts(i)
     Next
     NativeTakeArgs = s
+End Function
+
+Private Function NativeDropThisArgs(ByVal rawArgs As String, ByVal tgt As Long, ByRef retbuf As String) As String
+    'Strip the implicit Me/this (the leading arg_8) and the trailing [out,retval]
+    'buffer from a COM/form method call's raw argument list, keeping exactly the
+    'method's real parameters (count from its typeinfo signature).  retbuf returns the
+    'dropped buffer arg ("" if none), so the caller can surface a value-returning call.
+    retbuf = ""
+    If Len(rawArgs) = 0 Then Exit Function
+    Dim p() As String, st As Long, keep As Long, total As Long, i As Long, out As String, sig As String
+    p = Split(rawArgs, ", ")
+    st = 0
+    If p(0) = "arg_8" Then st = 1                        'drop the implicit Me/this
+    total = UBound(p) - st + 1
+    keep = total
+    If NativeTryMethodSig(tgt, sig) Then keep = NativeArgCount(sig)
+    If keep > total Then keep = total
+    If keep < 0 Then keep = 0
+    For i = st To st + keep - 1
+        If i > UBound(p) Then Exit For
+        If Len(out) > 0 Then out = out & ", "
+        out = out & p(i)
+    Next
+    If total > keep Then retbuf = p(st + keep)
+    NativeDropThisArgs = out
 End Function
 
 Private Function NativeClassVtableTarget(ByVal disp As Long) As Long
