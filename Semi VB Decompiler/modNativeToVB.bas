@@ -426,9 +426,12 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         'result through a hidden by-reference buffer, leaving an HRESULT
                         'in eax that VB immediately error-checks (cmp eax,0) - which
                         'would otherwise fold/consume a deferred call and lose it.
-                        Dim cpname As String, cargs As String
+                        Dim cpname As String, cargs As String, csig As String
                         cargs = NativeArgList()
                         cpname = NativeCallTargetName(ctgt)
+                        'Drop the trailing hidden return-value buffer (and any extra)
+                        'once the method's real parameter count is known.
+                        If NativeTryMethodSig(ctgt, csig) Then cargs = NativeTakeArgs(cargs, NativeArgCount(csig))
                         NVPushTop = 0: NativeResetValue
                         NativeProcessInst = ind & "Call " & NVForm & "." & cpname & "(" & cargs & ")" & vbCrLf
                         Exit Function
@@ -1260,6 +1263,35 @@ Private Function NativeFormVtableTarget(ByVal disp As Long) As Long
     On Error Resume Next
     v = gFormVtable(NVForm & ":" & slot)
     If Err.Number = 0 Then NativeFormVtableTarget = CLng(v)
+End Function
+
+Private Function NativeTryMethodSig(ByVal addr As Long, ByRef sig As String) As Boolean
+    'Reconstructed parameter-name list for a public class method, keyed by address
+    '(filled by modNative.LinkNativePublicParams).  Returns True (with sig, possibly
+    'empty for a no-parameter method) when one is recorded.
+    On Error Resume Next
+    Dim v As Variant
+    v = gMethodSig("A" & addr)
+    If Err.Number = 0 Then sig = CStr(v): NativeTryMethodSig = True
+End Function
+
+Private Function NativeArgCount(ByVal csv As String) As Long
+    If Len(csv) = 0 Then Exit Function
+    NativeArgCount = UBound(Split(csv, ", ")) + 1
+End Function
+
+Private Function NativeTakeArgs(ByVal csv As String, ByVal n As Long) As String
+    'The first n comma-separated arguments of csv (used to drop a method call's
+    'trailing hidden return-value buffer once the real parameter count is known).
+    If n <= 0 Or Len(csv) = 0 Then Exit Function
+    Dim parts() As String, i As Long, s As String
+    parts = Split(csv, ", ")
+    If n > UBound(parts) + 1 Then n = UBound(parts) + 1
+    For i = 0 To n - 1
+        If Len(s) > 0 Then s = s & ", "
+        s = s & parts(i)
+    Next
+    NativeTakeArgs = s
 End Function
 
 Private Function NativeClassVtableTarget(ByVal disp As Long) As Long
@@ -2445,7 +2477,16 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
     'Add the parameter list when the name carries no signature yet (event handlers
     'already get a typed one from getEventComplete).  Parameters are named generically
     'arg_<ebp offset> with the count from the proc's `ret N`.
-    If InStr(nm, "(") = 0 Then nm = nm & "(" & NativeProcParams(kindStr, NativeProcHasMe(addr)) & ")"
+    If InStr(nm, "(") = 0 Then
+        Dim psig As String
+        If NativeTryMethodSig(addr, psig) Then
+            'Real parameter names from the class typeinfo (FuncDesc table).
+            nm = nm & "(" & psig & ")"
+        Else
+            'Generic arg_<offset> list from the `ret N` count.
+            nm = nm & "(" & NativeProcParams(kindStr, NativeProcHasMe(addr)) & ")"
+        End If
+    End If
     NativeProcHeader = vis & " " & kindStr & " " & nm & "   '" & Hex$(addr)
 End Function
 

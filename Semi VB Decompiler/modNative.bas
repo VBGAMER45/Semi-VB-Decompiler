@@ -344,7 +344,7 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
         'attach a wrong name.
         If base > 0 Then
             For i = 0 To base - 1
-                If namesVA(i) <> 0 And (namesVA(i) - OptHeader.ImageBase) > 0 Then GoTo nextObj
+                If NativeValidNamePtr(namesVA(i)) Then GoTo nextObj
             Next i
         End If
         'A class/usercontrol exposes its methods through a COM vtable: IUnknown(3) +
@@ -358,7 +358,7 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
         prevName = "": prevPos = -1: prevIdx = -2
         For i = 0 To pc - 1
             nm = ""
-            If namesVA(i) <> 0 And (namesVA(i) - OptHeader.ImageBase) > 0 Then
+            If NativeValidNamePtr(namesVA(i)) Then
                 Seek F, namesVA(i) + 1 - OptHeader.ImageBase
                 nm = GetUntilNull(F)
             End If
@@ -389,6 +389,13 @@ nextObj:
     Next oi
 done:
 End Sub
+
+Private Function NativeValidNamePtr(ByVal va As Long) As Boolean
+    'A real procedure-name pointer points inside this image.  Some EXEs fill unused
+    'name-array slots with garbage (e.g. 0x02020202, ~33 MB) rather than 0, which a
+    'bare ">= ImageBase" test wrongly accepts as a name - bound it to the image.
+    NativeValidNamePtr = (va >= OptHeader.ImageBase And va < OptHeader.ImageBase + &H1000000)
+End Function
 
 Private Function KeyExists(ByRef col As Collection, ByVal key As String) As Boolean
     Dim v As Variant
@@ -458,6 +465,126 @@ Public Sub LinkNativeEventNames()
             End If
         Next s
     Next e
+done:
+End Sub
+
+'---------------------------------------------------------------------------
+' Public-method parameter NAMES (and Function/Sub-ness) for classes / usercontrols
+'
+' VB6 compiles a class's public interface to a typeinfo block whose FuncDesc
+' records carry each method's parameter names.  Chain (verified on Dungeon,
+' Strategy2 and the decompiler's own classes):
+'   tObject.aObjectInfo -> tObjectInfo +0x0C (aSmallRecord) -> TYPEINFO_HDR
+'   FuncDesc array: if dw(hdr+0x18) points to a FuncDesc use it, else the array
+'     is inline in the header - scan hdr+0x18..+0x140 for the first FuncDesc ptr.
+'   FuncDesc (0x24B): +0x04 = 0x0000FFFF sig ; +0x10 -> param-name char*[] ;
+'     +0x00: (byte2)&0xFC = the method's VTABLE OFFSET (maps to the method via the
+'     gFormVtable "Owner:off..." class map); param count = (byte0\4) - (byte1 AND 1)
+'     - the byte1 bit is the hidden return slot (Function/Property), so a Sub's
+'     count is byte0\4 and a Function's is byte0\4 - 1.
+' Param names are read straight from the +0x10 list (exactly the computed count),
+' so the project-wide shared name table needs no boundary guessing.
+'---------------------------------------------------------------------------
+Private Function NativeFileDword(ByVal F As Integer, ByVal va As Long) As Long
+    On Error Resume Next
+    Dim v As Long
+    If va < OptHeader.ImageBase Then Exit Function
+    Seek F, va + 1 - OptHeader.ImageBase
+    Get #F, , v
+    NativeFileDword = v
+End Function
+
+Private Function NativeIsFuncDesc(ByVal F As Integer, ByVal p As Long) As Boolean
+    Dim voff As Long
+    If p < OptHeader.ImageBase Then Exit Function
+    If NativeFileDword(F, p + 4) <> &HFFFF& Then Exit Function   '&HFFFF& = Long 65535 (&HFFFF alone is Integer -1)
+    voff = (NativeFileDword(F, p) \ &H10000) And &HFC
+    NativeIsFuncDesc = (voff >= &H1C And voff <= &H2000)
+End Function
+
+Public Sub LinkNativePublicParams(ByVal F As Integer)
+    On Error GoTo done
+    Dim oi As Long, aoi As Long, hdr As Long, owner As String
+    Dim pc As Long, i As Long, nMethods As Long, namesVA() As Long
+    Dim a18 As Long, arr As Long, j As Long
+    Dim p As Long, f00 As Long, voff As Long, b0 As Long, b1 As Long, nP As Long
+    Dim pnl As Long, k As Long, nameVA As Long, sig As String, nm As String
+    Dim addr As Long, v As Variant
+
+    For oi = 0 To UBound(gObjectNameArray)
+        'Public COM interface (class / usercontrol) only - this byte encoding and
+        'the 0x1C-based vtable apply there; forms use a different (0x6F8) layout.
+        If (gObject(oi).ObjectType And &H100000) = 0 Then GoTo nextO
+        aoi = gObject(oi).aObjectInfo
+        If aoi = 0 Then GoTo nextO
+        owner = gObjectNameArray(oi)
+        hdr = NativeFileDword(F, aoi + &HC)            'tObjectInfo.aSmallRecord
+        If hdr < OptHeader.ImageBase Then GoTo nextO
+
+        'Number of public methods = non-null entries in the names array (bounds the
+        'FuncDesc read so it cannot run into an adjacent object's records).
+        pc = gObject(oi).ProcCount
+        If pc <= 0 Or gObject(oi).aProcNamesArray = 0 Then GoTo nextO
+        ReDim namesVA(pc - 1)
+        Seek F, gObject(oi).aProcNamesArray + 1 - OptHeader.ImageBase
+        Get F, , namesVA
+        nMethods = 0
+        For i = 0 To pc - 1
+            If NativeValidNamePtr(namesVA(i)) Then nMethods = nMethods + 1
+        Next i
+        If nMethods = 0 Then GoTo nextO
+
+        'Locate the FuncDesc pointer array.
+        a18 = NativeFileDword(F, hdr + &H18)
+        If NativeIsFuncDesc(F, NativeFileDword(F, a18)) Then
+            arr = a18
+        Else
+            arr = 0
+            For j = &H18 To &H140 Step 4
+                If NativeIsFuncDesc(F, NativeFileDword(F, hdr + j)) Then arr = hdr + j: Exit For
+            Next j
+        End If
+        If arr = 0 Then GoTo nextO
+
+        For j = 0 To nMethods - 1
+            p = NativeFileDword(F, arr + j * 4)
+            If Not NativeIsFuncDesc(F, p) Then Exit For
+            f00 = NativeFileDword(F, p)
+            voff = (f00 \ &H10000) And &HFC
+            b0 = f00 And &HFF
+            b1 = (f00 \ &H100) And &H1            'hidden return slot bit
+            nP = (b0 \ 4) - b1
+            If nP < 0 Then nP = 0
+            pnl = NativeFileDword(F, p + &H10)
+            sig = ""
+            For k = 0 To nP - 1
+                nameVA = NativeFileDword(F, pnl + k * 4)
+                nm = ""
+                If nameVA >= OptHeader.ImageBase Then
+                    Seek F, nameVA + 1 - OptHeader.ImageBase
+                    nm = GetUntilNull(F)
+                End If
+                If Len(nm) = 0 Then nm = "arg" & (k + 1)
+                If Len(sig) > 0 Then sig = sig & ", "
+                sig = sig & nm
+            Next k
+            'Map the method's vtable offset to its code address (the class vtable
+            'map filled by LinkNativeProcNames), then key the signature by address.
+            addr = 0
+            On Error Resume Next
+            v = gFormVtable(owner & ":off" & voff)
+            If Err.Number = 0 Then addr = CLng(v)
+            Err.Clear
+            On Error GoTo done
+            If addr <> 0 Then
+                On Error Resume Next
+                gMethodSig.Remove "A" & addr
+                gMethodSig.Add sig, "A" & addr
+                On Error GoTo done
+            End If
+        Next j
+nextO:
+    Next oi
 done:
 End Sub
 

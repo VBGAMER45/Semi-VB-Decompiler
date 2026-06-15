@@ -621,6 +621,11 @@ Global gControlNameArray() As typeControlName
 'resolves to the method.  Populated from the event-link table during OpenVBExe.
 Global gFormVtable As Collection
 
+'Maps a public class/usercontrol method's code address ("A"&addr) to its
+'reconstructed parameter-name list (CSV), recovered from the object's compiled
+'typeinfo (FuncDesc table).  Populated by modNative.LinkNativePublicParams.
+Global gMethodSig As Collection
+
 
 'For Controls
 Public Type typeStandardControlSize

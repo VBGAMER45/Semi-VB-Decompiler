@@ -1477,6 +1477,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
     'Native
     ReDim modNative.gNativeProcArray(0)
     Set gFormVtable = New Collection
+    Set gMethodSig = New Collection
     Close
     'clear the nodes
     tvProject.Nodes.Clear
@@ -2063,6 +2064,10 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
             'Then attach form/control event-handler names (Form_Load, Timer1_Timer,
             '...) - not in aProcNamesArray - to their event-link slot addresses.
             Call modNative.LinkNativeEventNames
+            'Recover public class/usercontrol method parameter names from the
+            'compiled typeinfo (FuncDesc table) - runs after LinkNativeProcNames so
+            'the class vtable map (gFormVtable "Owner:off...") is populated.
+            Call modNative.LinkNativePublicParams(F)
         End If
 
         'Main Loop to Get all Form's Properties
