@@ -317,6 +317,13 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         If (inst.cmdType And C_TYPEMASK) = C_CAL Then
             NVRegObjType(1) = "": NVRegObjVt(1) = "": NVRegObjGuid(1) = "": NVRegObjVtGuid(1) = ""   'ecx
             NVRegObjType(2) = "": NVRegObjVt(2) = "": NVRegObjGuid(2) = "": NVRegObjVtGuid(2) = ""   'edx
+            'eax now holds the call's RETURN value, never a `lea`-captured &local,
+            'so drop any stale address-of tag on it - else a later push of eax leaks
+            'the by-reference local: a string built after `lea eax,[var_20]` (for
+            '__vbaObjSet) was pushing var_20 instead of the computed value.  Only eax
+            'is cleared here: ecx/edx by-ref pushes happen before their call, and
+            'clearing them mis-rendered live by-ref argument locals.
+            NVRegIsAddr(0) = False
         End If
 nextInst:
     Next
