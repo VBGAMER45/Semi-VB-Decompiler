@@ -310,6 +310,12 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 
     output = NativeProcHeader(addr) & vbCrLf
 
+    'A Function/Property Get returns its value through a hidden retbuf pointer (the
+    'last stack arg); the local copied into it at the epilogue is the return value.
+    'Rename that local to the procedure name so assignments read `FuncName = value`.
+    'Runs AFTER NativeProcHeader so it appends to the parameter-name substitutions.
+    NativeDetectReturnSlot col, addr
+
     For Each inst In col
         'Resolve a deferred call (from the previous instruction) based on how
         'THIS instruction uses eax, the call's result.  Done before any block
@@ -2850,6 +2856,98 @@ Private Sub NativeBuildArgNameMap(ByVal addr As Long, ByVal psig As String)
         End If
     Next
 End Sub
+
+Private Sub NativeDetectReturnSlot(col As Collection, ByVal addr As Long)
+    'A class Function / Property Get returns through a hidden [out,retval] pointer -
+    'the LAST stack argument (ebp + NVRetN + 4) - and the epilogue copies the return
+    'value from a local into it:  mov REGa,[ebp+retOff] ; mov REGb,[ebp-X] ; mov
+    '[REGa],REGb.  Rename that local (var_X) to the procedure name, so its assignments
+    'read `FuncName = value` (VB's implicit return variable) instead of var_X = value.
+    On Error GoTo done
+    If NVRetN < 4 Then Exit Sub
+    'Only Functions / Property Get have a return value.
+    Dim kind As String, isFunc As Boolean, mi As Long
+    If NativeTryMethodKind(addr, kind) Then
+        isFunc = (InStr(kind, "Function") > 0 Or InStr(kind, "Get") > 0)
+    Else
+        mi = NativeProcMatchIdx(addr)
+        If mi >= 0 Then isFunc = (InStr(SubNamelist(mi).kind, "Function") > 0 Or InStr(SubNamelist(mi).kind, "Get") > 0)
+    End If
+    If Not isFunc Then Exit Sub
+    Dim funcName As String
+    funcName = NativeProcName(addr)
+    Dim pp As Long
+    pp = InStr(funcName, "(")
+    If pp > 0 Then funcName = Left$(funcName, pp - 1)
+    funcName = Trim$(funcName)
+    If Not NativeIsIdent(funcName) Then Exit Sub
+
+    Dim retOff As Long
+    retOff = NVRetN + 4                                  'the hidden retbuf is the last stack slot
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    Dim i As Long, ra As Long, rb As Long, dret As Long, dloc As Long, bs As Long, sr As Long
+    For i = 0 To n - 3
+        'mov REGa, [ebp + retOff]
+        If NativeMovRegEbp(arr(i), ra, dret) Then
+            If dret = retOff Then
+                'mov REGb, [ebp - X]  (the return local; X negative)
+                If NativeMovRegEbp(arr(i + 1), rb, dloc) Then
+                    If dloc < 0 Then
+                        'mov [REGa], REGb  (store the local through the retbuf pointer)
+                        If NativeMovToBase(arr(i + 2), bs, sr) Then
+                            If bs = ra And sr = rb Then
+                                ReDim Preserve NVArgTok(NVArgN): ReDim Preserve NVArgNm(NVArgN)
+                                NVArgTok(NVArgN) = "var_" & Hex$(Abs(dloc))
+                                NVArgNm(NVArgN) = funcName
+                                NVArgN = NVArgN + 1
+                                Exit Sub
+                            End If
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next
+done:
+End Sub
+
+Private Function NativeMovRegEbp(inst As CInstruction, ByRef reg As Long, ByRef disp As Long) As Boolean
+    'Match `mov r(16/32), [ebp + disp]` (8B /r, base ebp): dest reg + signed disp.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, isAbs As Boolean
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &H8B Then Exit Function
+    If NativeMemBase(dump) <> 5 Then Exit Function          'base must be ebp
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) = 3 Then Exit Function                'register-direct, not memory
+    reg = (modrm \ 8) And 7
+    If NativeDecodeDisp(dump, disp, isAbs) Then If Not isAbs Then NativeMovRegEbp = True
+End Function
+
+Private Function NativeMovToBase(inst As CInstruction, ByRef baseReg As Long, ByRef srcReg As Long) As Boolean
+    'Match `mov [REG], r(16/32)` (89 /r, mod=00, rm=base register, no disp).
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, md As Long, rm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &H89 Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3: rm = modrm And 7
+    If md <> 0 Or rm = 4 Or rm = 5 Then Exit Function       'need [REG] with no disp, no SIB/ebp
+    baseReg = rm
+    srcReg = (modrm \ 8) And 7
+    NativeMovToBase = True
+End Function
 
 Private Function NativeIsIdent(ByVal s As String) As Boolean
     'A safe VB identifier (letters / digits / underscore, not starting with a digit).
