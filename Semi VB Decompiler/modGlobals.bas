@@ -648,6 +648,12 @@ Global gNativeUsedGlobal As Collection   'key "g"&VA -> the global VAs the progr
 Global gNativeArrayGlobal As Collection  'key "g"&VA -> globals used as arrays (ReDim'd) -> "()"
 Global gNativeGlobalClass As Collection  'key "g"&VA -> recovered user class name (As <Class>)
 
+'`As New <class>` PRIVATE form/class member fields - their type is stripped from
+'the public typeinfo, so it is recovered from the auto-instantiation pattern
+'(lea reg,[Me+off]; push reg; push <ObjInfo>; call __vbaNew).  Key "Owner:offset"
+'(decimal) -> class name, so a method call on Me.<field> resolves like a New'd object.
+Global gFormFieldClass As Collection
+
 'The Win32 API Declare block (from the VB external table) is project-wide, but the
 'EXE does not record which module owned each Declare - so it is emitted ONCE, as
 'Public, in the first standard module written (else, for a module-less project, as

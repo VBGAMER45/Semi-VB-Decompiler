@@ -150,6 +150,9 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     On Error GoTo fail
 
     If dsmNative Is Nothing Then Set dsmNative = New CDisassembler
+    'Build the As-New private-field class map once, program-wide, so method calls
+    'on Me.<clsBitmap field> resolve regardless of which proc auto-instantiated it.
+    If gFormFieldClass Is Nothing Then NativeScanFormFieldClasses
 
     'The procedure list hands back an address a few bytes into the prologue
     '(the SEH setup), so snap back to the real "push ebp / mov ebp,esp" entry.
@@ -1094,6 +1097,23 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                                 On Error Resume Next
                                 gNativeGlobalClass.Add NVRegObjVt(ocb), "g" & grcVa
                                 On Error GoTo 0
+                            End If
+                            'A Property Get returns its value via the hidden retbuf
+                            'out-param (the last &local lea'd before the call).  Fold
+                            'recv.Prop into that local + eax so the consumer renders
+                            'e.g. global_108 = clsBitmap.InvertImageDC; emit nothing.
+                            Dim umKind As String
+                            If NativeTryMethodKind(umAddr, umKind) Then
+                                If InStr(umKind, "Get") > 0 Then
+                                    Dim umVal As String
+                                    umVal = umRecv & "." & umName
+                                    If Len(umArgs) > 0 Then umVal = umVal & "(" & umArgs & ")"
+                                    NVPushTop = 0
+                                    NVReg(0) = umVal
+                                    NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjInst(0) = ""
+                                    If NVLastLeaSet Then NativeSetLocalExpr NVLastLea, umVal: NVLastLeaSet = False
+                                    Exit Function           'value flows to the consumer
+                                End If
                             End If
                             NVPushTop = 0
                             NativeProcessInst = ind & "Call " & umRecv & "." & umName & "(" & umArgs & ")" & vbCrLf
@@ -2497,6 +2517,13 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NVRegObjVt(reg) = NVRegObjType(bse)
                     NVRegObjVtGuid(reg) = NVRegObjGuid(bse)   'deref of a control pointer -> its vtable carries the GUID
                     NVRegObjInst(reg) = NVRegObjInst(bse)     'deref of a user-class pointer -> its vtable carries the receiver
+                ElseIf Not isAbs And disp > 0 And baseObj Then
+                    'Reading an `As New` private object field Me.<field> (e.g. a
+                    'clsBitmap member): type it from the auto-instantiation map so a
+                    'following `mov vt,[field]; call [vt+off]` resolves to <Class>.Method.
+                    Dim ffcls As String
+                    ffcls = NativeColGet(gFormFieldClass, NVForm & ":" & disp)
+                    If Len(ffcls) > 0 Then NVRegObjType(reg) = ffcls: NVRegObjInst(reg) = ffcls
                 End If
             End If
         Case &H8D                       'lea r32, [mem]  (address-of / ptr arithmetic)
@@ -2924,6 +2951,82 @@ Private Function NativeClassFromObjInfo(ByVal objInfoVA As Long) As String
     If namePtr = 0 Then Exit Function
     nm = NativeAsciiAt(namePtr)
     If Len(nm) > 0 And NativeIsKnownObject(nm) Then NativeClassFromObjInfo = nm
+End Function
+
+Private Sub NativeScanFormFieldClasses()
+    'Build (Owner:fieldOffset -> class) for `As New <class>` PRIVATE form/class
+    'member fields, recovered from their auto-instantiation
+    '(lea reg,[Me+off]; push reg; push <ObjInfo>; call __vbaNew).  Their type is
+    'stripped from the public typeinfo, so this is the only way to resolve method
+    'calls on them.  Run once (program-wide) before any proc renders.
+    Set gFormFieldClass = New Collection
+    On Error Resume Next
+    Dim pp As Long, addr As Long, formNm As String, b() As Byte, fp As Integer
+    Dim col As Collection, inst As CInstruction, arr() As CInstruction, n As Long, k As Long, j As Long
+    If dsmNative Is Nothing Then Set dsmNative = New CDisassembler
+    For pp = 0 To UBound(gNativeProcArray) - 1
+        addr = gNativeProcArray(pp).offset
+        If addr = 0 Then GoTo nextpp
+        formNm = NativeFormOf(addr)
+        If Len(formNm) = 0 Then GoTo nextpp
+        addr = NativeSnapEntry(addr)
+        ReDim b(8191)
+        fp = FreeFile
+        Open SFilePath For Binary Access Read As #fp
+            Get #fp, addr + 1 - OptHeader.ImageBase, b
+        Close #fp
+        Set col = dsmNative.DisasmProc(b, addr, 8192)
+        n = col.Count
+        If n < 3 Then GoTo nextpp
+        ReDim arr(n - 1): k = 0
+        For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+        For k = 2 To n - 1
+            If NativeIsVbaNewCall(arr(k)) Then
+                Dim oi As Long, foff As Long, leaOk As Boolean, lo As Long, pim As Long, lf As Long
+                oi = 0: foff = -1: leaOk = False
+                lo = k - 6: If lo < 0 Then lo = 0
+                For j = k - 1 To lo Step -1
+                    If oi = 0 Then
+                        If NativePushImmRaw(arr(j), pim) <> 0 Then If pim >= OptHeader.ImageBase Then oi = pim
+                    End If
+                    If Not leaOk Then If NativeLeaFieldOff(arr(j), lf) Then foff = lf: leaOk = True
+                Next j
+                If oi <> 0 And leaOk Then
+                    Dim cls As String
+                    cls = NativeClassFromObjInfo(oi)
+                    If Len(cls) > 0 Then NativeColPut gFormFieldClass, formNm & ":" & foff, cls
+                End If
+            End If
+        Next k
+nextpp:
+    Next pp
+End Sub
+
+Private Function NativeIsVbaNewCall(inst As CInstruction) As Boolean
+    'A `call dword ptr [abs]` that resolves (via the IAT) to __vbaNew / __vbaNew2.
+    Dim disp As Long, isAbs As Boolean
+    On Error Resume Next
+    If (inst.cmdType And C_TYPEMASK) <> C_CAL Then Exit Function
+    If Not NativeDecodeDisp(inst.dump, disp, isAbs) Then Exit Function
+    If Not isAbs Then Exit Function
+    NativeIsVbaNewCall = (InStr(dsmNative.GetApiByIatVa(disp), "__vbaNew") > 0)
+End Function
+
+Private Function NativeLeaFieldOff(inst As CInstruction, ByRef off As Long) As Boolean
+    'A `lea reg, [base + disp]` whose base is a register (not ebp, no SIB) and whose
+    'disp is in the instance-field range - the &Me.<field> of an auto-instantiation.
+    Dim dump As String, n As Long, i As Long, disp As Long, isAbs As Boolean, bse As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    If NativeDumpByte(dump, i) <> &H8D Then Exit Function
+    If Not NativeDecodeDisp(dump, disp, isAbs) Then Exit Function
+    If isAbs Then Exit Function
+    bse = NativeMemBase(dump)
+    If bse < 0 Or bse = 5 Then Exit Function                'need a base register, not ebp
+    If NativeMemIndex(dump) >= 0 Then Exit Function          'no SIB index
+    If disp >= &H10 And disp < &H800 Then off = disp: NativeLeaFieldOff = True
 End Function
 
 Private Function NativeAsciiAt(ByVal va As Long) As String
