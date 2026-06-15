@@ -521,6 +521,38 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
         'forms both have a real typeinfo block here.
         If hdr < OptHeader.ImageBase Then GoTo nextO
 
+        'Public instance-VARIABLE names, recovered from the object's typeinfo VarDesc
+        'array (verified on RPGWOEdit frmReSize/frmFileSource and Dungeon frmMainMenu).
+        'In the typeinfo record (hdr): hdr+0x10 = variable count, hdr+0x20 -> a pointer
+        'array of VarDesc records.  Each VarDesc (0x1C bytes): +0x00 = name char* (VA),
+        '+0x14 = the instance byte offset (form public vars start at 0x34, in
+        'declaration order).  Store name keyed "Owner:<decimal offset>" so a
+        '`mov [Me+off], value` store renders the real name instead of field_<off>.
+        Dim vCnt As Long, vArr As Long, vi As Long, vd As Long, vNameVA As Long, vInstOff As Long, vNm As String
+        vCnt = NativeFileDword(F, hdr + &H10)
+        vArr = NativeFileDword(F, hdr + &H20)
+        If vCnt > 0 And vCnt <= 1000 And vArr >= OptHeader.ImageBase Then
+            For vi = 0 To vCnt - 1
+                vd = NativeFileDword(F, vArr + vi * 4)
+                If vd >= OptHeader.ImageBase Then
+                    vNameVA = NativeFileDword(F, vd)
+                    vInstOff = NativeFileDword(F, vd + &H14)
+                    'Validate: a real per-instance field name pointer and a plausible
+                    'instance offset (forms start vars at 0x34; guard the range).
+                    If vNameVA >= OptHeader.ImageBase And vInstOff >= &H30 And vInstOff < &H2000 Then
+                        Seek F, vNameVA + 1 - OptHeader.ImageBase
+                        vNm = GetUntilNull(F)
+                        If Len(vNm) > 0 And NativeValidNamePtr(vNameVA) Then
+                            On Error Resume Next
+                            gFieldName.Remove owner & ":" & vInstOff
+                            gFieldName.Add vNm, owner & ":" & vInstOff
+                            On Error GoTo done
+                        End If
+                    End If
+                End If
+            Next vi
+        End If
+
         isClass = ((gObject(oi).ObjectType And &H100000) <> 0)
         'A class/usercontrol's public-method count (non-null name slots) bounds its
         'CONTIGUOUS FuncDesc array.  A FORM's array is SPARSE (0x0 gaps for the private
