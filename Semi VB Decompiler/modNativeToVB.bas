@@ -105,6 +105,8 @@ Private NVFpCmp As Collection      '"P"&testVA -> "<relOp>|<regIdx>" - set NVReg
 Private NVFpSkip As Collection     '"P"&va -> "1" - suppress this scaffolding instruction
 Private NVStrCmpReg As Collection  '"P"&strcmpCallVA -> regIdx - the StrCmp result boolean-materializes into this register
 Private NVCounterSlot As Collection '"C"&disp -> "1" - a stack slot that is a loop induction variable (render by name, not a stale value)
+Private NVWhileCond As Collection  '"W"&exitJccVA -> "1" - emit `Do While <cond>` here (top-tested loop header)
+Private NVWhileLoop As Collection  '"W"&backedgeVA -> "1" - emit `Loop` here (the back-edge of a Do While)
 Private NVLastCmp As String        'hint expression for the next If condition
 Private NVStrLits As Collection    'pending string literals (e.g. MsgBox arguments)
 Private NVSkipLabels As Collection 'branch targets that belong to dropped error-check guards
@@ -213,6 +215,8 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVFpSkip = New Collection
     Set NVStrCmpReg = New Collection
     Set NVCounterSlot = New Collection
+    Set NVWhileCond = New Collection
+    Set NVWhileLoop = New Collection
     ReDim NVSelStkBase(31): NVSelTop = 0
     NVBase = NativeSolveControlBase(col)
 
@@ -274,6 +278,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'inc ctr / jmp header) so they reconstruct as For...Next with a named counter
     'rather than an If <cond> ... GoTo back-edge.
     NativeDetectForLoops col
+
+    'Detect top-tested Do While loops (a header `cmp/jcc` exit guarding a body that
+    'ends in an unconditional back-edge jmp) so they reconstruct as Do While <cond>
+    '/ Loop rather than `loc: If <cond> ... GoTo loc / End If`.
+    NativeDetectWhileLoops col
 
     'Detect floating-point comparison idioms (fcom/fnstsw/test ah,mask/jcc + the
     'boolean materialization) so they yield a real relational instead of <cond>.
@@ -767,6 +776,71 @@ Private Sub NativeDetectForLoops(col As Collection)
         NativeColPut NVForSkip, "F" & arr(hi + 1).va, "1"     'the exit Jcc (replaced by For)
         NativeAddUnique NVSkipLabels, hdrVA                   'header label -> the For line
 nextb:
+    Next bi
+done:
+End Sub
+
+Private Sub NativeDetectWhileLoops(col As Collection)
+    'Reconstruct a top-tested loop as `Do While <cond> ... Loop`.  Shape:
+    '    H: [setup] ; cmp/test <x>,<y> ; jcc EXIT ; ... body ... ; jmp H ; EXIT:
+    'where the back-edge is an UNCONDITIONAL jmp to the header H and the exit Jcc
+    'leaves the loop forward (past the back-edge).  This is the safe, general loop
+    'form (the increment - if any - stays visible in the body), covering both counted
+    'loops the strict For detector misses and genuine Do While / While...Wend loops.
+    'Emit Do While at the exit Jcc, Loop at the back-edge, and suppress the header
+    'label.  Strict single-back-edge match; a miss just leaves the GoTo form.
+    On Error GoTo done
+    Dim n As Long, k As Long, bi As Long, hi As Long, j As Long, i As Long, inst As CInstruction
+    n = col.Count
+    If n < 4 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For bi = 1 To n - 1
+        'Unconditional back-edge to an earlier header.
+        If (arr(bi).cmdType And C_TYPEMASK) <> C_JMP Then GoTo nextw
+        Dim hdrVA As Long
+        hdrVA = arr(bi).jmpConst
+        If hdrVA = 0 Or hdrVA >= arr(bi).va Then GoTo nextw
+        'Not already claimed by the For detector.
+        If Len(NativeColGet(NVForHdr, "F" & hdrVA)) > 0 Then GoTo nextw
+        'Single back-edge / entry: the header is targeted by exactly this one jump
+        '(extra jumps to it would need multiple Loop ends - leave those as GoTo).
+        Dim refs As Long
+        refs = 0
+        For i = 0 To n - 1
+            If ((arr(i).cmdType And C_TYPEMASK) = C_JMP Or (arr(i).cmdType And C_TYPEMASK) = C_JMC) _
+               And arr(i).jmpConst = hdrVA Then refs = refs + 1
+        Next i
+        If refs <> 1 Then GoTo nextw
+        'Locate the header instruction.
+        hi = -1
+        For i = 0 To bi - 1
+            If arr(i).va = hdrVA Then hi = i: Exit For
+        Next i
+        If hi < 0 Then GoTo nextw
+        'Find the header's exit test: the FIRST cmp/test in the header, immediately
+        'followed by a forward Jcc whose target is past the back-edge.
+        For j = hi To bi - 2
+            Dim mnj As String
+            mnj = NativeMnem(arr(j))
+            If mnj = "CMP" Or mnj = "TEST" Then
+                If (arr(j + 1).cmdType And C_TYPEMASK) = C_JMC Then
+                    'Not an already-consumed scaffolding Jcc (For exit / bounds / fp).
+                    If Len(NativeColGet(NVForSkip, "F" & arr(j + 1).va)) = 0 _
+                       And Len(NativeColGet(NVFpSkip, "P" & arr(j + 1).va)) = 0 Then
+                        If arr(j + 1).jmpConst > arr(bi).va Then
+                            NativeColPut NVWhileCond, "W" & arr(j + 1).va, "1"
+                            NativeColPut NVWhileLoop, "W" & arr(bi).va, "1"
+                            NativeAddUnique NVSkipLabels, hdrVA       'header label -> Do While line
+                        End If
+                    End If
+                End If
+                Exit For                                              'only the first compare heads the loop
+            End If
+        Next j
+nextw:
     Next bi
 done:
 End Sub
@@ -1721,6 +1795,13 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 NativeAddUnique NVSkipLabels, inst.jmpConst
                 Exit Function
             End If
+            'Top-tested Do While header (detected pre-pass): the exit Jcc becomes the
+            'loop condition - the loop runs while the jump is NOT taken.
+            If Len(NativeColGet(NVWhileCond, "W" & inst.va)) > 0 Then
+                NativeProcessInst = ind & "Do While " & NativeCondExpr(mn, True) & vbCrLf
+                NVIndent = NVIndent + 1
+                Exit Function
+            End If
             If inst.jmpConst <= inst.va And NativeHas(NVLoopHdr, inst.jmpConst) Then
                 'Back-edge to a loop header -> the bottom of a Do...Loop
                 If NVIndent > 0 Then NVIndent = NVIndent - 1
@@ -1740,6 +1821,12 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             Exit Function
 
         Case C_JMP
+            If Len(NativeColGet(NVWhileLoop, "W" & inst.va)) > 0 Then
+                'Back-edge of a reconstructed Do While loop -> Loop.
+                If NVIndent > 0 Then NVIndent = NVIndent - 1
+                NativeProcessInst = NativeIndentStr() & "Loop" & vbCrLf
+                Exit Function
+            End If
             If inst.jmpConst <= inst.va And NativeHas(NVLoopHdr, inst.jmpConst) Then
                 'Unconditional back-edge -> bottom of an infinite/top-tested Do...Loop
                 If NVIndent > 0 Then NVIndent = NVIndent - 1
