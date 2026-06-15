@@ -627,6 +627,24 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         End If
                     End If
                 End If
+                'A built-in Form method on Me's OWN vtable: call [Me_vt + off] where
+                'off is a fixed _Form-interface slot (e.g. Hide = 0x2B4).  Gated to a
+                'tracked Me vtable and checked BEFORE the control heuristic because
+                'these offsets fall in the control-accessor range (< 0x2F8) and would
+                'otherwise be mis-read as a control property call.
+                Dim fmeth As String
+                If ocb >= 0 And ocb <= 7 Then
+                    If NVRegIsFormVt(ocb) Then
+                        fmeth = NativeFormMethodByOffset(disp)
+                        If Len(fmeth) > 0 Then
+                            NVPushTop = 0
+                            NVReg(0) = "": NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                            NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                            NativeProcessInst = ind & "Me." & fmeth & vbCrLf
+                            Exit Function
+                        End If
+                    End If
+                End If
                 'A form calling its own method: call [vtable + 0x6F8 + slot*4].
                 'Checked first: requiring a real gFormVtable slot is a stronger
                 'signal than the NVBase control heuristic (which the same form-method
@@ -2487,6 +2505,19 @@ Private Function NativeGlobalObjByOffset(ByVal disp As Long) As String
         Case &H14: NativeGlobalObjByOffset = "App"
         Case &H18: NativeGlobalObjByOffset = "Screen"
         Case &H1C: NativeGlobalObjByOffset = "Clipboard"
+    End Select
+End Function
+
+Private Function NativeFormMethodByOffset(ByVal disp As Long) As String
+    'Built-in VB6 _Form-interface methods at fixed vtable offsets, below the
+    'control-accessor block (0x2F8) and the user-method block (0x6F8).  These are
+    'part of the form runtime interface and stable across programs.  Verified by
+    'tracing real forms (Dungeon frmMainMenu cmdExit/cmdLoad/cmdNew all
+    '`call [Me_vt + 0x2B4]`) and cross-checking the commercial decompiler's Me.Hide.
+    'Only argument-less, value-less methods belong here (rendered as a bare
+    'statement Me.<method>); extend as more offsets are confirmed by tracing.
+    Select Case disp
+        Case &H2B4: NativeFormMethodByOffset = "Hide"
     End Select
 End Function
 
