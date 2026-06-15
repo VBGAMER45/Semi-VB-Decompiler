@@ -1281,6 +1281,15 @@ Public Sub GenerateProject(ByVal sPath As String)
         Next
 
     Else
+        'The API Declare block is emitted once; decide its home up front.  When a
+        'standard module exists it hosts the block (Public); otherwise a form does.
+        gApiDeclEmitted = False
+        gHasStandardModule = False
+        For i = 0 To UBound(gObject)
+            For g = 0 To UBound(gObjectTypeList)
+                If gObject(i).ObjectType = gObjectTypeList(g).value And gObjectTypeList(g).strType = 2 Then gHasStandardModule = True
+            Next g
+        Next
         'Write VB5/6 Forms
         For i = 0 To UBound(gObject)
             For g = 0 To UBound(gObjectTypeList)

@@ -648,6 +648,13 @@ Global gNativeUsedGlobal As Collection   'key "g"&VA -> the global VAs the progr
 Global gNativeArrayGlobal As Collection  'key "g"&VA -> globals used as arrays (ReDim'd) -> "()"
 Global gNativeGlobalClass As Collection  'key "g"&VA -> recovered user class name (As <Class>)
 
+'The Win32 API Declare block (from the VB external table) is project-wide, but the
+'EXE does not record which module owned each Declare - so it is emitted ONCE, as
+'Public, in the first standard module written (else, for a module-less project, as
+'Private in the first form).  gApiDeclEmitted guards against duplicating it.
+Global gApiDeclEmitted As Boolean
+Global gHasStandardModule As Boolean
+
 
 'For Controls
 Public Type typeStandardControlSize
