@@ -1550,6 +1550,10 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NVReg(reg) = NativeGetLocalExpr(disp)
                 ElseIf isAbs And NativeIsGlobalAddr(disp) Then
                     NVReg(reg) = NativeGlobalName(disp)      'load of a module-level global
+                ElseIf Not isAbs And bse = 5 And disp >= 8 And disp <= &H200 Then
+                    NVReg(reg) = "arg_" & Hex$(disp)         'a procedure parameter (ebp+positive)
+                ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 And Left$(NVReg(bse), 4) = "arg_" Then
+                    NVReg(reg) = NVReg(bse)                  'deref of a ByRef parameter pointer -> its value
                 Else
                     NVReg(reg) = ""
                 End If
@@ -2160,6 +2164,10 @@ Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As
             NativeRmVal = NativeGetLocalExpr(disp)
         ElseIf isAbs And NativeIsGlobalAddr(disp) Then
             NativeRmVal = NativeGlobalName(disp)
+        ElseIf Not isAbs And disp >= 8 And disp <= &H200 And NativeMemBase(dump) = 5 Then
+            NativeRmVal = "arg_" & Hex$(disp)        'a procedure parameter (ebp+positive)
+        ElseIf Not isAbs And disp = 0 And md = 0 And rm <> 4 And rm <> 5 Then
+            If Left$(NVReg(rm), 4) = "arg_" Then NativeRmVal = NVReg(rm)   'deref of a ByRef param
         End If
     End If
 End Function
