@@ -661,6 +661,14 @@ Global gFormFieldClass As Collection
 Global gApiDeclEmitted As Boolean
 Global gHasStandardModule As Boolean
 
+'Win32 API constants recognised by value during decompile (e.g. SRCCOPY = &HCC0020)
+'and reconstructed as `Public Const` declarations once, in the first standard module
+'(the names were inlined + stripped, like the Declares).  Keyed by name (dedup);
+'each value is the "<name> = <&Hvalue>" declaration body.  gWin32ConstEmitted guards
+'against duplicating the block.
+Global gUsedWin32Const As Collection
+Global gWin32ConstEmitted As Boolean
+
 
 'For Controls
 Public Type typeStandardControlSize

@@ -3029,21 +3029,45 @@ Private Function NativeSubstituteConstants(ByVal src As String) As String
        And InStr(src, "MaskBlt") = 0 And InStr(src, "PlgBlt") = 0 Then Exit Function
     Dim r As String
     r = src
-    r = NativeReplaceToken(r, "13369376", "SRCCOPY")       '0x00CC0020
-    r = NativeReplaceToken(r, "15597702", "SRCPAINT")      '0x00EE0086
-    r = NativeReplaceToken(r, "8913094", "SRCAND")         '0x008800C6
-    r = NativeReplaceToken(r, "6684742", "SRCINVERT")      '0x00660046
-    r = NativeReplaceToken(r, "4456232", "SRCERASE")       '0x00440328
-    r = NativeReplaceToken(r, "3342344", "NOTSRCCOPY")     '0x00330008
-    r = NativeReplaceToken(r, "1114278", "NOTSRCERASE")    '0x001100A6
-    r = NativeReplaceToken(r, "12583114", "MERGECOPY")     '0x00C000CA
-    r = NativeReplaceToken(r, "12255782", "MERGEPAINT")    '0x00BB0226
-    r = NativeReplaceToken(r, "15728673", "PATCOPY")       '0x00F00021
-    r = NativeReplaceToken(r, "16452617", "PATPAINT")      '0x00FB0A09
-    r = NativeReplaceToken(r, "5898313", "PATINVERT")      '0x005A0049
-    r = NativeReplaceToken(r, "5570569", "DSTINVERT")      '0x00550009
-    r = NativeReplaceToken(r, "16711778", "WHITENESS")     '0x00FF0062
+    r = NativeSubConst(r, "13369376", "SRCCOPY", "&HCC0020")
+    r = NativeSubConst(r, "15597702", "SRCPAINT", "&HEE0086")
+    r = NativeSubConst(r, "8913094", "SRCAND", "&H8800C6")
+    r = NativeSubConst(r, "6684742", "SRCINVERT", "&H660046")
+    r = NativeSubConst(r, "4456232", "SRCERASE", "&H440328")
+    r = NativeSubConst(r, "3342344", "NOTSRCCOPY", "&H330008")
+    r = NativeSubConst(r, "1114278", "NOTSRCERASE", "&H1100A6")
+    r = NativeSubConst(r, "12583114", "MERGECOPY", "&HC000CA")
+    r = NativeSubConst(r, "12255782", "MERGEPAINT", "&HBB0226")
+    r = NativeSubConst(r, "15728673", "PATCOPY", "&HF00021")
+    r = NativeSubConst(r, "16452617", "PATPAINT", "&HFB0A09")
+    r = NativeSubConst(r, "5898313", "PATINVERT", "&H5A0049")
+    r = NativeSubConst(r, "5570569", "DSTINVERT", "&H550009")
+    r = NativeSubConst(r, "16711778", "WHITENESS", "&HFF0062")
     NativeSubstituteConstants = r
+End Function
+
+Private Function NativeSubConst(ByVal src As String, ByVal decVal As String, ByVal name As String, ByVal hexVal As String) As String
+    'Replace decVal -> name (whole-number token); when something was replaced, record
+    'the constant so its `Public Const name = hexVal` declaration is reconstructed.
+    NativeSubConst = NativeReplaceToken(src, decVal, name)
+    If NativeSubConst <> src Then
+        On Error Resume Next
+        If gUsedWin32Const Is Nothing Then Set gUsedWin32Const = New Collection
+        gUsedWin32Const.Add name & " = " & hexVal, name        'keyed by name -> dedup
+        On Error GoTo 0
+    End If
+End Function
+
+Public Function GetWin32ConstBlock(ByVal scope As String) As String
+    'The `<scope> Const NAME = &Hvalue` block for the Win32 constants recognised by
+    'value during this decompile (raster-ops etc.).  Emitted once in the first
+    'standard module, like the API Declare block.
+    If gUsedWin32Const Is Nothing Then Exit Function
+    Dim v As Variant, s As String
+    For Each v In gUsedWin32Const
+        s = s & scope & " Const " & v & vbCrLf
+    Next
+    GetWin32ConstBlock = s
 End Function
 
 Private Function NativeReplaceToken(ByVal src As String, ByVal tok As String, ByVal repl As String) As String

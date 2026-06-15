@@ -1284,6 +1284,7 @@ Public Sub GenerateProject(ByVal sPath As String)
         'The API Declare block is emitted once; decide its home up front.  When a
         'standard module exists it hosts the block (Public); otherwise a form does.
         gApiDeclEmitted = False
+        gWin32ConstEmitted = False
         gHasStandardModule = False
         For i = 0 To UBound(gObject)
             For g = 0 To UBound(gObjectTypeList)

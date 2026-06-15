@@ -1164,6 +1164,15 @@ Sub WriteModules(Filename As String, ObjectName As String, index As Integer)
             If Len(sApiDecl) > 0 Then Print #F, sApiDecl;
             gApiDeclEmitted = True
         End If
+        'Win32 API constants recognised by value (SRCCOPY etc.) - reconstructed as
+        'Public Const declarations once, in the first standard module (same rationale
+        'as the Declare block: the names were inlined and stripped at compile time).
+        If Not gWin32ConstEmitted Then
+            Dim sConst As String
+            sConst = modNativeToVB.GetWin32ConstBlock("Public")
+            If Len(sConst) > 0 Then Print #F, sConst;
+            gWin32ConstEmitted = True
+        End If
         'Reconstruct this module's Public global variable declarations (synthetic
         'global_X names - module var names are stripped in native compilation).
         Dim sGlobals As String
