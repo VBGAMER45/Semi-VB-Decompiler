@@ -107,6 +107,9 @@ Private NVStrCmpReg As Collection  '"P"&strcmpCallVA -> regIdx - the StrCmp resu
 Private NVCounterSlot As Collection '"C"&disp -> "1" - a stack slot that is a loop induction variable (render by name, not a stale value)
 Private NVWhileCond As Collection  '"W"&exitJccVA -> "1" - emit `Do While <cond>` here (top-tested loop header)
 Private NVWhileLoop As Collection  '"W"&backedgeVA -> "1" - emit `Loop` here (the back-edge of a Do While)
+Private NVArgTok() As String       'per-proc: generic tokens (arg_<offset>) to replace with...
+Private NVArgNm() As String        '...their recovered parameter names, at proc finalisation
+Private NVArgN As Long             'count of recovered parameter-name substitutions this proc
 Private NVLastCmp As String        'hint expression for the next If condition
 Private NVStrLits As Collection    'pending string literals (e.g. MsgBox arguments)
 Private NVSkipLabels As Collection 'branch targets that belong to dropped error-check guards
@@ -217,6 +220,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVCounterSlot = New Collection
     Set NVWhileCond = New Collection
     Set NVWhileLoop = New Collection
+    NVArgN = 0
     ReDim NVSelStkBase(31): NVSelTop = 0
     NVBase = NativeSolveControlBase(col)
 
@@ -473,7 +477,7 @@ nextInst:
     If Len(NVPendingCall) > 0 Then output = output & NativeIndentStr() & NVPendingCall & vbCrLf: NVPendingCall = ""
     NativeCloseIfs output, &H7FFFFFFF
     output = output & "End " & NVProcEndWord & vbCrLf
-    DecompileNativeProcToVB = NativeStripOrphanLabels(output)
+    DecompileNativeProcToVB = NativeStripOrphanLabels(NativeSubstituteArgNames(output))
     Exit Function
 fail:
     DecompileNativeProcToVB = "' Error decompiling " & Hex$(addr) & ": " & Err.Description & vbCrLf
@@ -2824,6 +2828,78 @@ Private Function NativeTryMethodSig(ByVal addr As Long, ByRef sig As String) As 
     If Err.Number = 0 Then sig = CStr(v): NativeTryMethodSig = True
 End Function
 
+Private Sub NativeBuildArgNameMap(ByVal addr As Long, ByVal psig As String)
+    'Build the per-proc substitution list mapping the generic arg_<offset> token of
+    'each parameter to its recovered name (applied at proc finalisation, so all the
+    'internal arg_<offset> tracking / detection stays intact).  Params sit at base +
+    'i*4 (base 0xC for a method with a hidden Me at ebp+8, else 0x8); a hidden return
+    'buffer, when present, is a TRAILING slot and does not shift the leading params.
+    NVArgN = 0
+    If Len(psig) = 0 Then Exit Sub
+    Dim parts() As String, i As Long, base As Long, nm As String
+    parts = Split(psig, ", ")
+    base = IIf(NativeProcHasMe(addr), &HC, &H8)
+    ReDim NVArgTok(UBound(parts)): ReDim NVArgNm(UBound(parts))
+    For i = 0 To UBound(parts)
+        nm = Trim$(parts(i))
+        If InStr(nm, " ") > 0 Then nm = Mid$(nm, InStrRev(nm, " ") + 1)   'keep the bare identifier
+        If Len(nm) > 0 And NativeIsIdent(nm) Then
+            NVArgTok(NVArgN) = "arg_" & Hex$(base + i * 4)
+            NVArgNm(NVArgN) = nm
+            NVArgN = NVArgN + 1
+        End If
+    Next
+End Sub
+
+Private Function NativeIsIdent(ByVal s As String) As Boolean
+    'A safe VB identifier (letters / digits / underscore, not starting with a digit).
+    Dim i As Long, c As Long
+    If Len(s) = 0 Then Exit Function
+    For i = 1 To Len(s)
+        c = Asc(Mid$(s, i, 1))
+        If Not ((c >= 65 And c <= 90) Or (c >= 97 And c <= 122) Or c = 95 Or (c >= 48 And c <= 57 And i > 1)) Then Exit Function
+    Next
+    NativeIsIdent = True
+End Function
+
+Private Function NativeSubstituteArgNames(ByVal src As String) As String
+    'Replace each generic arg_<offset> token in the finished proc body with its
+    'recovered parameter name (whole-identifier match, so arg_1 never clobbers part
+    'of arg_10 and a substring inside another identifier / literal is left alone).
+    NativeSubstituteArgNames = src
+    If NVArgN <= 0 Then Exit Function
+    Dim i As Long
+    For i = 0 To NVArgN - 1
+        NativeSubstituteArgNames = NativeReplaceToken(NativeSubstituteArgNames, NVArgTok(i), NVArgNm(i))
+    Next
+End Function
+
+Private Function NativeReplaceToken(ByVal src As String, ByVal tok As String, ByVal repl As String) As String
+    'Replace whole-identifier occurrences of tok with repl (a token boundary is any
+    'char that is not a letter, digit or underscore).
+    Dim res As String, p As Long, q As Long, before As Long, after As Long, tl As Long
+    tl = Len(tok)
+    p = 1
+    Do
+        q = InStr(p, src, tok)
+        If q = 0 Then res = res & Mid$(src, p): Exit Do
+        before = 0: after = 0
+        If q > 1 Then before = Asc(Mid$(src, q - 1, 1))
+        If q + tl <= Len(src) Then after = Asc(Mid$(src, q + tl, 1))
+        If NativeIsIdentChar(before) Or NativeIsIdentChar(after) Then
+            res = res & Mid$(src, p, q - p + tl)            'part of a larger token - keep as-is
+        Else
+            res = res & Mid$(src, p, q - p) & repl
+        End If
+        p = q + tl
+    Loop
+    NativeReplaceToken = res
+End Function
+
+Private Function NativeIsIdentChar(ByVal c As Long) As Boolean
+    NativeIsIdentChar = (c >= 65 And c <= 90) Or (c >= 97 And c <= 122) Or c = 95 Or (c >= 48 And c <= 57)
+End Function
+
 Private Function NativeTryMethodKind(ByVal addr As Long, ByRef kind As String) As Boolean
     'Method kind (Sub/Function/Property Get) recovered from the class typeinfo, keyed
     'by address (filled by modNative.LinkNativePublicParams).
@@ -4655,6 +4731,7 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
         If NativeTryMethodSig(addr, psig) Then
             'Real parameter names from the class typeinfo (FuncDesc table).
             nm = nm & "(" & psig & ")"
+            NativeBuildArgNameMap addr, psig          'use those names in the body too
         Else
             'Generic arg_<offset> list from the `ret N` count.
             nm = nm & "(" & NativeProcParams(kindStr, NativeProcHasMe(addr)) & ")"
