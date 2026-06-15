@@ -2375,11 +2375,14 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
         Case InStr(nm, "__vbaStrToAnsi") > 0, InStr(nm, "__vbaStrToUnicode") > 0
             'Charset conversion: StrToAnsi(dst, src) returns the converted string
             'in eax.  For decompilation the value is just the source string, so
-            'fold it through to the consumer (e.g. an API argument).
+            'fold it through to the consumer (e.g. an API argument).  Pop ONLY the
+            'conversion's own two args and KEEP the rest of the push stack - those are
+            'the surrounding API call's earlier arguments (e.g. LoadImage's uType / cx
+            '/ cy / fuLoad pushed before the string), which clearing here truncated.
             Dim adst As String, asrc As String
             adst = NativeArgPop(): asrc = NativeArgPop()
             If Len(asrc) = 0 Then asrc = adst
-            NVReg(0) = asrc: NVPushTop = 0: NativeRuntimeCall = "": Exit Function
+            NVReg(0) = asrc: NVKeepPushStack = True: NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrCmp") > 0, InStr(nm, "__vbaStrComp") > 0
             '__vbaStrCmp(p1, p2) returns strcmp(p1, p2); p1 is pushed deeper, p2 on
             'top.  When the pre-pass found the boolean materialisation that turns the
