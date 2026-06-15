@@ -283,6 +283,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'instead of a blank <cond>.
     NativeDetectStrCmpCompares col
 
+    'Suppress VB6's SAFEARRAY element-access bounds-check guards (the je/jne/jb
+    'jumps around __vbaGenerateBoundsError) so an array access stops rendering as
+    'bogus nested `If arr <> 0 / If arr = 1 / If (idx - lb) >= cEls` blocks.
+    NativeDetectBoundsChecks col
+
     output = NativeProcHeader(addr) & vbCrLf
 
     For Each inst In col
@@ -358,8 +363,17 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
             NVFpuChk = False: NVLastCmp = ""
             GoTo nextInst
         End If
-        'Suppress the fp-compare boolean-materialization scaffolding.
-        If Len(NativeColGet(NVFpSkip, "P" & inst.va)) > 0 Then GoTo nextInst
+        'Suppress the fp-compare / bounds-check scaffolding.  Still emit the label
+        'when this address is a real jump target (e.g. an On Error handler that lands
+        'on a suppressed bounds-error call) so the branch to it does not dangle; a
+        'label nothing references is removed later by the orphan-label strip.
+        If Len(NativeColGet(NVFpSkip, "P" & inst.va)) > 0 Then
+            If NativeHas(labels, inst.va) And Not NativeIsIfTarget(inst.va) _
+               And Not NativeHas(NVSkipLabels, inst.va) And Not NativeHas(NVLoopHdr, inst.va) Then
+                output = output & "loc_" & Right$("00000000" & Hex$(inst.va), 8) & ":" & vbCrLf
+            End If
+            GoTo nextInst
+        End If
 
         '--- For loop transitions ---
         'Suppress a recognised For loop's exit Jcc (the For header below replaces it).
@@ -819,6 +833,104 @@ nextk2:
     Next k
 done:
 End Sub
+
+Private Sub NativeDetectBoundsChecks(col As Collection)
+    'VB6 SAFEARRAY element access emits a bounds-check guard before computing the
+    'element address:
+    '    test ARR,ARR / je ERR ; cmp word[ARR],1 / jne ERR ; ... index math ... ;
+    '    cmp IDX,cElements / jb OK ; call __vbaGenerateBoundsError ; OK: lea ... ;
+    '    jmp NEXT ; ERR: call __vbaGenerateBoundsError ; NEXT: ...
+    'None of it is user code, but the je/jne/jb guards otherwise become bogus nested
+    'If blocks (If arr <> 0 / If arr = 1 / If (idx - lb) >= cEls).  Suppress the guard
+    'jumps, their feeding cmp/test, the skip-over jmp, and the bounds-error calls; the
+    'kept mov/sub/lea still compute the element, and the orphaned ERR/OK/NEXT labels
+    'strip out.  Anchored strictly on __vbaGenerateBoundsError calls (no other
+    'construct branches to one), so it cannot misfire on real conditionals.
+    On Error GoTo done
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    If n < 2 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    'Pass 1: flag the __vbaGenerateBoundsError calls and drop them.  The error helper
+    'is called either directly (`call [iat]`) or, when the proc calls it more than
+    'once, through a register VB caches it into (`mov ebx,[iat]; call ebx`); track
+    'which register currently holds it so the indirect form is recognised too.
+    Dim isBerr() As Boolean, disp As Long, isAbs As Boolean, hasMem As Boolean
+    Dim regBerr(7) As Boolean, di As Long, ci As Long, cr As String
+    ReDim isBerr(n - 1)
+    For k = 0 To n - 1
+        If NativeMnem(arr(k)) = "MOV" Then
+            di = NativeRegIndex(UCase$(NativeFirstReg(arr(k).command)))
+            If di >= 0 And di <= 7 Then _
+                regBerr(di) = (InStr(NativeApiName(arr(k)), "__vbaGenerateBoundsError") > 0)
+        ElseIf (arr(k).cmdType And C_TYPEMASK) = C_CAL Then
+            hasMem = NativeDecodeDisp(arr(k).dump, disp, isAbs)
+            Dim berr As Boolean
+            berr = False
+            If hasMem And isAbs Then
+                berr = (InStr(dsmNative.GetApiByIatVa(disp), "__vbaGenerateBoundsError") > 0)
+            ElseIf Not hasMem Then
+                cr = UCase$(Trim$(Mid$(Trim$(arr(k).command), 5)))   'call REG
+                ci = NativeRegIndex(cr)
+                If ci >= 0 And ci <= 7 Then berr = regBerr(ci)
+            End If
+            'Flag it as a bounds-error call so guard jumps targeting it are dropped,
+            'but DON'T suppress the call itself: let it render through NativeRuntimeCall
+            '(which silently drops __vbaGenerateBoundsError AND clears the push stack,
+            'so a stray arg can't leak into the next real call).
+            If berr Then isBerr(k) = True
+        End If
+    Next
+    'Pass 2: suppress the guard jumps (+ feeding compare) and the skip-over jmp.
+    'A jump points at / skips over a bounds-error STUB, which is the error call
+    'optionally preceded by a `mov REG,[iat]` that loads the helper - so test for the
+    'stub, not just the bare call.
+    For k = 0 To n - 1
+        Dim cls As Long, guard As Boolean
+        cls = arr(k).cmdType And C_TYPEMASK
+        If cls = C_JMC Then
+            guard = False
+            If NativeBerrStubFromIdx(arr, n, isBerr, NativeIdxOfVa(arr, n, arr(k).jmpConst)) Then guard = True  'je/jne -> ERR
+            If NativeBerrStubFromIdx(arr, n, isBerr, k + 1) Then guard = True   'jb over a fall-through ERR
+            If guard Then
+                NativeColPut NVFpSkip, "P" & arr(k).va, "1"
+                If k - 1 >= 0 Then
+                    Dim pm As String
+                    pm = NativeMnem(arr(k - 1))
+                    If pm = "CMP" Or pm = "TEST" Then NativeColPut NVFpSkip, "P" & arr(k - 1).va, "1"
+                End If
+            End If
+        ElseIf cls = C_JMP Then
+            'The unconditional jmp that skips over an ERR stub (jmp NEXT around ERR).
+            If NativeBerrStubFromIdx(arr, n, isBerr, k + 1) Then NativeColPut NVFpSkip, "P" & arr(k).va, "1"
+        End If
+    Next
+done:
+End Sub
+
+Private Function NativeIdxOfVa(arr() As CInstruction, ByVal n As Long, ByVal va As Long) As Long
+    Dim k As Long
+    NativeIdxOfVa = -1
+    If va = 0 Then Exit Function
+    For k = 0 To n - 1
+        If arr(k).va = va Then NativeIdxOfVa = k: Exit Function
+    Next
+End Function
+
+Private Function NativeBerrStubFromIdx(arr() As CInstruction, ByVal n As Long, isBerr() As Boolean, ByVal idx As Long) As Boolean
+    'True when a bounds-error call begins at idx, allowing the `mov REG,[iat]` helper
+    'load(s) VB places just before an indirect `call REG` (only movs may precede).
+    Dim j As Long, lim As Long
+    If idx < 0 Then Exit Function
+    lim = idx + 3: If lim > n - 1 Then lim = n - 1
+    For j = idx To lim
+        If isBerr(j) Then NativeBerrStubFromIdx = True: Exit Function
+        If NativeMnem(arr(j)) <> "MOV" Then Exit Function
+    Next
+End Function
 
 Private Sub NativeDetectStrCmpCompares(col As Collection)
     'Recognise VB6's string relational:
