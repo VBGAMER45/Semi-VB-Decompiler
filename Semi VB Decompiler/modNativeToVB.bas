@@ -1512,7 +1512,37 @@ Private Function NativeControlProp(ByVal ctlName As String, ByVal guid As String
             NativeControlProp = ctlName & "." & propName & " = " & valExpr
             NativeResetValue
         Case Else
-            NativeControlProp = "' " & ctlName & "." & propName & "()"
+            'A control METHOD (Refresh, Cls, Line, Move, SetFocus, ...).  Emit a
+            'real statement with its arguments instead of a dropped comment.  The
+            'vtable call pushes the control `this` last (so it is the first
+            'source-order arg) - drop it when present; the rest are the method args.
+            Dim mArgs As String, mParts() As String, mk As Long, mOut As String, mLo As Long, mN As Long
+            mArgs = NativeArgList()
+            mLo = 0
+            If Len(mArgs) > 0 Then
+                mParts = Split(mArgs, ", ")
+                If mParts(0) = ctlName Then mLo = 1           'drop the leading `this`
+                mN = UBound(mParts) - mLo + 1                 'real argument count
+            End If
+            'The graphics methods use a special coordinate syntax that the flat
+            'vtable argument order does not.  Line's params are
+            '[flags, x1, y1, x2, y2, color] -> `Line (x1, y1)-(x2, y2), color`.
+            If propName = "Line" And mN >= 6 Then
+                NativeControlProp = ctlName & ".Line (" & mParts(mLo + 1) & ", " & mParts(mLo + 2) & ")-(" _
+                                  & mParts(mLo + 3) & ", " & mParts(mLo + 4) & "), " & mParts(mLo + 5)
+            ElseIf propName = "PSet" And mN >= 4 Then
+                NativeControlProp = ctlName & ".PSet (" & mParts(mLo + 1) & ", " & mParts(mLo + 2) & "), " & mParts(mLo + 3)
+            Else
+                For mk = mLo To mLo + mN - 1
+                    If Len(mOut) > 0 Then mOut = mOut & ", "
+                    mOut = mOut & mParts(mk)
+                Next
+                If Len(mOut) > 0 Then
+                    NativeControlProp = ctlName & "." & propName & " " & mOut
+                Else
+                    NativeControlProp = ctlName & "." & propName
+                End If
+            End If
     End Select
 End Function
 
