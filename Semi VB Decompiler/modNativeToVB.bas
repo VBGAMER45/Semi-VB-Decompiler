@@ -1275,6 +1275,15 @@ Private Function NativeTryMethodSig(ByVal addr As Long, ByRef sig As String) As 
     If Err.Number = 0 Then sig = CStr(v): NativeTryMethodSig = True
 End Function
 
+Private Function NativeTryMethodKind(ByVal addr As Long, ByRef kind As String) As Boolean
+    'Method kind (Sub/Function/Property Get) recovered from the class typeinfo, keyed
+    'by address (filled by modNative.LinkNativePublicParams).
+    On Error Resume Next
+    Dim v As Variant
+    v = gMethodKind("A" & addr)
+    If Err.Number = 0 Then kind = CStr(v): NativeTryMethodKind = True
+End Function
+
 Private Function NativeArgCount(ByVal csv As String) As Long
     If Len(csv) = 0 Then Exit Function
     NativeArgCount = UBound(Split(csv, ", ")) + 1
@@ -2473,6 +2482,14 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
             kindStr = SubNamelist(idx).kind          '"Function" / "Property Get" / ...
             If InStr(kindStr, "Property") > 0 Then NVProcEndWord = "Property" Else NVProcEndWord = kindStr
         End If
+    End If
+    'A public class method's true kind (Function / Property Get / Sub) comes from its
+    'typeinfo FuncDesc.  Apply it unless the Get/Let adjacency pass already tagged it
+    'a Property (that pairing distinguishes the Let half, which the FuncDesc does not).
+    Dim mkind As String
+    If InStr(kindStr, "Property") = 0 And NativeTryMethodKind(addr, mkind) Then
+        kindStr = mkind
+        If InStr(kindStr, "Property") > 0 Then NVProcEndWord = "Property" Else NVProcEndWord = kindStr
     End If
     'Add the parameter list when the name carries no signature yet (event handlers
     'already get a typed one from getEventComplete).  Parameters are named generically

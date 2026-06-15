@@ -625,6 +625,9 @@ Global gFormVtable As Collection
 'reconstructed parameter-name list (CSV), recovered from the object's compiled
 'typeinfo (FuncDesc table).  Populated by modNative.LinkNativePublicParams.
 Global gMethodSig As Collection
+'Parallel map: "A"&addr -> method kind ("Sub" / "Function" / "Property Get") from
+'the same FuncDesc, so the header and End keyword match the source.
+Global gMethodKind As Collection
 
 
 'For Controls

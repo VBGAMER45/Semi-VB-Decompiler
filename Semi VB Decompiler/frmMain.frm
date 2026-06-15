@@ -1478,6 +1478,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
     ReDim modNative.gNativeProcArray(0)
     Set gFormVtable = New Collection
     Set gMethodSig = New Collection
+    Set gMethodKind = New Collection
     Close
     'clear the nodes
     tvProject.Nodes.Clear

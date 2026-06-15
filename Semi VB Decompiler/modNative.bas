@@ -509,7 +509,7 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
     Dim a18 As Long, arr As Long, j As Long
     Dim p As Long, f00 As Long, voff As Long, b0 As Long, b1 As Long, nP As Long
     Dim pnl As Long, k As Long, nameVA As Long, sig As String, nm As String
-    Dim addr As Long, v As Variant
+    Dim addr As Long, v As Variant, kind As String, fflags As Long
 
     For oi = 0 To UBound(gObjectNameArray)
         'Public COM interface (class / usercontrol) only - this byte encoding and
@@ -555,6 +555,16 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
             b1 = (f00 \ &H100) And &H1            'hidden return slot bit
             nP = (b0 \ 4) - b1
             If nP < 0 Then nP = 0
+            'Method kind: the property bit (flags & 0x800) marks a Property Get;
+            'else the hidden-return-slot bit (b1) distinguishes Function from Sub.
+            fflags = NativeFileDword(F, p + &HC) \ &H10000
+            If (fflags And &H800) <> 0 Then
+                kind = "Property Get"
+            ElseIf b1 = 1 Then
+                kind = "Function"
+            Else
+                kind = "Sub"
+            End If
             pnl = NativeFileDword(F, p + &H10)
             sig = ""
             For k = 0 To nP - 1
@@ -580,6 +590,8 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
                 On Error Resume Next
                 gMethodSig.Remove "A" & addr
                 gMethodSig.Add sig, "A" & addr
+                gMethodKind.Remove "A" & addr
+                gMethodKind.Add kind, "A" & addr
                 On Error GoTo done
             End If
         Next j
