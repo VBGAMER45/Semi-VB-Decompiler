@@ -804,6 +804,15 @@ Public Function GetApiDeclareBlock() As String
     Next
     GetApiDeclareBlock = s
 End Function
+
+Public Function GetFieldDeclBlock(ByVal owner As String) As String
+    'The reconstructed "Public <var> As <Type>" declaration block for an object,
+    'recovered from its typeinfo VarDesc array (modNative.LinkNativePublicParams).
+    'Empty when the object has no recovered public variables.
+    On Error Resume Next
+    GetFieldDeclBlock = gFieldDecl(owner)
+End Function
+
 Sub WriteObjectProcedures(ByVal F As Long, ByVal ObjectName As String, ByVal includeEvents As Boolean)
 '*****************************
 'Purpose: Emit the decompiled procedure bodies for ObjectName into an already
@@ -963,6 +972,11 @@ On Error GoTo nofile:
             Dim sApiDecl As String
             sApiDecl = GetApiDeclareBlock()
             If Len(sApiDecl) > 0 Then Print #F, sApiDecl;
+            'Reconstruct this object's module-level Public variable declarations
+            '(from the typeinfo VarDesc), scoped to this form by name.
+            Dim sVarDecl As String
+            sVarDecl = GetFieldDeclBlock(FormName)
+            If Len(sVarDecl) > 0 Then Print #F, sVarDecl;
             If VBVersion <> 4 Then
                 'Decompiled procedure bodies - the same code shown on the Code
                 'tab (native cache or P-Code decompile) - including form events.

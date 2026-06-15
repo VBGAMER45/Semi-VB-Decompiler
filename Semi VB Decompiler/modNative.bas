@@ -502,6 +502,26 @@ Private Function NativeIsFuncDesc(ByVal F As Integer, ByVal p As Long) As Boolea
     NativeIsFuncDesc = (voff >= &H1C And voff <= &H2000)
 End Function
 
+Private Function NativeVarTypeName(ByVal tc As Long, ByVal byteSize As Long) As String
+    'Map a typeinfo VarDesc type code (the +0x18 field) to a VB type name.  Verified
+    'across Dungeon + RPGWOEdit: 3 = Boolean, 6 = Integer, 0x10 = String.  An unknown
+    'code falls back to the declared byte size (the gap to the next field's instance
+    'offset): 1 = Byte, 2 = Integer, 8 = Double, else Long - correct for the common
+    'cases; extend the Select as more codes are confirmed.
+    Select Case tc
+        Case 3: NativeVarTypeName = "Boolean"
+        Case 6: NativeVarTypeName = "Integer"
+        Case &H10: NativeVarTypeName = "String"
+        Case Else
+            Select Case byteSize
+                Case 1: NativeVarTypeName = "Byte"
+                Case 2: NativeVarTypeName = "Integer"
+                Case 8: NativeVarTypeName = "Double"
+                Case Else: NativeVarTypeName = "Long"
+            End Select
+    End Select
+End Function
+
 Public Sub LinkNativePublicParams(ByVal F As Integer)
     On Error GoTo done
     Dim oi As Long, aoi As Long, hdr As Long, owner As String
@@ -529,14 +549,17 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
         'declaration order).  Store name keyed "Owner:<decimal offset>" so a
         '`mov [Me+off], value` store renders the real name instead of field_<off>.
         Dim vCnt As Long, vArr As Long, vi As Long, vd As Long, vNameVA As Long, vInstOff As Long, vNm As String
+        Dim vType As Long, vN() As String, vO() As Long, vT() As Long, vK As Long
         vCnt = NativeFileDword(F, hdr + &H10)
         vArr = NativeFileDword(F, hdr + &H20)
         If vCnt > 0 And vCnt <= 1000 And vArr >= OptHeader.ImageBase Then
+            ReDim vN(vCnt): ReDim vO(vCnt): ReDim vT(vCnt): vK = 0
             For vi = 0 To vCnt - 1
                 vd = NativeFileDword(F, vArr + vi * 4)
                 If vd >= OptHeader.ImageBase Then
                     vNameVA = NativeFileDword(F, vd)
-                    vInstOff = NativeFileDword(F, vd + &H14)
+                    vInstOff = NativeFileDword(F, vd + &H14)        'instance byte offset
+                    vType = NativeFileDword(F, vd + &H18)           'VB type code (3=Bool,6=Int,0x10=String)
                     'Validate: a real per-instance field name pointer and a plausible
                     'instance offset (forms start vars at 0x34; guard the range).
                     If vNameVA >= OptHeader.ImageBase And vInstOff >= &H30 And vInstOff < &H2000 Then
@@ -547,10 +570,25 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
                             gFieldName.Remove owner & ":" & vInstOff
                             gFieldName.Add vNm, owner & ":" & vInstOff
                             On Error GoTo done
+                            vN(vK) = vNm: vO(vK) = vInstOff: vT(vK) = vType: vK = vK + 1
                         End If
                     End If
                 End If
             Next vi
+            'Build the Public declaration block (declaration order = offset order),
+            'sizing an unknown type code from the gap to the next field's offset.
+            If vK > 0 Then
+                Dim declB As String, vsz As Long, vq As Long
+                declB = ""                              'reset per object (Dim is function-scoped)
+                For vq = 0 To vK - 1
+                    If vq < vK - 1 Then vsz = vO(vq + 1) - vO(vq) Else vsz = 4
+                    declB = declB & "Public " & vN(vq) & " As " & NativeVarTypeName(vT(vq), vsz) & vbCrLf
+                Next vq
+                On Error Resume Next
+                gFieldDecl.Remove owner
+                gFieldDecl.Add declB, owner
+                On Error GoTo done
+            End If
         End If
 
         isClass = ((gObject(oi).ObjectType And &H100000) <> 0)

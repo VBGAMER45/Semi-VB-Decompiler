@@ -1480,6 +1480,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
     Set gMethodSig = New Collection
     Set gMethodKind = New Collection
     Set gFieldName = New Collection
+    Set gFieldDecl = New Collection
     Close
     'clear the nodes
     tvProject.Nodes.Clear

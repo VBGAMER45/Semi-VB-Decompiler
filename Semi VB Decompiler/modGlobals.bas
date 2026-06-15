@@ -635,6 +635,11 @@ Global gMethodKind As Collection
 'synthetic field_<off>.  Populated from the object's typeinfo VarDesc records.
 Global gFieldName As Collection
 
+'Maps an object NAME -> its reconstructed module-level Public variable declaration
+'block ("Public flgExit As Boolean" & vbCrLf & ...), in declaration order, emitted
+'at the top of the form/class like the API Declare block.  From the same VarDesc.
+Global gFieldDecl As Collection
+
 
 'For Controls
 Public Type typeStandardControlSize
