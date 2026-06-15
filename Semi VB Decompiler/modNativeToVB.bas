@@ -1914,20 +1914,37 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NVRegObjVtGuid(reg) = NVRegObjGuid(bse)   'deref of a control pointer -> its vtable carries the GUID
                 End If
             End If
-        Case &H8D                       'lea r32, [mem]  (address-of)
+        Case &H8D                       'lea r32, [mem]  (address-of / ptr arithmetic)
             modrm = NativeDumpByte(dump, i + 1)
             reg = (modrm \ 8) And 7
             If NativeDecodeDisp(dump, disp, isAbs) Then
-                'LEA takes the ADDRESS of a local.  Keep its value in NVReg (a
-                'read of the register wants the value), but ALSO remember the
-                'local's name so that PUSHing the register - passing the local by
-                'reference - shows the local, not its (often 0/stale) value.
-                If Not isAbs And disp < 0 Then
+                Dim lbse As Long
+                lbse = NativeMemBase(dump)
+                'LEA on [ebp-X] takes the ADDRESS of a local.  Keep its value in
+                'NVReg (a read of the register wants the value), but ALSO remember
+                'the local's name so a later PUSH of the register - passing the
+                'local by reference - shows the local, not its (often 0/stale)
+                'value.  Gated to base = ebp(5): otherwise a `lea esi,[edi-1]`
+                '(index arithmetic i-1) was mislabelled as the local var_1.
+                If Not isAbs And disp < 0 And lbse = 5 And NativeMemIndex(dump) < 0 Then
                     NVReg(reg) = NativeGetLocalExpr(disp)
                     NVRegIsAddr(reg) = True: NVRegAddr(reg) = "var_" & Hex$(Abs(disp)): NVRegAddrDisp(reg) = disp
                 ElseIf isAbs And NativeIsGlobalAddr(disp) Then
                     'address-of a module-level global (e.g. an array passed by ref)
                     NVReg(reg) = NativeGlobalName(disp): NVRegIsAddr(reg) = False
+                ElseIf Not isAbs And lbse >= 0 And lbse <= 7 And lbse <> 5 And NativeMemIndex(dump) < 0 _
+                       And Len(NVReg(lbse)) > 0 And Not NativeIsNumLit(NVReg(lbse)) Then
+                    'lea reg,[base+disp] on a tracked non-constant base = address /
+                    'index arithmetic, e.g. lea esi,[edi-1] -> the zero-based index
+                    'i-1 (used to index a 0-based SAFEARRAY from a 1-based counter).
+                    If disp = 0 Then
+                        NVReg(reg) = NVReg(lbse)
+                    ElseIf disp < 0 Then
+                        NVReg(reg) = "(" & NVReg(lbse) & " - " & CStr(-disp) & ")"
+                    Else
+                        NVReg(reg) = "(" & NVReg(lbse) & " + " & CStr(disp) & ")"
+                    End If
+                    NVRegIsAddr(reg) = False
                 Else
                     NVReg(reg) = "": NVRegIsAddr(reg) = False
                 End If
@@ -2669,8 +2686,43 @@ Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As
                     NativeRmVal = NVReg(bse) & "(" & CStr(disp) & ")"
                 End If
             End If
+        ElseIf Not isAbs And NativeMemIndex(dump) >= 0 Then
+            'SIB [base + index*scale + disp] -> a SAFEARRAY / array element access.
+            'One register holds the array DATA pointer (a module-level global in
+            'this code's arrays), the other the element index.  Render in the
+            'base(offset) style as <ptr>(<index>) [ (fieldDisp) ].  Fire only when
+            'exactly one register holds a global_ pointer and the other a clean
+            'index value (not a bare, untracked register), so we never emit
+            'nonsense like eax(ecx); those stay <cond>.
+            Dim sb As Long, si As Long, pv As String, iv As String
+            sb = NativeMemBase(dump): si = NativeMemIndex(dump)
+            If sb >= 0 And sb <= 7 And si >= 0 And si <= 7 Then
+                If Left$(NVReg(sb), 7) = "global_" And Left$(NVReg(si), 7) <> "global_" Then
+                    pv = NVReg(sb): iv = NVReg(si)
+                ElseIf Left$(NVReg(si), 7) = "global_" And Left$(NVReg(sb), 7) <> "global_" Then
+                    pv = NVReg(si): iv = NVReg(sb)
+                End If
+                If Len(pv) > 0 And NativeIsCleanIndex(iv) Then
+                    If disp = 0 Then
+                        NativeRmVal = pv & "(" & iv & ")"
+                    Else
+                        NativeRmVal = pv & "(" & iv & ")(" & CStr(disp) & ")"
+                    End If
+                End If
+            End If
         End If
     End If
+End Function
+
+Private Function NativeIsCleanIndex(ByVal s As String) As Boolean
+    'A SAFEARRAY element index we are willing to render inside base(index): a
+    'number, a local / parameter / global, or a folded arithmetic expression -
+    'but NOT a bare untracked register (eax, ecx, ...) which would be meaningless.
+    If Len(s) = 0 Then Exit Function
+    Select Case s
+        Case "eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi": Exit Function
+    End Select
+    NativeIsCleanIndex = True
 End Function
 
 Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
