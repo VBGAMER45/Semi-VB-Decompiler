@@ -99,7 +99,12 @@ Function DisasmBytes(b() As Byte, va As Long) As CInstruction
         'End If
     
     x = InStr(dump, Chr(0)) - 1
-    ret.dump = Mid$(dump, 1, x)
+    'olly.dll separates a prefix byte from the opcode with a colon (e.g. 66:C746,
+    '64:A1).  That colon survives the consumers' space-stripping and makes the
+    'byte-pair parsers read ":C" as hex and bail - so every PREFIXED instruction
+    '(operand-size 0x66 word ops, FS/GS-segment SEH setup, rep) failed to decode.
+    'Strip it here, at the single source, so the whole engine sees clean hex.
+    ret.dump = Replace(Mid$(dump, 1, x), ":", "")
     'If x < 30 Then dump = dump & Space(30 - x)
 
     'Capture the analysis data olly.dll already computed (previously discarded).

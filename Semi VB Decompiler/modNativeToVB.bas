@@ -1821,7 +1821,14 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H8B                       'mov r32, r/m32
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
-            If md = 3 Then
+            If NativeHas66(dump) Then
+                'A 16-bit move (mov si,ax) writes only the LOW WORD of the dest; we
+                'model whole 32-bit values, so the dest is now unknown.  Copying the
+                'source clobbered the high half with a stale value and collapsed
+                'conditions like `SendMessage(...) <> 0` into `0 <> 0`.
+                NVReg(reg) = "": NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+            ElseIf md = 3 Then
                 NVReg(reg) = NVReg(rm)
                 NVRegIsAddr(reg) = NVRegIsAddr(rm): NVRegAddr(reg) = NVRegAddr(rm): NVRegAddrDisp(reg) = NVRegAddrDisp(rm)   'address propagates on reg->reg
                 NVRegIsMe(reg) = NVRegIsMe(rm): NVRegIsFormVt(reg) = NVRegIsFormVt(rm)
@@ -1895,7 +1902,13 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H89                       'mov r/m32, r32 (store)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
-            If md = 3 Then
+            If NativeHas66(dump) And md = 3 Then
+                '16-bit reg->reg write (mov bx,ax): partial, so the dest register's
+                'tracked 32-bit value is now unknown.  (A 16-bit write to MEMORY -
+                'the word field stores - falls through to the store path below.)
+                NVReg(rm) = "": NVRegIsAddr(rm) = False: NVRegIsMe(rm) = False: NVRegIsFormVt(rm) = False
+                NVRegObjType(rm) = "": NVRegObjVt(rm) = "": NVRegObjGuid(rm) = "": NVRegObjVtGuid(rm) = ""
+            ElseIf md = 3 Then
                 NVReg(rm) = NVReg(reg)
                 NVRegIsAddr(rm) = NVRegIsAddr(reg): NVRegAddr(rm) = NVRegAddr(reg): NVRegAddrDisp(rm) = NVRegAddrDisp(reg)
                 NVRegIsMe(rm) = NVRegIsMe(reg): NVRegIsFormVt(rm) = NVRegIsFormVt(reg)
@@ -2185,15 +2198,22 @@ Private Sub NativeSplitProp(ByVal gp As String, ByRef propName As String, ByRef 
 End Sub
 
 Private Function NativeNumFromBits(ByVal bits As Long) As String
-    Dim s As Single
+    'Render a 32-bit constant: as a Single when its bits form a real (finite,
+    'non-tiny) float, else as the integer value.  The integer is set FIRST as the
+    'default so a NaN/Inf bit pattern (e.g. 0xFFFFFFFF = -1, a Boolean True) - whose
+    'Int(s) would raise under On Error Resume Next and blank the result - still
+    'yields a value.  isFloat is computed in one guarded step (no Int() on NaN).
+    Dim s As Single, isFloat As Boolean
     On Error Resume Next
+    NativeNumFromBits = CStr(bits)
     CopyMemory s, bits, 4
-    If Abs(s) >= 0.0001 And Abs(s) < 1E+18 And s = Int(s) Then
-        NativeNumFromBits = CStr(CLng(s))
-    ElseIf Abs(s) >= 0.0001 And Abs(s) < 1E+18 Then
-        NativeNumFromBits = Format$(s)
-    Else
-        NativeNumFromBits = CStr(bits)
+    isFloat = (Abs(s) >= 0.0001 And Abs(s) < 1E+18)
+    If isFloat Then
+        If s = Int(s) Then
+            NativeNumFromBits = CStr(CLng(s))
+        Else
+            NativeNumFromBits = Format$(s)
+        End If
     End If
 End Function
 
@@ -2618,6 +2638,17 @@ Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
     isTst = (mn = "TEST")
     modrm = NativeDumpByte(dump, i + 1)
     md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+    'A 16-bit (0x66) compare whose operand is a REGISTER is part of VB6's Boolean
+    'evaluation juggling (setcc/neg/mov si,ax/cmp si,bx) - its register operands are
+    'low-word partials our 32-bit model can't follow, so resolving them yields
+    'garbage like `0 <> 0`.  Resolve a word compare ONLY when its r/m is MEMORY (the
+    'Integer/Boolean FIELD compares, e.g. global_X(12) <> 0); otherwise leave <cond>.
+    If NativeHas66(dump) Then
+        Select Case op
+            Case &H3D, &HA9: GoTo done3                  'cmp/test ax, imm - 16-bit accumulator
+            Case Else: If md = 3 Then GoTo done3          'r/m is a register
+        End Select
+    End If
     Select Case op
         Case &H85                       'test r/m32, r32
             L = NativeRmVal(dump, md, rm): R = "0": isTst = True
