@@ -104,6 +104,7 @@ Private NVForCnt As Long           'per-proc loop-variable name allocation index
 Private NVFpCmp As Collection      '"P"&testVA -> "<relOp>|<regIdx>" - set NVReg(reg) to the relational
 Private NVFpSkip As Collection     '"P"&va -> "1" - suppress this scaffolding instruction
 Private NVStrCmpReg As Collection  '"P"&strcmpCallVA -> regIdx - the StrCmp result boolean-materializes into this register
+Private NVCounterSlot As Collection '"C"&disp -> "1" - a stack slot that is a loop induction variable (render by name, not a stale value)
 Private NVLastCmp As String        'hint expression for the next If condition
 Private NVStrLits As Collection    'pending string literals (e.g. MsgBox arguments)
 Private NVSkipLabels As Collection 'branch targets that belong to dropped error-check guards
@@ -211,6 +212,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVFpCmp = New Collection
     Set NVFpSkip = New Collection
     Set NVStrCmpReg = New Collection
+    Set NVCounterSlot = New Collection
     ReDim NVSelStkBase(31): NVSelTop = 0
     NVBase = NativeSolveControlBase(col)
 
@@ -282,6 +284,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'Bind the equality relational to that register so the branch reads `a = b`
     'instead of a blank <cond>.
     NativeDetectStrCmpCompares col
+
+    'Mark stack slots that are loop induction variables (written AND read inside a
+    'backward-branch loop) so they render by their variable name rather than a stale
+    'per-iteration value.  Loop-type-agnostic (For / Do While / Do Until / While).
+    NativeDetectCounterSlots col
 
     'Suppress VB6's SAFEARRAY element-access bounds-check guards (the je/jne/jb
     'jumps around __vbaGenerateBoundsError) so an array access stops rendering as
@@ -606,6 +613,102 @@ nextk:
     Next k
 done:
 End Sub
+
+Private Sub NativeDetectCounterSlots(col As Collection)
+    'Mark ebp-relative stack slots that are loop induction variables: a slot WRITTEN
+    'and READ within the span of a backward branch (any loop - For / Do While / Do
+    'Until / While...Wend).  Such a slot holds a different value each iteration, so the
+    'store handler renders it by name (var_X) with the assignment surfaced, instead of
+    'binding a single stale value that then leaks into the loop header / body as a
+    'constant (e.g. `If 1 <= 10` for a register counter mirrored to var_24).
+    On Error GoTo done
+    Dim n As Long, k As Long, bi As Long, i As Long, inst As CInstruction
+    n = col.Count
+    If n < 3 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For bi = 1 To n - 1
+        Dim cls As Long
+        cls = arr(bi).cmdType And C_TYPEMASK
+        If (cls = C_JMP Or cls = C_JMC) And arr(bi).jmpConst <> 0 And arr(bi).jmpConst < arr(bi).va Then
+            'A backward branch: the loop body spans [hdrVA, this branch].
+            Dim hdrVA As Long, wrote As Collection, readd As Collection
+            hdrVA = arr(bi).jmpConst
+            Set wrote = New Collection: Set readd = New Collection
+            For i = 0 To n - 1
+                If arr(i).va >= hdrVA And arr(i).va <= arr(bi).va Then
+                    Dim wd As Long, rd As Long
+                    wd = NativeStackStoreDisp(arr(i))
+                    If wd < 0 Then NativeColPut wrote, "S" & wd, "1"
+                    rd = NativeStackLoadDisp(arr(i))
+                    If rd < 0 Then NativeColPut readd, "S" & rd, "1"
+                End If
+            Next
+            'A slot written AND read in the loop is an induction variable.
+            Dim ki As Long
+            For ki = 0 To n - 1
+                If arr(ki).va >= hdrVA And arr(ki).va <= arr(bi).va Then
+                    Dim sd As Long
+                    sd = NativeStackStoreDisp(arr(ki))
+                    If sd < 0 Then
+                        If Len(NativeColGet(readd, "S" & sd)) > 0 Then NativeColPut NVCounterSlot, "C" & sd, "1"
+                    End If
+                End If
+            Next
+        End If
+    Next
+done:
+End Sub
+
+Private Function NativeStackStoreDisp(inst As CInstruction) As Long
+    'ebp-relative displacement (negative) written by `mov [ebp-X], r32` (89 /r),
+    '`inc [ebp-X]` (FF /0) or `add/sub [ebp-X], imm` (83 or 81 /0 /5); else 1.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, md As Long, reg As Long, disp As Long, isAbs As Boolean
+    NativeStackStoreDisp = 1
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7
+    If md = 3 Then Exit Function                        'register destination, not a slot
+    Select Case op
+        Case &H89                                        'mov r/m32, r32
+        Case &HFF: If reg <> 0 Then Exit Function         'inc -> /0
+        Case &H83, &H81: If reg <> 0 And reg <> 5 Then Exit Function   'add /0 or sub /5
+        Case Else: Exit Function
+    End Select
+    If NativeDecodeDisp(dump, disp, isAbs) Then
+        If Not isAbs And disp < 0 Then NativeStackStoreDisp = disp
+    End If
+End Function
+
+Private Function NativeStackLoadDisp(inst As CInstruction) As Long
+    'ebp-relative displacement (negative) READ by an instruction whose memory operand
+    'is [ebp-X] and is a source (mov r32,[ebp-X] / cmp / add / or ... reg,[ebp-X]);
+    'else 1.  A broad read test - any non-store memory reference to a stack slot.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, md As Long, disp As Long, isAbs As Boolean
+    NativeStackLoadDisp = 1
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3
+    If md = 3 Then Exit Function
+    'Reading opcodes with a r32, r/m32 form (the r/m is the memory source).
+    Select Case op
+        Case &H8B, &H3B, &H03, &HB, &H23, &H2B, &H33, &H39, &H3D, &H83, &H81
+        Case Else: Exit Function
+    End Select
+    If NativeDecodeDisp(dump, disp, isAbs) Then
+        If Not isAbs And disp < 0 Then NativeStackLoadDisp = disp
+    End If
+End Function
 
 Private Sub NativeDetectForLoops(col As Collection)
     'Recognise VB6's counted For loop:
@@ -3077,9 +3180,17 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NativeSetVSlot disp, NVReg(reg)
                     'A stored call result (expression containing a call) is worth
                     'surfacing as a real assignment; bind the local to its name so
-                    'later uses reference the variable rather than re-expanding.
+                    'later uses reference the variable rather than re-expanding.  A
+                    'loop induction slot (NVCounterSlot) is treated the same way even
+                    'for a plain value, so the counter shows as var_X (not a stale
+                    'per-iteration constant) and its init / increment surface.
+                    Dim isCtrSlot As Boolean
+                    isCtrSlot = Len(NativeColGet(NVCounterSlot, "C" & disp)) > 0
+                    lname = "var_" & Hex$(Abs(disp))
                     If InStr(NVReg(reg), "(") > 0 And Left$(NVReg(reg), 1) <> Chr$(34) Then
-                        lname = "var_" & Hex$(Abs(disp))
+                        NativeTrackReg = lname & " = " & NVReg(reg)
+                        NativeSetLocalExpr disp, lname
+                    ElseIf isCtrSlot And Len(NVReg(reg)) > 0 And NVReg(reg) <> lname Then
                         NativeTrackReg = lname & " = " & NVReg(reg)
                         NativeSetLocalExpr disp, lname
                     Else
@@ -3094,8 +3205,10 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     'a following read/compare shows var_X instead of a raw register -
                     'e.g. a register-allocated loop counter `cmp eax,edi` right after
                     '`mov [var_20],eax`.  Gated to empty NVReg so a meaningful tracked
-                    'expression is never replaced by the bare local name.
-                    If Len(NVReg(reg)) = 0 Then NVReg(reg) = "var_" & Hex$(Abs(disp))
+                    'expression is never replaced by the bare local name - EXCEPT for a
+                    'loop induction slot, whose register must read as var_X (the value
+                    'it holds is this iteration's, stale for the rest of the loop).
+                    If Len(NVReg(reg)) = 0 Or isCtrSlot Then NVReg(reg) = lname
                 ElseIf isAbs And NativeIsGlobalAddr(disp) Then
                     'Store to a module-level global: mov [abs], reg.  Surface any
                     'tracked value (number / local / global / string / call / concat)
