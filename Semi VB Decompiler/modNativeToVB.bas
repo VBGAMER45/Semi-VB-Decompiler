@@ -116,6 +116,10 @@ Private NVRegObjType(7) As String  'object NAME a register's POINTER refers to (
 Private NVRegObjVt(7) As String    'object NAME whose VTABLE a register holds ([objPtr] deref)
 Private NVRegObjGuid(7) As String  'control GUID a register's object POINTER refers to ("" = intrinsic global / none)
 Private NVRegObjVtGuid(7) As String 'control GUID whose VTABLE a register holds (resolves control props via GetProperty)
+Private NVRegObjInst(7) As String  'receiver expression for a register holding a user-class VTABLE (e.g. global_004230F4), so call [vt+off] -> recv.Method
+Private NVObjClass As Collection   'key "G"&globalVA -> user class name of the object instance stored at that global (typed at the __vbaNew auto-instantiation)
+Private NVRecentPush(7) As Long    'ring of recent `push imm32/imm8` raw values (to recover __vbaNew's Object Info + @global args)
+Private NVRecentTop As Long
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
@@ -181,7 +185,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     ReDim NVPushImm(31): ReDim NVPushDisp(31): NVPushTop = 0: NVLastPushDisp = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
-    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegAddrDisp(r) = 0: NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": Next
+    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegAddrDisp(r) = 0: NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": NVRegObjInst(r) = "": Next
+    Set NVObjClass = New Collection
+    For r = 0 To 7: NVRecentPush(r) = 0: Next
+    NVRecentTop = 0
     Set NVLocal = New Collection
     Set NVLocalGuid = New Collection
     Set NVStrLits = New Collection
@@ -997,6 +1004,44 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         If Len(vb) > 0 Then NVPushTop = 0: NativeProcessInst = ind & vb & vbCrLf: Exit Function
                     End If
                 End If
+                'Method call on a tracked USER-CLASS instance (e.g. ds7.Load): the
+                'vtable register carries the class name (typed at __vbaNew) and the
+                'receiver expression.  User methods sit at vtable offset >= 0x1C.
+                If ocb >= 0 And ocb <= 7 Then
+                    If Len(NVRegObjVt(ocb)) > 0 And disp >= &H1C Then
+                        Dim umAddr As Long
+                        umAddr = NativeClassMethodAddr(NVRegObjVt(ocb), disp)
+                        If umAddr <> 0 Then
+                            Dim umName As String, umDot As Long, umRecv As String, umArgs As String, umSig As String
+                            umName = NativeCallTargetName(umAddr)
+                            umDot = InStr(umName, "."): If umDot > 0 Then umName = Mid$(umName, umDot + 1)
+                            umRecv = NVRegObjInst(ocb)
+                            If Len(umRecv) = 0 Then umRecv = NVRegObjVt(ocb)
+                            'Args (source order) lead with the `this` pointer (pushed
+                            'last) and may end with a hidden return buffer (pushed
+                            'first).  Drop the leading `this` when it is the receiver,
+                            'then keep the method's real parameter count from the front.
+                            umArgs = NativeArgList()
+                            If Len(umArgs) > 0 Then
+                                Dim umP() As String, umStart As Long, umKeep As Long, umI As Long, umOut As String
+                                umP = Split(umArgs, ", ")
+                                umStart = 0
+                                If umP(0) = umRecv Then umStart = 1
+                                umKeep = UBound(umP) - umStart + 1
+                                If NativeTryMethodSig(umAddr, umSig) Then umKeep = NativeArgCount(umSig)
+                                For umI = umStart To umStart + umKeep - 1
+                                    If umI > UBound(umP) Then Exit For
+                                    If Len(umOut) > 0 Then umOut = umOut & ", "
+                                    umOut = umOut & umP(umI)
+                                Next
+                                umArgs = umOut
+                            End If
+                            NVPushTop = 0
+                            NativeProcessInst = ind & "Call " & umRecv & "." & umName & "(" & umArgs & ")" & vbCrLf
+                            Exit Function
+                        End If
+                    End If
+                End If
                 'call [reg+disp] -> the object's own method (via its vtable), a
                 'control accessor, or a property vtable call.
                 'VB6 intrinsic global objects (App/Screen/Clipboard) are getters
@@ -1216,6 +1261,14 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             NVLastPushDisp = 0
             pv = NativePushOperand(inst)
             If Len(pv) > 0 Then NVLastImm = pv: NativePushImm pv: NativeRecordPushDisp NVLastPushDisp
+            'Keep a ring of the raw `push imm32/imm8` values so the __vbaNew object
+            'creation can recover its Object Info pointer + destination-global args.
+            Dim prawn As Long, praw As Long
+            prawn = NativePushImmRaw(inst, praw)
+            If prawn <> 0 Then
+                NVRecentPush(NVRecentTop And 7) = praw
+                NVRecentTop = NVRecentTop + 1
+            End If
             Exit Function
 
         Case C_CMD
@@ -1587,8 +1640,26 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             'Move/copy of a computed value into a local -> a VB assignment.
             NativeRuntimeCall = NativeMoveAssign(): Exit Function
         Case InStr(nm, "__vbaNew2") > 0, InStr(nm, "__vbaNew") > 0
-            'Object creation - result is a new object; flows into the Set/store
-            NVPushTop = 0: NVReg(0) = "New (object)": NativeRuntimeCall = "": Exit Function
+            'Object creation.  VB pushes a pointer to the object's Object Info; for
+            'an `As New` auto-instantiation it ALSO pushes the address of the global
+            'that holds the instance.  Recover the class name from the Object Info
+            'chain (ObjectInfo+0x18 -> Public Object Descriptor +0x18 -> name) and,
+            'for the auto-instantiation, remember that the global is of that class so
+            'its later method calls resolve.
+            Dim ncls As String, ngObj As Long, rp As Long, rv As Long
+            For rp = 0 To 7
+                rv = NVRecentPush(rp)
+                If rv <> 0 And Len(ncls) = 0 Then ncls = NativeClassFromObjInfo(rv)
+                If rv <> 0 And NativeIsGlobalAddr(rv) Then ngObj = rv
+            Next
+            NVPushTop = 0
+            If Len(ncls) > 0 Then
+                If ngObj <> 0 Then NativeColPut NVObjClass, "G" & ngObj, ncls
+                NVReg(0) = "New " & ncls: NVRegObjType(0) = ncls
+            Else
+                NVReg(0) = "New (object)"
+            End If
+            NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaExitProc") > 0, InStr(nm, "__vbaErrorOverflow") > 0, _
              InStr(nm, "__vbaError") > 0, InStr(nm, "__vbaErrVar") > 0, _
              InStr(nm, "__vbaFree") > 0, InStr(nm, "__vbaVarDup") > 0, _
@@ -2263,6 +2334,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 NVRegIsMe(reg) = NVRegIsMe(rm): NVRegIsFormVt(reg) = NVRegIsFormVt(rm)
                 NVRegObjType(reg) = NVRegObjType(rm): NVRegObjVt(reg) = NVRegObjVt(rm)
                 NVRegObjGuid(reg) = NVRegObjGuid(rm): NVRegObjVtGuid(reg) = NVRegObjVtGuid(rm)
+                NVRegObjInst(reg) = NVRegObjInst(rm)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 Dim bse As Long, baseObj As Boolean
                 bse = NativeMemBase(dump)
@@ -2295,7 +2367,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 'loading an App/Screen/Clipboard-typed local tags the register as
                 'that object pointer; dereferencing such a pointer ([objPtr], disp 0)
                 'tags the register as that object's vtable.
-                NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = "": NVRegObjInst(reg) = ""
                 If Not isAbs And disp < 0 Then
                     If NativeIsIntrinsicObj(NVReg(reg)) Then NVRegObjType(reg) = NVReg(reg)
                     'Loading a local that holds a control object tags this register
@@ -2303,9 +2375,18 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     Dim lguid As String
                     lguid = NativeGetLocalGuid(disp)
                     If Len(lguid) > 0 Then NVRegObjGuid(reg) = lguid: NVRegObjType(reg) = NVReg(reg)
+                ElseIf isAbs And NativeIsGlobalAddr(disp) Then
+                    'Loading a module-global that holds a user-class instance (typed
+                    'at its __vbaNew auto-instantiation) tags the register as that
+                    'object pointer, so a following `mov vt,[obj]; call [vt+off]`
+                    'resolves to obj.Method.
+                    Dim gcls As String
+                    gcls = NativeColGet(NVObjClass, "G" & disp)
+                    If Len(gcls) > 0 Then NVRegObjType(reg) = gcls: NVRegObjInst(reg) = NVReg(reg)
                 ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 Then
                     NVRegObjVt(reg) = NVRegObjType(bse)
                     NVRegObjVtGuid(reg) = NVRegObjGuid(bse)   'deref of a control pointer -> its vtable carries the GUID
+                    NVRegObjInst(reg) = NVRegObjInst(bse)     'deref of a user-class pointer -> its vtable carries the receiver
                 End If
             End If
         Case &H8D                       'lea r32, [mem]  (address-of / ptr arithmetic)
@@ -2680,6 +2761,88 @@ Private Function NativeFirstReg(ByVal cmd As String) As String
     p = InStr(t, ",")
     If p > 0 Then t = Left$(t, p - 1)
     NativeFirstReg = UCase$(Trim$(t))
+End Function
+
+Private Function NativePushImmRaw(inst As CInstruction, ByRef raw As Long) As Long
+    'Raw operand of a `push imm32` (0x68) or `push imm8` (0x6A) - used to recover
+    'the __vbaNew Object Info / destination-global pointers.  Returns 1 (with raw)
+    'when the instruction is such a push, else 0.
+    Dim dump As String, n As Long, i As Long, op As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op = &H68 Then
+        raw = NativeDumpInt32(dump, i + 1): NativePushImmRaw = 1
+    ElseIf op = &H6A Then
+        raw = NativeDumpInt8(dump, i + 1): NativePushImmRaw = 1
+    End If
+End Function
+
+Private Function NativeFileDword(ByVal va As Long) As Long
+    'Read a little-endian dword at virtual address va from the image file.
+    Dim fp As Integer, v As Long
+    On Error Resume Next
+    If va < OptHeader.ImageBase Or va >= OptHeader.ImageBase + &H1000000 Then Exit Function
+    fp = FreeFile
+    Open SFilePath For Binary Access Read As #fp
+        Get #fp, va + 1 - OptHeader.ImageBase, v
+    Close #fp
+    NativeFileDword = v
+End Function
+
+Private Function NativeClassFromObjInfo(ByVal objInfoVA As Long) As String
+    'Resolve a VB Object Info pointer (pushed by __vbaNew) to its class name via
+    'the documented chain: ObjectInfo +0x18 = lpObject (Public Object Descriptor);
+    'Public Object Descriptor +0x18 = lpszObjectName.  Validated against the known
+    'project objects so a stray pointer yields "" rather than garbage.
+    Dim pubDesc As Long, namePtr As Long, nm As String
+    On Error Resume Next
+    If objInfoVA < OptHeader.ImageBase Or objInfoVA >= OptHeader.ImageBase + &H1000000 Then Exit Function
+    pubDesc = NativeFileDword(objInfoVA + &H18)
+    If pubDesc = 0 Then Exit Function
+    namePtr = NativeFileDword(pubDesc + &H18)
+    If namePtr = 0 Then Exit Function
+    nm = NativeAsciiAt(namePtr)
+    If Len(nm) > 0 And NativeIsKnownObject(nm) Then NativeClassFromObjInfo = nm
+End Function
+
+Private Function NativeAsciiAt(ByVal va As Long) As String
+    'Read a null-terminated ASCII string at virtual address va from the image file.
+    Dim fp As Integer, b As Byte, s As String, k As Long
+    On Error Resume Next
+    If va < OptHeader.ImageBase Or va >= OptHeader.ImageBase + &H1000000 Then Exit Function
+    fp = FreeFile
+    Open SFilePath For Binary Access Read As #fp
+        Do While k < 256
+            Get #fp, va + 1 - OptHeader.ImageBase + k, b
+            If b = 0 Then Exit Do
+            If b < 32 Or b > 126 Then s = "": Exit Do      'not a clean name
+            s = s & Chr$(b)
+            k = k + 1
+        Loop
+    Close #fp
+    NativeAsciiAt = s
+End Function
+
+Private Function NativeIsKnownObject(ByVal nm As String) As Boolean
+    'True when nm is one of the project's objects (form / class / module).
+    Dim i As Long
+    On Error Resume Next
+    For i = 0 To UBound(gObjectNameArray)
+        If gObjectNameArray(i) = nm Then NativeIsKnownObject = True: Exit Function
+    Next
+End Function
+
+Private Function NativeClassMethodAddr(ByVal className As String, ByVal off As Long) As Long
+    'Address of a user class's method at vtable offset off, via the class map
+    'gFormVtable("Class:off<off>") -> address.  0 when unknown (property / runtime
+    'slot, or an external COM type not in this project).
+    Dim v As Variant
+    On Error Resume Next
+    v = gFormVtable(className & ":off" & off)
+    If Err.Number = 0 Then NativeClassMethodAddr = CLng(v)
 End Function
 
 Private Function NativeCallRegName(inst As CInstruction) As String
