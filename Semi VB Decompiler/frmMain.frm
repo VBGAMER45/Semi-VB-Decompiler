@@ -2667,17 +2667,18 @@ End Sub
 'output, native projects use the native decompiler (mirrors how each path
 'is decompiled).  Used by the form / module / class views below.
 Private Function GetObjectCode(ByVal objName As String) As String
-    'Prepend the reconstructed Win32 API Declare block and the object's recovered
-    'Public variable declarations (from the typeinfo VarDesc) so the on-screen Code
-    'view shows them above the procedures - matching the exported form source.
-    Dim sApiDecl As String, sVarDecl As String
-    sApiDecl = modOutput.GetApiDeclareBlock()
-    sVarDecl = modOutput.GetFieldDeclBlock(objName)
+    'Decompile the procedure bodies FIRST (which collects this object's referenced
+    'globals), then prepend the declaration header so the on-screen Code view shows
+    'the API Declare block (only on its host object) and the object's variable
+    'declarations (module globals, or recovered form/class fields) above the
+    'procedures - matching the exported source.
+    Dim body As String
     If gProjectInfo.aNativeCode = 0 Then
-        GetObjectCode = sApiDecl & sVarDecl & modPCode.GetPcodeObjectCode(objName)
+        body = modPCode.GetPcodeObjectCode(objName)
     Else
-        GetObjectCode = sApiDecl & sVarDecl & modNative.GetNativeObjectCode(objName)
+        body = modNative.GetNativeObjectCode(objName)
     End If
+    GetObjectCode = modOutput.GetCodeHeaderDecls(objName) & body
 End Function
 
 Private Sub tvProject_NodeClick(ByVal Node As MSComctlLib.Node)
@@ -3464,9 +3465,9 @@ On Error Resume Next
                             End If
 
                             If VBVersion <> 4 Then
-                                'API Declares (if this form hosts them) + recovered field declarations
-                                strBuffer = strBuffer & modOutput.GetCodeHeaderDecls(tblPath(2), False)
-                                'Decompiled bodies (native) or signature stubs (P-Code)
+                                'Decompiled bodies (native) or signature stubs (P-Code),
+                                'with the API Declare (host only) + field declaration
+                                'header prepended by GetObjectCode.
                                 strBuffer = strBuffer & GetObjectCode(tblPath(2))
                             End If
                             txtCode.Text = strBuffer
@@ -3551,12 +3552,7 @@ On Error Resume Next
                     Else
                         strBuffer = strBuffer & "'This application is compiled to Native refer to Native Procedure Decompile under the Tools Menu" & vbCrLf
                     End If
-                    'Decompile first (populates this module's referenced globals),
-                    'then build the declaration header from the collected globals.
-                    Dim sModBody As String
-                    sModBody = GetObjectCode(tblPath(2))
-                    strBuffer = strBuffer & modOutput.GetCodeHeaderDecls(tblPath(2), True)
-                    strBuffer = strBuffer & sModBody
+                    strBuffer = strBuffer & GetObjectCode(tblPath(2))
                     txtCode.Text = strBuffer
                     ShowObjectDisassembly tblPath(2)
                     gUpdateText = True
@@ -3580,7 +3576,6 @@ On Error Resume Next
                         strBuffer = strBuffer & "'This application is compiled to Native refer to Native Procedure Decompile under the Tools Menu" & vbCrLf
                     End If
 
-                    strBuffer = strBuffer & modOutput.GetCodeHeaderDecls(tblPath(2), False)
                     strBuffer = strBuffer & GetObjectCode(tblPath(2))
                     txtCode.Text = strBuffer
                     ShowObjectDisassembly tblPath(2)

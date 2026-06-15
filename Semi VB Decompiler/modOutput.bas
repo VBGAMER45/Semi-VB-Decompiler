@@ -829,22 +829,20 @@ Public Function ApiDeclareHost(ByRef isMod As Boolean) As String
     Next
 End Function
 
-Public Function GetCodeHeaderDecls(ByVal objectName As String, ByVal isModule As Boolean) As String
-    'The declaration block shown at the top of an object's Code-tab listing,
-    'matching the file output: the API Declare block (only on its host object, with
-    'the right scope), then this object's variable declarations (module globals for
-    'a standard module, recovered fields for a form/class).
+Public Function GetCodeHeaderDecls(ByVal objectName As String) As String
+    'The declaration block shown at the top of an object's listing, matching the
+    'file output: the API Declare block (ONLY on its host object, correct scope),
+    'then this object's variable declarations.  GetModuleGlobalDeclBlock is empty
+    'for forms/classes (aModulePublic = 0) and GetFieldDeclBlock is empty for
+    'standard modules, so the right one applies without a type flag.
     Dim s As String, hostMod As Boolean, host As String
     On Error Resume Next
     host = ApiDeclareHost(hostMod)
     If Len(host) > 0 And UCase$(host) = UCase$(objectName) Then
         s = GetApiDeclareBlock(IIf(hostMod, "Public", "Private"))
     End If
-    If isModule Then
-        s = s & GetModuleGlobalDeclBlock(objectName)
-    Else
-        s = s & GetFieldDeclBlock(objectName)
-    End If
+    s = s & GetModuleGlobalDeclBlock(objectName)
+    s = s & GetFieldDeclBlock(objectName)
     GetCodeHeaderDecls = s
 End Function
 
