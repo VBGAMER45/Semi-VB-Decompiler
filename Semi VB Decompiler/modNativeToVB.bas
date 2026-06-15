@@ -1809,6 +1809,15 @@ Private Function NativeNumConvWrap(ByVal v As String, ByVal conv As String) As S
     NativeNumConvWrap = conv & "(" & v & ")"
 End Function
 
+Private Function NativeIsCleanNamedVal(ByVal s As String) As Boolean
+    'A clean tracked variable reference - a local, parameter, or module global
+    '(optionally a deref chain like global_X(12)).  Deliberately conservative: bare
+    'registers, numbers, control/property expressions and folded arithmetic are
+    'excluded, so only an unambiguous Integer/Boolean variable test resolves.
+    If Len(s) = 0 Then Exit Function
+    NativeIsCleanNamedVal = (Left$(s, 4) = "var_") Or (Left$(s, 4) = "arg_") Or (Left$(s, 7) = "global_")
+End Function
+
 Private Function NativeIsStrOperand(ByVal s As String) As Boolean
     'True when s is a usable string-comparison operand: not empty, not the <arg>
     'placeholder, and not a bare number (which is an unresolved string pointer or a
@@ -4030,6 +4039,14 @@ Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
                 'A folded value (e.g. an arithmetic sum) - test it for non-zero.
                 NVCmpL = bv: NVCmpR = "0": NVCmpIsTest = True: NVCmpSet = True
             End If
+            Exit Sub
+        ElseIf NativeHas66(dump) And NativeIsCleanNamedVal(bv) Then
+            'A 16-bit `test si,si` of a register holding a clean tracked local /
+            'parameter / global (var_X / arg_X / global_X).  The register was loaded
+            'by a FULL 32-bit mov (a 16-bit mov clears the register's tracked value
+            'above), and VB only emits a word test for an Integer/Boolean variable, so
+            'the low word IS the value: resolve `<name> <> 0` instead of leaving <cond>.
+            NVCmpL = bv: NVCmpR = "0": NVCmpIsTest = True: NVCmpSet = True
             Exit Sub
         End If
     End If
