@@ -2931,28 +2931,81 @@ Private Function NativeLookupName(ByVal addr As Long) As String
     Next
 End Function
 
+Private Function NativeJoinAmp(ByVal a As String, ByVal b As String) As String
+    'Join two string-expression parts with VB's concatenation operator.
+    If Len(a) = 0 Then NativeJoinAmp = b Else NativeJoinAmp = a & " & " & b
+End Function
+
 Private Function NativeStringAt(ByVal va As Long) As String
-    'Read a Unicode (BSTR) string constant from the image; returns it quoted,
-    'or "" if the address does not hold clean printable text.
-    Dim fp As Integer, ch As Integer, s As String, pos As Long, cnt As Long
+    'Read a VB6 string constant (BSTR) from the image and render it as VB source.
+    'When the BSTR length prefix (the 4 bytes before the data) is valid, control-
+    'character constants resolve - vbCrLf / vbCr / vbLf / vbTab - and a mixed
+    'string renders as "lit" & vbCrLf & "lit" (so `"Dungeon Fate" & vbCrLf` forms
+    'instead of leaking the BSTR pointer as a number).  Falls back to the
+    'printable-only scan when the length prefix is not a clean BSTR.  Returns ""
+    'when the address does not hold clean text.
+    Dim fp As Integer, pos As Long, byteLen As Long, nch As Long, k As Long
+    Dim ch As Integer, ch2 As Integer, c As Long, res As String, lit As String, okBStr As Boolean, cc As String
     On Error GoTo done
     If va < OptHeader.ImageBase Then Exit Function
     fp = FreeFile
     Open SFilePath For Binary Access Read As #fp
     pos = va + 1 - OptHeader.ImageBase
-    If pos < 1 Or pos > LOF(fp) Then Close #fp: Exit Function
-    Do
-        Get #fp, pos, ch
-        If ch = 0 Then Exit Do
-        If ch < 32 Or ch > 126 Then Exit Do
-        s = s & Chr$(ch)
-        pos = pos + 2
-        cnt = cnt + 1
-        If cnt > 256 Then Exit Do
-    Loop
+    If pos >= 5 And pos <= LOF(fp) Then
+        Get #fp, pos - 4, byteLen                       'BSTR byte-length prefix
+        okBStr = (byteLen >= 2 And byteLen <= 1024 And (byteLen And 1) = 0)
+        If okBStr Then
+            nch = byteLen \ 2
+            For k = 0 To nch - 1                         'must be all tab/cr/lf or printable
+                Get #fp, pos + k * 2, ch
+                c = ch: If c < 0 Then c = c + 65536
+                If Not (c = 9 Or c = 10 Or c = 13 Or (c >= 32 And c <= 126)) Then okBStr = False: Exit For
+            Next
+        End If
+        If okBStr Then
+            k = 0
+            Do While k < nch
+                Get #fp, pos + k * 2, ch
+                c = ch: If c < 0 Then c = c + 65536
+                cc = ""
+                If c = 13 And k < nch - 1 Then           'CR followed by LF -> vbCrLf
+                    Get #fp, pos + (k + 1) * 2, ch2
+                    If ch2 = 10 Then cc = "vbCrLf": k = k + 1
+                End If
+                If Len(cc) = 0 Then
+                    Select Case c
+                        Case 13: cc = "vbCr"
+                        Case 10: cc = "vbLf"
+                        Case 9: cc = "vbTab"
+                    End Select
+                End If
+                If Len(cc) > 0 Then
+                    If Len(lit) > 0 Then res = NativeJoinAmp(res, Chr$(34) & lit & Chr$(34)): lit = ""
+                    res = NativeJoinAmp(res, cc)
+                Else
+                    lit = lit & Chr$(c)
+                End If
+                k = k + 1
+            Loop
+            If Len(lit) > 0 Then res = NativeJoinAmp(res, Chr$(34) & lit & Chr$(34))
+        Else
+            Do                                           'fallback: printable-only scan
+                Get #fp, pos, ch
+                If ch = 0 Then Exit Do
+                If ch < 32 Or ch > 126 Then Exit Do
+                lit = lit & Chr$(ch)
+                pos = pos + 2
+                If Len(lit) > 256 Then Exit Do
+            Loop
+            If Len(lit) >= 1 Then res = Chr$(34) & lit & Chr$(34)
+        End If
+    End If
     Close #fp
+    NativeStringAt = res
+    Exit Function
 done:
-    If Len(s) >= 1 Then NativeStringAt = Chr$(34) & s & Chr$(34)
+    On Error Resume Next
+    Close #fp
 End Function
 
 Private Function NativeStrLitArgs() As String
