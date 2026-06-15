@@ -3144,15 +3144,29 @@ Public Function GetProperty(ByVal strGuid As String, ByVal lCode As Long) As Str
                ' MsgBox i
                .SelectTypeInfo i + 1
           ' MsgBox i & cTypeInfo.TypeInfoName
+                'A control's DEFAULT property shares its vtable offset with the real
+                'named property (e.g. _Label has both _Default and Caption at 0x54).
+                'Prefer the real name; only fall back to the _Default/_Value
+                'placeholder when no named property exists at that offset.
+                Dim realProp As String, defProp As String, fnm As String
                 For g = 0 To .TypeInfoFunctions - 1
                        If .SelectFunction(g) Then
                           If .FunctionVTOffset = lCode Then
-                    '            MsgBox "Agg"
-                              GetProperty = GetProperty & .FunctionName & " (" & .InvKind2String(.FunctionInvKind, True) & ")"
-                                Exit Function
+                              fnm = .FunctionName
+                              If fnm = "_Default" Or fnm = "Default" Or fnm = "_Value" Or fnm = "Value" Then
+                                  If Len(defProp) = 0 Then defProp = GetProperty & fnm & " (" & .InvKind2String(.FunctionInvKind, True) & ")"
+                              Else
+                                  realProp = GetProperty & fnm & " (" & .InvKind2String(.FunctionInvKind, True) & ")"
+                                  Exit For
+                              End If
                            End If
                         End If
                 Next g
+                If Len(realProp) > 0 Then
+                    GetProperty = realProp: Exit Function
+                ElseIf Len(defProp) > 0 Then
+                    GetProperty = defProp: Exit Function
+                End If
                 Exit For
             End If
         Next i
