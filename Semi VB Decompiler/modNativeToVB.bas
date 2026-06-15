@@ -1599,6 +1599,21 @@ Private Function NativeGetLocalExpr(ByVal disp As Long) As String
     If Len(NativeGetLocalExpr) = 0 Then NativeGetLocalExpr = "var_" & Hex$(Abs(disp))
 End Function
 
+Private Function NativeFpuPopOrEmpty() As String
+    'Pop the FPU expression top when present, else "" (the operand is lost).
+    If NVFpuTop > 0 Then NativeFpuPopOrEmpty = NativeFpuPop()
+End Function
+
+Private Function NativeNumConvWrap(ByVal v As String, ByVal conv As String) As String
+    'Wrap a value in a numeric conversion (CInt/CLng), collapsing a redundant inner
+    'String->float conversion so `CInt(CDbl(x))` reads as `CInt(x)`.
+    If Len(v) = 0 Then v = "<arg>"
+    If (Left$(v, 5) = "CDbl(" Or Left$(v, 5) = "CSng(") And Right$(v, 1) = ")" Then
+        v = Mid$(v, 6, Len(v) - 6)
+    End If
+    NativeNumConvWrap = conv & "(" & v & ")"
+End Function
+
 Private Function NativeIsStrOperand(ByVal s As String) As Boolean
     'True when s is a usable string-comparison operand: not empty, not the <arg>
     'placeholder, and not a bare number (which is an unresolved string pointer or a
@@ -1869,6 +1884,39 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             aa = NativeArgPop()
             If Len(aa) = 0 Then aa = "<arg>"
             NVReg(0) = "CStr(" & aa & ")": NVKeepPushStack = True
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaR8Str") > 0, InStr(nm, "__vbaR4Str") > 0
+            'String -> floating point (the reverse of __vbaStrR8).  The result is
+            'returned on the FPU stack, so push it into the FPU model; a following
+            'narrowing (__vbaR?IntI2/I4) or an fstp store consumes it.  Folds the
+            'whole `<field> = Int(Trim$(...))` config-parse assignment.
+            aa = NativeArgPop()
+            If Len(aa) = 0 Then aa = "<arg>"
+            NativeFpuPush IIf(InStr(nm, "R4Str") > 0, "CSng(", "CDbl(") & aa & ")"
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaR8IntI4") > 0, InStr(nm, "__vbaR4IntI4") > 0
+            'Floating value (FPU top) -> Long.  Folds to eax for the store.
+            NVReg(0) = NativeNumConvWrap(NativeFpuPopOrEmpty(), "CLng")
+            NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaR8IntI2") > 0, InStr(nm, "__vbaR4IntI2") > 0
+            'Floating value (FPU top) -> Integer.  Folds to eax for the store.
+            NVReg(0) = NativeNumConvWrap(NativeFpuPopOrEmpty(), "CInt")
+            NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaI4Str") > 0
+            'String -> Long (register-based, result in eax - no FPU).
+            aa = NativeArgPop()
+            If Len(aa) = 0 Then aa = "<arg>"
+            NVReg(0) = "CLng(" & aa & ")"
+            NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaI2Str") > 0
+            'String -> Integer (register-based, result in eax - no FPU).
+            aa = NativeArgPop()
+            If Len(aa) = 0 Then aa = "<arg>"
+            NVReg(0) = "CInt(" & aa & ")"
+            NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
             NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrCat") > 0
             '__vbaStrCat(p1, p2) returns p1 & p2.  p1 is pushed first (deeper on the
