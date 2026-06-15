@@ -510,29 +510,34 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
     Dim p As Long, f00 As Long, voff As Long, b0 As Long, b1 As Long, nP As Long
     Dim pnl As Long, k As Long, nameVA As Long, sig As String, nm As String
     Dim addr As Long, v As Variant, kind As String, fflags As Long
+    Dim isClass As Boolean, maxJ As Long
 
     For oi = 0 To UBound(gObjectNameArray)
-        'Public COM interface (class / usercontrol) only - this byte encoding and
-        'the 0x1C-based vtable apply there; forms use a different (0x6F8) layout.
-        If (gObject(oi).ObjectType And &H100000) = 0 Then GoTo nextO
         aoi = gObject(oi).aObjectInfo
         If aoi = 0 Then GoTo nextO
         owner = gObjectNameArray(oi)
         hdr = NativeFileDword(F, aoi + &HC)            'tObjectInfo.aSmallRecord
+        'aSmallRecord is -1 for modules (no public typeinfo) -> skipped; classes and
+        'forms both have a real typeinfo block here.
         If hdr < OptHeader.ImageBase Then GoTo nextO
 
-        'Number of public methods = non-null entries in the names array (bounds the
-        'FuncDesc read so it cannot run into an adjacent object's records).
-        pc = gObject(oi).ProcCount
-        If pc <= 0 Or gObject(oi).aProcNamesArray = 0 Then GoTo nextO
-        ReDim namesVA(pc - 1)
-        Seek F, gObject(oi).aProcNamesArray + 1 - OptHeader.ImageBase
-        Get F, , namesVA
+        isClass = ((gObject(oi).ObjectType And &H100000) <> 0)
+        'A class/usercontrol's public-method count (non-null name slots) bounds its
+        'CONTIGUOUS FuncDesc array.  A FORM's array is SPARSE (0x0 gaps for the private
+        'event-handler slots) and its method names live in the event tables, so it is
+        'read with gap-skipping up to its end marker instead (nMethods stays 0).
         nMethods = 0
-        For i = 0 To pc - 1
-            If NativeValidNamePtr(namesVA(i)) Then nMethods = nMethods + 1
-        Next i
-        If nMethods = 0 Then GoTo nextO
+        If isClass Then
+            pc = gObject(oi).ProcCount
+            If pc <= 0 Or gObject(oi).aProcNamesArray = 0 Then GoTo nextO
+            ReDim namesVA(pc - 1)
+            Seek F, gObject(oi).aProcNamesArray + 1 - OptHeader.ImageBase
+            Get F, , namesVA
+            For i = 0 To pc - 1
+                If NativeValidNamePtr(namesVA(i)) Then nMethods = nMethods + 1
+            Next i
+            If nMethods = 0 Then GoTo nextO
+        End If
 
         'Locate the FuncDesc pointer array.
         a18 = NativeFileDword(F, hdr + &H18)
@@ -546,11 +551,16 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
         End If
         If arr = 0 Then GoTo nextO
 
-        For j = 0 To nMethods - 1
+        If isClass Then maxJ = nMethods - 1 Else maxJ = 255
+        For j = 0 To maxJ
             p = NativeFileDword(F, arr + j * 4)
-            If Not NativeIsFuncDesc(F, p) Then Exit For
+            If p = 0 Then
+                If isClass Then Exit For   'class array is contiguous - a 0 ends it
+                GoTo contJ                 'form array is sparse - skip the gap
+            End If
+            If Not NativeIsFuncDesc(F, p) Then Exit For   'non-FuncDesc -> end of array
             f00 = NativeFileDword(F, p)
-            voff = (f00 \ &H10000) And &HFC
+            voff = (f00 \ &H10000) And &HFFFC             '&HFFFC: form offsets are 0x6F8+
             b0 = f00 And &HFF
             b1 = (f00 \ &H100) And &H1            'hidden return slot bit
             nP = (b0 \ 4) - b1
@@ -582,7 +592,11 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
             'map filled by LinkNativeProcNames), then key the signature by address.
             addr = 0
             On Error Resume Next
-            v = gFormVtable(owner & ":off" & voff)
+            If voff >= &H6F8 Then
+                v = gFormVtable(owner & ":" & ((voff - &H6F8) \ 4))   'form: event-link vtable slot
+            Else
+                v = gFormVtable(owner & ":off" & voff)                'class: 0x1C-based offset
+            End If
             If Err.Number = 0 Then addr = CLng(v)
             Err.Clear
             On Error GoTo done
@@ -594,6 +608,7 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
                 gMethodKind.Add kind, "A" & addr
                 On Error GoTo done
             End If
+contJ:
         Next j
 nextO:
     Next oi
