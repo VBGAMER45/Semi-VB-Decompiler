@@ -103,6 +103,7 @@ Private NVForCnt As Long           'per-proc loop-variable name allocation index
 '--- Floating-point comparison idiom (fcom/fnstsw/test ah,mask/jcc -> boolean) ---
 Private NVFpCmp As Collection      '"P"&testVA -> "<relOp>|<regIdx>" - set NVReg(reg) to the relational
 Private NVFpSkip As Collection     '"P"&va -> "1" - suppress this scaffolding instruction
+Private NVStrCmpReg As Collection  '"P"&strcmpCallVA -> regIdx - the StrCmp result boolean-materializes into this register
 Private NVLastCmp As String        'hint expression for the next If condition
 Private NVStrLits As Collection    'pending string literals (e.g. MsgBox arguments)
 Private NVSkipLabels As Collection 'branch targets that belong to dropped error-check guards
@@ -209,6 +210,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVForCnt = 0
     Set NVFpCmp = New Collection
     Set NVFpSkip = New Collection
+    Set NVStrCmpReg = New Collection
     ReDim NVSelStkBase(31): NVSelTop = 0
     NVBase = NativeSolveControlBase(col)
 
@@ -274,6 +276,12 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'Detect floating-point comparison idioms (fcom/fnstsw/test ah,mask/jcc + the
     'boolean materialization) so they yield a real relational instead of <cond>.
     NativeDetectFpCompares col
+
+    'Detect VB6's string-comparison relational: __vbaStrCmp(a,b) whose tri-state
+    'result is boolean-materialised (neg/sbb/inc/neg) into a register, then tested.
+    'Bind the equality relational to that register so the branch reads `a = b`
+    'instead of a blank <cond>.
+    NativeDetectStrCmpCompares col
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -811,6 +819,114 @@ nextk2:
     Next k
 done:
 End Sub
+
+Private Sub NativeDetectStrCmpCompares(col As Collection)
+    'Recognise VB6's string relational:
+    '    call __vbaStrCmp ; [mov REG,eax] ; neg REG ; sbb REG,REG ; inc REG ; neg REG
+    'The neg/sbb/inc/neg turns the strcmp tri-state into the Boolean (strcmp = 0),
+    'i.e. (a = b).  Record the target REG against the call VA (so the runtime
+    'handler binds "(a = b)" into REG using the strcmp operands), and suppress the
+    'four materialisation instructions so they don't clobber REG's tracked value.
+    'The optional `mov REG,eax` is LEFT in place - it copies the Boolean from eax
+    'into REG.  When absent, the materialisation is on eax itself (REG = 0).
+    'Strict shape match - anything off leaves the strcmp rendered as a Call.
+    On Error GoTo done
+    Dim n As Long, k As Long
+    n = col.Count
+    If n < 5 Then Exit Sub
+    Dim arr() As CInstruction, inst As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For k = 0 To n - 5
+        If (arr(k).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nexts
+        Dim disp As Long, isAbs As Boolean
+        If Not NativeDecodeDisp(arr(k).dump, disp, isAbs) Then GoTo nexts
+        If Not isAbs Then GoTo nexts
+        Dim cnm As String
+        cnm = dsmNative.GetApiByIatVa(disp)
+        If InStr(cnm, "__vbaStrCmp") = 0 And InStr(cnm, "__vbaStrComp") = 0 Then GoTo nexts
+        'Optional `mov REG, eax` right after the call.
+        Dim t As Long, reg As Long
+        t = k + 1
+        reg = NativeMovFromEax(arr(t))
+        If reg >= 0 Then t = t + 1 Else reg = 0      'materialise on eax when no mov
+        'neg REG ; sbb REG,REG ; inc REG ; neg REG
+        If t + 3 > n - 1 Then GoTo nexts
+        If Not NativeIsNegReg2(arr(t), reg) Then GoTo nexts
+        If Not NativeIsSbbSelf(arr(t + 1), reg) Then GoTo nexts
+        If Not NativeIsIncReg(arr(t + 2), reg) Then GoTo nexts
+        If Not NativeIsNegReg2(arr(t + 3), reg) Then GoTo nexts
+        NativeColPut NVStrCmpReg, "P" & arr(k).va, CStr(reg)
+        NativeColPut NVFpSkip, "P" & arr(t).va, "1"          'neg
+        NativeColPut NVFpSkip, "P" & arr(t + 1).va, "1"      'sbb
+        NativeColPut NVFpSkip, "P" & arr(t + 2).va, "1"      'inc
+        NativeColPut NVFpSkip, "P" & arr(t + 3).va, "1"      'neg
+nexts:
+    Next k
+done:
+End Sub
+
+Private Function NativeMovFromEax(inst As CInstruction) As Long
+    'Match `mov REG, eax` -> dest register index, else -1.  Encodings:
+    '  8B /r  mod=3 rm=000(eax)      -> dest = reg field
+    '  89 /r  mod=3 reg=000(eax)     -> dest = rm field
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
+    NativeMovFromEax = -1
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) <> 3 Then Exit Function
+    If op = &H8B Then
+        If (modrm And 7) = 0 Then NativeMovFromEax = (modrm \ 8) And 7
+    ElseIf op = &H89 Then
+        If ((modrm \ 8) And 7) = 0 Then NativeMovFromEax = modrm And 7
+    End If
+End Function
+
+Private Function NativeIsNegReg2(inst As CInstruction, ByVal reg As Long) As Boolean
+    'Match `neg reg` (F7 /3: ModRM md=3, reg-field=3, rm=reg).
+    Dim dump As String, nn As Long, i As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    If NativeDumpByte(dump, i) <> &HF7 Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    NativeIsNegReg2 = ((modrm \ &H40) = 3) And (((modrm \ 8) And 7) = 3) And ((modrm And 7) = reg)
+End Function
+
+Private Function NativeIsSbbSelf(inst As CInstruction, ByVal reg As Long) As Boolean
+    'Match `sbb reg,reg` (1B /r or 19 /r, md=3, reg field = rm = reg).
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &H1B And op <> &H19 Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) <> 3 Then Exit Function
+    NativeIsSbbSelf = (((modrm \ 8) And 7) = reg) And ((modrm And 7) = reg)
+End Function
+
+Private Function NativeIsIncReg(inst As CInstruction, ByVal reg As Long) As Boolean
+    'Match `inc reg` (single-byte 0x40+reg, or FF /0 md=3 rm=reg).
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op = &H40 + reg Then NativeIsIncReg = True: Exit Function
+    If op = &HFF Then
+        modrm = NativeDumpByte(dump, i + 1)
+        If (modrm \ &H40) = 3 And (((modrm \ 8) And 7) = 0) And ((modrm And 7) = reg) Then NativeIsIncReg = True
+    End If
+End Function
 
 Private Function NativeIsTestAh(inst As CInstruction, ByRef mask As Long) As Boolean
     'Match `test ah, imm8` (F6 /0 with ModRM 0xC4 -> md=3, reg=0 test, rm=4 = AH).
@@ -1483,6 +1599,29 @@ Private Function NativeGetLocalExpr(ByVal disp As Long) As String
     If Len(NativeGetLocalExpr) = 0 Then NativeGetLocalExpr = "var_" & Hex$(Abs(disp))
 End Function
 
+Private Function NativeIsStrOperand(ByVal s As String) As Boolean
+    'True when s is a usable string-comparison operand: not empty, not the <arg>
+    'placeholder, and not a bare number (which is an unresolved string pointer or a
+    'lost value - a genuine string literal is quoted, a variable/expr is not numeric).
+    If Len(s) = 0 Then Exit Function
+    If s = "<arg>" Then Exit Function
+    If IsNumeric(s) Then Exit Function
+    NativeIsStrOperand = True
+End Function
+
+Private Sub NativeInvalidateLocalArg(ByVal argExpr As String)
+    'A statement (Line Input #, Get #, Input #) wrote a local by reference.  The
+    'slot's tracked value (often a stale zero-init constant the prologue stored)
+    'is now wrong, so clear it - later reads then render the variable name
+    'instead of the dead `0`.  Only plain `var_XXXX` locals are addressed here.
+    If Left$(argExpr, 4) <> "var_" Then Exit Sub
+    Dim hx As String, disp As Long
+    hx = Mid$(argExpr, 5)
+    On Error Resume Next
+    disp = -CLng("&H" & hx)
+    If Err.Number = 0 And disp < 0 Then NativeSetLocalExpr disp, ""
+End Sub
+
 Private Sub NativeSetVSlot(ByVal disp As Long, ByVal v As String)
     'Record the last value written to a 4-byte stack slot, so a Variant built in
     'that slot (a VT tag field plus a data field 8 bytes higher) can be read back
@@ -1746,6 +1885,41 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             adst = NativeArgPop(): asrc = NativeArgPop()
             If Len(asrc) = 0 Then asrc = adst
             NVReg(0) = asrc: NVPushTop = 0: NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaStrCmp") > 0, InStr(nm, "__vbaStrComp") > 0
+            '__vbaStrCmp(p1, p2) returns strcmp(p1, p2); p1 is pushed deeper, p2 on
+            'top.  When the pre-pass found the boolean materialisation that turns the
+            'tri-state into (strcmp = 0), bind the equality relational "(p1 = p2)"
+            'into the materialisation's target register so the following test/jcc
+            'renders `If p1 = p2`.  Otherwise leave it as a visible Call.
+            Dim scReg As String, scA() As String, scN As Long
+            scReg = NativeColGet(NVStrCmpReg, "P" & inst.va)
+            NativeArgsSnapshot scA, scN          'a(0) = top of arg stack (= p2)
+            If Len(scReg) > 0 And scN >= 2 Then
+                Dim scTop As String, scDeep As String
+                scTop = scA(0)                   'p2 (top of the arg stack)
+                scDeep = scA(1)                  'p1 (deeper)
+                'Both operands must be resolved string values.  A bare number is an
+                'unresolved string pointer (a real literal would be quoted) or a lost
+                'value - emitting `(0 = 4218532)` is meaningless, so fall back to a
+                'visible Call for those, matching the pre-change output.
+                If NativeIsStrOperand(scTop) And NativeIsStrOperand(scDeep) Then
+                    'Place the relational in eax; the materialisation's `mov REG,eax`
+                    '(left in place) copies it on to the tested register, and the
+                    'neg/sbb/inc/neg are suppressed so they don't clobber it.
+                    NVReg(0) = "(" & scDeep & " = " & scTop & ")"
+                    NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                    NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                    NativeRuntimeCall = "": Exit Function
+                End If
+            End If
+            'No materialisation, or an operand we could not resolve - render as the
+            'prior visible Call (reproducing the pre-change output exactly).
+            Dim scList As String, scK As Long
+            For scK = 0 To scN - 1
+                If Len(scList) > 0 Then scList = scList & ", "
+                scList = scList & scA(scK)
+            Next
+            NativeRuntimeCall = "Call " & NativeFriendlyName(nm) & "(" & scList & ")": Exit Function
         Case InStr(nm, "__vbaI2I4") > 0, InStr(nm, "__vbaUI1I2") > 0, _
              InStr(nm, "__vbaUI1I4") > 0, InStr(nm, "__vbaI4UI1") > 0, _
              InStr(nm, "__vbaI2UI1") > 0
@@ -1861,13 +2035,19 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             'Get #<filenum>, , <var>.  Args: [descriptor/size, var, filenum].
             Dim gtA() As String, gtN As Long
             NativeArgsSnapshot gtA, gtN
-            If gtN >= 3 Then NativeRuntimeCall = "Get #" & gtA(2) & ", , " & gtA(1)
+            If gtN >= 3 Then
+                NativeRuntimeCall = "Get #" & gtA(2) & ", , " & gtA(1)
+                NativeInvalidateLocalArg gtA(1)     'the read-into local is now live, not its zero-init
+            End If
             Exit Function
         Case InStr(nm, "__vbaLineInputStr") > 0
             'Line Input #<filenum>, <var>.  Args: [var, filenum].
             Dim liA() As String, liN As Long
             NativeArgsSnapshot liA, liN
-            If liN >= 2 Then NativeRuntimeCall = "Line Input #" & liA(1) & ", " & liA(0)
+            If liN >= 2 Then
+                NativeRuntimeCall = "Line Input #" & liA(1) & ", " & liA(0)
+                NativeInvalidateLocalArg liA(0)     'the read-into local is now live, not its zero-init
+            End If
             Exit Function
     End Select
 
@@ -1908,6 +2088,22 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                  "OPEN", "PRINT", "CLOSE", "WRITE", "PUT", "GET", "SEEK", "LOCK", _
                  "UNLOCK", "NAME", "WIDTH", "LINE INPUT", "INPUT"
                 NativeRuntimeCall = Trim$(vbName & " " & NativeArgList()): Exit Function
+            Case "LEFT", "LEFT$", "RIGHT", "RIGHT$", "MID", "MID$", "TRIM", "TRIM$", _
+                 "LTRIM", "LTRIM$", "RTRIM", "RTRIM$", "UCASE", "UCASE$", "LCASE", "LCASE$"
+                'Pure value-returning string transforms.  These almost always feed a
+                'following call / concat / comparison (string-parsing idioms like
+                'UCase$(Left$(s, n)) = "TAG="), so fold the result into eax AND defer
+                'a "Call X()" statement: if the next instruction consumes eax the
+                'value threads into the consumer; otherwise the deferred call is
+                'flushed as a statement (NVPendingCall fold/flush in the decode loop),
+                'so an unconsumed result is never silently dropped.
+                Dim stArgs As String
+                stArgs = NativeArgList()
+                NVReg(0) = vbName & "(" & stArgs & ")"
+                NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                NVPendingCall = "Call " & NVReg(0)
+                NativeRuntimeCall = "": Exit Function
             Case Else
                 'Emit each intrinsic as its own visible statement.  (Threading the
                 'result into the next op silently dropped calls such as DateAdd /
