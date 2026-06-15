@@ -1713,13 +1713,54 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         'result through a hidden by-reference buffer, leaving an HRESULT
                         'in eax that VB immediately error-checks (cmp eax,0) - which
                         'would otherwise fold/consume a deferred call and lose it.
-                        Dim cpname As String, cargs As String, csig As String
+                        Dim cpname As String, cargs As String, csig As String, ckind As String
+                        Dim cP() As String, cStart As Long, cKeep As Long, cTotal As Long, cRetbuf As String, cI As Long, cOut As String
                         cargs = NativeArgList()
                         cpname = NativeCallTargetName(ctgt)
-                        'Drop the trailing hidden return-value buffer (and any extra)
-                        'once the method's real parameter count is known.
-                        If NativeTryMethodSig(ctgt, csig) Then cargs = NativeTakeArgs(cargs, NativeArgCount(csig))
-                        NVPushTop = 0: NativeResetValue
+                        cRetbuf = ""
+                        If Len(cargs) > 0 Then
+                            cP = Split(cargs, ", ")
+                            'A COM vtable call always leads with the implicit Me/this
+                            '(the Me pointer at ebp+8, tracked as arg_8) - drop it.
+                            cStart = 0
+                            If cP(0) = "arg_8" Then cStart = 1
+                            cTotal = UBound(cP) - cStart + 1
+                            cKeep = cTotal
+                            If NativeTryMethodSig(ctgt, csig) Then cKeep = NativeArgCount(csig)
+                            If cKeep > cTotal Then cKeep = cTotal
+                            For cI = cStart To cStart + cKeep - 1
+                                If cI > UBound(cP) Then Exit For
+                                If Len(cOut) > 0 Then cOut = cOut & ", "
+                                cOut = cOut & cP(cI)
+                            Next
+                            cargs = cOut
+                            'An argument beyond the real parameter count is the hidden
+                            '[out,retval] retbuf - the method returns a value through it.
+                            If cTotal > cKeep Then cRetbuf = cP(cStart + cKeep)
+                        End If
+                        'A value-returning method (retbuf present, or a Function/Get)
+                        'folds recv.method(args) into the retbuf local + eax so the
+                        'result flows to its consumer (var_X = clsBitmap.SetBitmap(...)).
+                        Dim cIsVal As Boolean, cVal As String
+                        cIsVal = (Len(cRetbuf) > 0)
+                        If Not cIsVal Then
+                            If NativeTryMethodKind(ctgt, ckind) Then cIsVal = (InStr(ckind, "Get") > 0)
+                        End If
+                        NVPushTop = 0
+                        If cIsVal Then
+                            cVal = NVForm & "." & cpname
+                            If Len(cargs) > 0 Then cVal = cVal & "(" & cargs & ")"
+                            NativeResetValue
+                            NVReg(0) = cVal
+                            NVRegObjType(0) = "": NVRegObjVt(0) = ""
+                            If Left$(cRetbuf, 4) = "var_" Then
+                                On Error Resume Next
+                                NativeSetLocalExpr -CLng("&H" & Mid$(cRetbuf, 5)), cVal
+                                On Error GoTo 0
+                            End If
+                            Exit Function
+                        End If
+                        NativeResetValue
                         NativeProcessInst = ind & "Call " & NVForm & "." & cpname & "(" & cargs & ")" & vbCrLf
                         Exit Function
                     End If
