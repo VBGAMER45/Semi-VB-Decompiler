@@ -1630,13 +1630,24 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     '__vbaObjSet) - remember its GUID so a later property access
                     'through that local resolves (e.g. the LET target temp).
                     If Len(NVRegObjGuid(reg)) > 0 Then NativeSetLocalGuid disp, NVRegObjGuid(reg)
-                ElseIf isAbs And disp >= OptHeader.ImageBase Then
-                    'Store to a module-level global: mov [abs], reg.  Surface a
-                    'call / concat / string value as `global_X = ...` (without
-                    'this a deferred call folded into the store would be lost).
-                    If NativeIsExprValue(NVReg(reg)) Then
+                ElseIf isAbs And NativeIsGlobalAddr(disp) Then
+                    'Store to a module-level global: mov [abs], reg.  Surface any
+                    'tracked value (number / local / global / string / call / concat)
+                    'as `global_X = ...`; a bare/untracked register is left dropped.
+                    If Len(NVReg(reg)) > 0 Then
                         NativeTrackReg = NativeGlobalName(disp) & " = " & NVReg(reg)
                     End If
+                End If
+            End If
+        Case &HC7                       'mov r/m32, imm32 (store immediate)
+            If NativeDecodeDisp(dump, disp, isAbs) Then
+                If isAbs And NativeIsGlobalAddr(disp) Then
+                    'mov [abs], imm32 to a module global -> global_X = <imm/string>.
+                    Dim c7imm As Long, c7s As String
+                    c7imm = NativeDumpInt32(dump, n - 4)         'imm32 is the trailing dword
+                    If c7imm >= OptHeader.ImageBase Then c7s = NativeStringAt(c7imm)
+                    If Len(c7s) = 0 Then c7s = NativeNumFromBits(c7imm)
+                    NativeTrackReg = NativeGlobalName(disp) & " = " & c7s
                 End If
             End If
         Case &H33                       'xor r32, r/m32 (xor reg,reg -> 0)
