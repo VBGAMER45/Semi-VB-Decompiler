@@ -1936,9 +1936,15 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                 If gControl(i).aName + 1 - OptHeader.ImageBase > 0 Then
                  Seek F, gControl(i).aName + 1 - OptHeader.ImageBase
                  ControlName = GetUntilNull(F)
-                 Dim strGuid As String
+                 Dim strGuid As String, strGuidNorm As String, bCtlArray As Boolean
                  Seek F, gControl(i).aGUID + 1 - OptHeader.ImageBase
                  strGuid = modGlobals.ReturnGuid(F)
+                 'A control array's event IID is the single control's IID + 1; map it
+                 'back so the event name/number resolve, and remember it was an array so
+                 'the handler's leading "Index As Integer" parameter can be restored.
+                 strGuidNorm = modGlobals.NormalizeCtlArrayGuid(strGuid)
+                 bCtlArray = (strGuidNorm <> strGuid)
+                 strGuid = strGuidNorm
 
                 For k = 0 To UBound(taEventPointer)
                     If taEventPointer(k) <> 0 Then
@@ -1964,7 +1970,11 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                                 gProcedureList(UBound(gProcedureList)).strParent = gObjectNameArray(loopC)
                                 ReDim Preserve gProcedureList(UBound(gProcedureList) + 1)
                             Else
-                                evHandlerName = ControlName & "_" & getEventComplete(App.Path & "\data\VB6.OLB", strGuid, GetEventNumber(strGuid, CInt(k)))
+                                Dim evPart As String
+                                evPart = getEventComplete(App.Path & "\data\VB6.OLB", strGuid, GetEventNumber(strGuid, CInt(k)))
+                                'Restore the control-array handler's leading Index parameter.
+                                If bCtlArray Then evPart = modGlobals.AddIndexParam(evPart)
+                                evHandlerName = ControlName & "_" & evPart
                                 SubNamelist(UBound(SubNamelist)).strName = gObjectNameArray(loopC) & "." & evHandlerName
                                 SubNamelist(UBound(SubNamelist)).offset = pointerAevent.aEvent
                                 gProcedureList(UBound(gProcedureList)).strProcedureName = evHandlerName

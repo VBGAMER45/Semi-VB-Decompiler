@@ -1162,6 +1162,43 @@ Sub SetupEvents()
     
     
 End Sub
+Public Function NormalizeCtlArrayGuid(ByVal g As String) As String
+    'A VB6 control ARRAY exposes the same event set as the single control, but its
+    'event-interface IID is the single control's IID + 1 in Data1 (e.g. CommandButton
+    '{33AD4EF0-...} -> array {33AD4EF1-...}; PictureBox {33AD4ED0-...} -> {33AD4ED1-...}).
+    'Those array IIDs are not in GetEventNumber's table (nor VB6.OLB) by themselves, so
+    'normalize the array form (odd Data1) back to the single form so the event name and
+    'number resolve.  Only the VB6 standard control family (fixed IID suffix) is touched.
+    On Error Resume Next
+    NormalizeCtlArrayGuid = g
+    If Len(g) <> 38 Then Exit Function
+    If UCase$(Mid$(g, 10)) <> "-6699-11CF-B70C-00AA0060D393}" Then Exit Function
+    If UCase$(Left$(g, 6)) <> "{33AD4" Then Exit Function
+    Dim v As Long
+    v = CLng("&H" & Mid$(g, 2, 8))
+    If (v And 1) = 1 Then
+        v = v - 1
+        NormalizeCtlArrayGuid = "{" & Right$("00000000" & Hex$(v), 8) & Mid$(g, 10)
+    End If
+End Function
+
+Public Function AddIndexParam(ByVal ev As String) As String
+    'A control-array event handler has a leading "Index As Integer" parameter that
+    'the single-control event signature (from getEventComplete) lacks.  Inject it.
+    Dim p As Long, q As Long
+    p = InStr(ev, "(")
+    If p = 0 Then
+        AddIndexParam = ev & "(Index As Integer)"
+        Exit Function
+    End If
+    q = InStr(p, ev, ")")
+    If q > 0 And Trim$(Mid$(ev, p + 1, q - p - 1)) = "" Then
+        AddIndexParam = Left$(ev, p) & "Index As Integer" & Mid$(ev, q)
+    Else
+        AddIndexParam = Left$(ev, p) & "Index As Integer, " & Mid$(ev, p + 1)
+    End If
+End Function
+
 Public Function GetEventNumber(ByVal strGuid As String, index As Integer) As Integer
    'Call SetupEvents
 'MsgBox strGuid
