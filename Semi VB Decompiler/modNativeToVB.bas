@@ -1036,6 +1036,17 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                                 Next
                                 umArgs = umOut
                             End If
+                            'A resolved method call on a module global proves its
+                            'class - type its declaration `Public global_X As <Class>`
+                            '(reliable, unlike guessing from the __vbaNew args).
+                            If Left$(umRecv, 7) = "global_" Then
+                                Dim grcVa As Long
+                                grcVa = CLng("&H" & Mid$(umRecv, 8, 8))
+                                If gNativeGlobalClass Is Nothing Then Set gNativeGlobalClass = New Collection
+                                On Error Resume Next
+                                gNativeGlobalClass.Add NVRegObjVt(ocb), "g" & grcVa
+                                On Error GoTo 0
+                            End If
                             NVPushTop = 0
                             NativeProcessInst = ind & "Call " & umRecv & "." & umName & "(" & umArgs & ")" & vbCrLf
                             Exit Function
@@ -2596,6 +2607,7 @@ Private Function NativeRedimStmt(ByRef a() As String, ByVal cnt As Long, ByVal b
         If Len(bounds) > 0 Then bounds = bounds & ", "
         bounds = bounds & lb & " To " & ub
     Next
+    NativeFlagArrayGlobal arr                'a ReDim'd global is an array -> declare with "()"
     NativeRedimStmt = "ReDim " & IIf(bPreserve, "Preserve ", "") & arr & "(" & bounds & ")"
 End Function
 
@@ -3443,7 +3455,22 @@ Private Function NativeGlobalName(ByVal va As Long) As String
     'Synthetic stable name for a module-level global / static at an absolute .data
     'address, matching the commercial decompiler's scheme (8 hex digits).
     NativeGlobalName = "global_" & Right$("00000000" & Hex$(va), 8)
+    'Record the reference so the owning module can declare it at its top.
+    On Error Resume Next
+    If gNativeUsedGlobal Is Nothing Then Set gNativeUsedGlobal = New Collection
+    gNativeUsedGlobal.Add va, "g" & va
 End Function
+
+Private Sub NativeFlagArrayGlobal(ByVal expr As String)
+    'Mark a global as an array (it was ReDim'd) so its declaration gets "()".
+    Dim p As Long, hx As String, va As Long
+    On Error Resume Next
+    If Left$(expr, 7) <> "global_" Then Exit Sub
+    hx = Mid$(expr, 8, 8)
+    va = CLng("&H" & hx)
+    If gNativeArrayGlobal Is Nothing Then Set gNativeArrayGlobal = New Collection
+    gNativeArrayGlobal.Add va, "g" & va
+End Sub
 
 Private Function NativeIsGlobalAddr(ByVal va As Long) As Boolean
     'True when va is an absolute address inside a NON-executable (data) section of

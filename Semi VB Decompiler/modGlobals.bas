@@ -640,6 +640,14 @@ Global gFieldName As Collection
 'at the top of the form/class like the API Declare block.  From the same VarDesc.
 Global gFieldDecl As Collection
 
+'Standard-module global (Public/Global) variable tracking, used to synthesize the
+'declaration block at a module's top.  Module var NAMES are stripped in native
+'compilation, so these are keyed/rendered by address (global_XXXXXXXX); each global
+'is assigned to its owning module by the aModulePublic address range.
+Global gNativeUsedGlobal As Collection   'key "g"&VA -> the global VAs the program references
+Global gNativeArrayGlobal As Collection  'key "g"&VA -> globals used as arrays (ReDim'd) -> "()"
+Global gNativeGlobalClass As Collection  'key "g"&VA -> recovered user class name (As <Class>)
+
 
 'For Controls
 Public Type typeStandardControlSize
