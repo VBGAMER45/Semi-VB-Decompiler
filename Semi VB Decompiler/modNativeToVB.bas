@@ -1710,6 +1710,27 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             adst = NativeArgPop(): asrc = NativeArgPop()
             If Len(asrc) = 0 Then asrc = adst
             NVReg(0) = asrc: NVPushTop = 0: NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaI2I4") > 0, InStr(nm, "__vbaUI1I2") > 0, _
+             InStr(nm, "__vbaUI1I4") > 0, InStr(nm, "__vbaI4UI1") > 0, _
+             InStr(nm, "__vbaI2UI1") > 0
+            'Implicit integer widening/narrowing.  Register-based (arg and result in
+            'eax), so the value already sits in NVReg(0) - just suppress the Call.
+            'Do NOT touch the push stack: it belongs to the FOLLOWING consumer call
+            '(clearing it dropped EOF/Close/UBound arguments).
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaFpR4") > 0, InStr(nm, "__vbaFpR8") > 0, _
+             InStr(nm, "__vbaFpI4") > 0, InStr(nm, "__vbaFpI2") > 0, _
+             InStr(nm, "__vbaFpUI1") > 0, InStr(nm, "__vbaFpCY") > 0
+            'Convert the FPU top to an integer/real type (result in eax).  Fold the
+            'FPU expression value through to eax; emit no Call.  The push stack is
+            'left untouched (the FPU stack, not the arg stack, holds the input).
+            If NVFpuTop > 0 Then NVReg(0) = NativeFpuPop()
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaCastObj") > 0
+            'Object cast / interface coercion - the result is the same object, which
+            'is already tracked in eax (NVReg(0)).  Suppress the Call; leave the push
+            'stack alone.
+            NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaVarDup") > 0
             '__vbaVarDup(dest /*ecx*/, src /*edx*/) duplicates a Variant.  VB6 uses
             'it to copy a freshly built BSTR/literal Variant into the by-reference
