@@ -2608,6 +2608,10 @@ Private Function NativeMoveAssign() As String
     '(the register-argument form used by StrCopy for `var = "literal"`).
     Dim dn As String, src As String
     src = NVReg(0)
+    'A quoted string literal in edx (the fastcall source register) is an explicit
+    '`var = "literal"` StrCopy source; it takes priority over a stale eax left by a
+    'preceding call (e.g. a __vbaStrCmp whose result was never cleared off eax).
+    If Left$(NVReg(2), 1) = Chr$(34) Then src = NVReg(2)
     If Not NativeIsExprValue(src) And Len(NVPendingArg) > 0 Then src = NVPendingArg
     If Not NativeIsExprValue(src) And NativeIsExprValue(NVReg(2)) Then src = NVReg(2)
     If NVLastLeaSet And NativeIsExprValue(src) Then
