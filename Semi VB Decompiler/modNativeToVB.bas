@@ -1005,7 +1005,8 @@ Private Function NativeLooksRelational(ByVal s As String) As Boolean
     'redundant `If (<bool>) <> 0`.
     NativeLooksRelational = (InStr(s, " > ") > 0) Or (InStr(s, " < ") > 0) _
         Or (InStr(s, " >= ") > 0) Or (InStr(s, " <= ") > 0) _
-        Or (InStr(s, " <> ") > 0) Or (InStr(s, " = ") > 0)
+        Or (InStr(s, " <> ") > 0) Or (InStr(s, " = ") > 0) _
+        Or (InStr(s, " Is ") > 0)
 End Function
 
 Private Function NVProcEndApprox(ByVal addr As Long) As Long
@@ -1968,6 +1969,33 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 scList = scList & scA(scK)
             Next
             NativeRuntimeCall = "Call " & NativeFriendlyName(nm) & "(" & scList & ")": Exit Function
+        Case InStr(nm, "__vbaObjIs") > 0
+            'Object identity: __vbaObjIs(p1, p2) returns p1 Is p2 (a Boolean in ax,
+            'no materialisation - VB tests it directly).  Bind the relational into eax
+            'so the following `test ax,ax`/jcc renders `If a Is Nothing`.  A 0 operand
+            'is Nothing; order it as `<object> Is Nothing` for readability.
+            Dim oiA() As String, oiN As Long, oiObj As String, oiOther As String, oiTmp As String
+            NativeArgsSnapshot oiA, oiN
+            If oiN >= 2 Then
+                oiObj = oiA(0)                   'top of the arg stack
+                oiOther = oiA(1)                 'deeper
+                If oiObj = "0" And oiOther <> "0" Then oiTmp = oiObj: oiObj = oiOther: oiOther = oiTmp
+                If oiOther = "0" Then oiOther = "Nothing"
+                If oiObj = "0" Then oiObj = "Nothing"
+                If Len(oiObj) > 0 And oiObj <> "<arg>" And Len(oiOther) > 0 And oiOther <> "<arg>" Then
+                    NVReg(0) = "(" & oiObj & " Is " & oiOther & ")"
+                    NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                    NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                    NativeRuntimeCall = "": Exit Function
+                End If
+            End If
+            'Unresolved operand - render as the prior visible Call.
+            Dim oiList As String, oiK As Long
+            For oiK = 0 To oiN - 1
+                If Len(oiList) > 0 Then oiList = oiList & ", "
+                oiList = oiList & oiA(oiK)
+            Next
+            NativeRuntimeCall = "Call " & NativeFriendlyName(nm) & "(" & oiList & ")": Exit Function
         Case InStr(nm, "__vbaI2I4") > 0, InStr(nm, "__vbaUI1I2") > 0, _
              InStr(nm, "__vbaUI1I4") > 0, InStr(nm, "__vbaI4UI1") > 0, _
              InStr(nm, "__vbaI2UI1") > 0
