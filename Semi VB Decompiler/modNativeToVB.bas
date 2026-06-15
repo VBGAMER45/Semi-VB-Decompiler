@@ -1073,19 +1073,26 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             'first).  Drop the leading `this` when it is the receiver,
                             'then keep the method's real parameter count from the front.
                             umArgs = NativeArgList()
+                            Dim umP() As String, umStart As Long, umKeep As Long, umI As Long, umOut As String
+                            Dim umTotal As Long, umRetbuf As String
+                            umTotal = 0: umRetbuf = ""
                             If Len(umArgs) > 0 Then
-                                Dim umP() As String, umStart As Long, umKeep As Long, umI As Long, umOut As String
                                 umP = Split(umArgs, ", ")
                                 umStart = 0
                                 If umP(0) = umRecv Then umStart = 1
-                                umKeep = UBound(umP) - umStart + 1
+                                umTotal = UBound(umP) - umStart + 1
+                                umKeep = umTotal
                                 If NativeTryMethodSig(umAddr, umSig) Then umKeep = NativeArgCount(umSig)
+                                If umKeep > umTotal Then umKeep = umTotal
                                 For umI = umStart To umStart + umKeep - 1
                                     If umI > UBound(umP) Then Exit For
                                     If Len(umOut) > 0 Then umOut = umOut & ", "
                                     umOut = umOut & umP(umI)
                                 Next
                                 umArgs = umOut
+                                'An argument beyond the real parameter count is the
+                                'hidden [out,retval] retbuf - the method returns a value.
+                                If umTotal > umKeep Then umRetbuf = umP(umStart + umKeep)
                             End If
                             'A resolved method call on a module global proves its
                             'class - type its declaration `Public global_X As <Class>`
@@ -1098,22 +1105,31 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                                 gNativeGlobalClass.Add NVRegObjVt(ocb), "g" & grcVa
                                 On Error GoTo 0
                             End If
-                            'A Property Get returns its value via the hidden retbuf
-                            'out-param (the last &local lea'd before the call).  Fold
-                            'recv.Prop into that local + eax so the consumer renders
-                            'e.g. global_108 = clsBitmap.InvertImageDC; emit nothing.
-                            Dim umKind As String
-                            If NativeTryMethodKind(umAddr, umKind) Then
-                                If InStr(umKind, "Get") > 0 Then
-                                    Dim umVal As String
-                                    umVal = umRecv & "." & umName
-                                    If Len(umArgs) > 0 Then umVal = umVal & "(" & umArgs & ")"
-                                    NVPushTop = 0
-                                    NVReg(0) = umVal
-                                    NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjInst(0) = ""
-                                    If NVLastLeaSet Then NativeSetLocalExpr NVLastLea, umVal: NVLastLeaSet = False
-                                    Exit Function           'value flows to the consumer
+                            'A value-returning method (Function or Property Get)
+                            'delivers its result through the hidden retbuf out-param.
+                            'Fold recv.method(realArgs) into that retbuf local + eax so
+                            'the value flows to its consumer (e.g.
+                            'global_108 = clsBitmap.InvertImageDC, or
+                            'If picBmp.SetBitmap(x) Then) instead of a bogus Call.
+                            Dim umKind As String, umVal As String, umIsVal As Boolean
+                            umIsVal = (Len(umRetbuf) > 0)
+                            If Not umIsVal Then
+                                If NativeTryMethodKind(umAddr, umKind) Then umIsVal = (InStr(umKind, "Get") > 0)
+                            End If
+                            If umIsVal Then
+                                umVal = umRecv & "." & umName
+                                If Len(umArgs) > 0 Then umVal = umVal & "(" & umArgs & ")"
+                                NVPushTop = 0
+                                NVReg(0) = umVal
+                                NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjInst(0) = ""
+                                If Left$(umRetbuf, 4) = "var_" Then
+                                    On Error Resume Next
+                                    NativeSetLocalExpr -CLng("&H" & Mid$(umRetbuf, 5)), umVal
+                                    On Error GoTo 0
+                                ElseIf NVLastLeaSet Then
+                                    NativeSetLocalExpr NVLastLea, umVal: NVLastLeaSet = False
                                 End If
+                                Exit Function           'value flows to the consumer
                             End If
                             NVPushTop = 0
                             NativeProcessInst = ind & "Call " & umRecv & "." & umName & "(" & umArgs & ")" & vbCrLf
