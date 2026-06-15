@@ -432,10 +432,58 @@ nextInst:
     If Len(NVPendingCall) > 0 Then output = output & NativeIndentStr() & NVPendingCall & vbCrLf: NVPendingCall = ""
     NativeCloseIfs output, &H7FFFFFFF
     output = output & "End " & NVProcEndWord & vbCrLf
-    DecompileNativeProcToVB = output
+    DecompileNativeProcToVB = NativeStripOrphanLabels(output)
     Exit Function
 fail:
     DecompileNativeProcToVB = "' Error decompiling " & Hex$(addr) & ": " & Err.Description & vbCrLf
+End Function
+
+Private Function NativeStripOrphanLabels(ByVal src As String) As String
+    'Remove `loc_XXXXXXXX:` label lines that nothing branches to.  VB labels are
+    'referenced only by GoTo / GoSub / Resume / On Error GoTo (all contain
+    '"GoTo loc_"/"GoSub loc_"/"Resume loc_"), so a label-definition line not named
+    'by any of those is dead noise from dropped/restructured branches - safe to cut.
+    Dim lines() As String, i As Long, ln As String, lt As String, refs As Collection
+    Dim out As String, lbl As String
+    On Error Resume Next
+    Set refs = New Collection
+    lines = Split(src, vbCrLf)
+    For i = 0 To UBound(lines)
+        ln = lines(i)
+        NativeAddRefLabel refs, ln, "GoTo loc_"
+        NativeAddRefLabel refs, ln, "GoSub loc_"
+        NativeAddRefLabel refs, ln, "Resume loc_"
+    Next
+    For i = 0 To UBound(lines)
+        lt = Trim$(lines(i))
+        If Left$(lt, 4) = "loc_" And Right$(lt, 1) = ":" And InStr(lt, " ") = 0 Then
+            lbl = Left$(lt, Len(lt) - 1)
+            If Not NativeHasKey(refs, lbl) Then GoTo skipLine    'orphan label -> drop
+        End If
+        If Len(out) > 0 Then out = out & vbCrLf
+        out = out & lines(i)
+skipLine:
+    Next
+    NativeStripOrphanLabels = out
+End Function
+
+Private Sub NativeAddRefLabel(refs As Collection, ByVal ln As String, ByVal kw As String)
+    'Add the label named after every occurrence of kw (e.g. "GoTo loc_") in ln.
+    Dim p As Long, lbl As String
+    On Error Resume Next
+    p = InStr(ln, kw)
+    Do While p > 0
+        lbl = Mid$(ln, p + Len(kw) - 4, 12)        'kw ends with "loc_"; back up 4 to include it
+        If Left$(lbl, 4) = "loc_" Then refs.Add 1, lbl
+        p = InStr(p + 1, ln, kw)
+    Loop
+End Sub
+
+Private Function NativeHasKey(c As Collection, ByVal key As String) As Boolean
+    Dim v As Variant
+    On Error Resume Next
+    v = c(key)
+    NativeHasKey = (Err.Number = 0)
 End Function
 
 Private Function NativeColGet(c As Collection, ByVal key As String) As String
