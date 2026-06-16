@@ -1486,6 +1486,7 @@ Private Sub NativeDetectLateCalls(col As Collection)
         'Mem call carries the member NAME as a string arg, so it needs no DISPID.
         If InStr(an, "__vbaLateIdCall") > 0 Then
             Dim cand As String, j As Long, lim As Long, pv As Long
+            cand = ""                          'reset per call (VB6 Dim-in-loop does NOT)
             lim = k - 30: If lim < 0 Then lim = 0
             For j = k - 1 To lim Step -1
                 If (arr(j).cmdType And C_TYPEMASK) = C_CAL Then
