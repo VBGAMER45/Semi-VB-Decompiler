@@ -1469,6 +1469,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
     SFile = vbNullString
     ReDim gControlNameArray(0) 'Treeveiw control list
     Set gControlClass = New Collection
+    Set gFormInstGlobal = New Collection
     ReDim gControlOffset(0)
     ReDim gProcedureList(0)
     ReDim gOcxList(0)
@@ -1806,7 +1807,17 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
         gObjectInfoHolder(loopC).NumberOfProcs = gObjectInfo.NumberOfProcs
         gObjectInfoHolder(loopC).ObjectIndex = gObjectInfo.ObjectIndex
         gObjectInfoHolder(loopC).RunTimeLoaded = gObjectInfo.RunTimeLoaded
-        
+
+        'Record this FORM's predeclared-instance global (BSS at RunTimeLoaded + 8) so
+        '`frmX.Prop = ..` via that global resolves to the form name - including from a
+        '.bas module, where there is no current-form (NVForm) context.
+        If gObject(loopC).ObjectType = 98435 Or gObject(loopC).ObjectType = 17926147 Or gObject(loopC).ObjectType = 98467 Or gObject(loopC).ObjectType = 98499 Then
+            If gObjectInfo.RunTimeLoaded <> 0 Then
+                Call modGlobals.AddFormInstGlobal(gObjectInfo.RunTimeLoaded + 8, gObjectNameArray(loopC))
+            End If
+        End If
+
+
         'If gObjectInfo.aProcTable - OptHeader.ImageBase > 0 Then
             'Dim ProcCodeInfo As tCodeInfo
             'Seek f, gObjectInfo.aProcTable + 1 - OptHeader.ImageBase

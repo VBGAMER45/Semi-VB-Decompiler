@@ -2550,22 +2550,30 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     'Let value (a pushed arg) is recovered.
                     'Gate tightly so an UNTRACKED control's property call (e.g.
                     'lblSkillName.Caption, also vtoffset 0x54) is NOT mislabelled as
-                    'the form's: accept only when the receiver is the form's own
-                    'vtable (Me) or the predeclared form-instance global (rendered
-                    'global_XXXX) - a control receiver is a `frmX.ctl`/var_ token,
-                    'never a bare global_.
-                    If Len(NVForm) > 0 And disp >= &H40 And disp < &H250 Then
-                        Dim okForm As Boolean, thisTok As String
-                        If ocb >= 0 And ocb <= 7 Then okForm = NVRegIsFormVt(ocb)
-                        If Not okForm And NVPushTop >= 1 Then
-                            thisTok = NVPushImm(NVPushTop - 1)
-                            If Left$(thisTok, 7) = "global_" Then okForm = True
+                    'the form's: the receiver must be the form's own vtable (Me) or a
+                    'predeclared form-instance global (rendered global_XXXX) - a
+                    'control receiver is a `frmX.ctl`/var_ token, never a bare global_.
+                    If disp >= &H40 And disp < &H250 Then
+                        Dim formObj As String, thisTok As String, gva As Long
+                        'Me's own vtable -> the current form.
+                        If ocb >= 0 And ocb <= 7 Then
+                            If NVRegIsFormVt(ocb) And Len(NVForm) > 0 Then formObj = NVForm
                         End If
-                        If okForm Then
+                        'A predeclared form-instance global -> the mapped form (works
+                        'from a .bas module too); else the current form if in one.
+                        If Len(formObj) = 0 And NVPushTop >= 1 Then
+                            thisTok = NVPushImm(NVPushTop - 1)
+                            If Left$(thisTok, 7) = "global_" Then
+                                gva = NativeGlobalTokVa(thisTok)
+                                formObj = FormNameByInstGlobal(gva)
+                                If Len(formObj) = 0 And Len(NVForm) > 0 Then formObj = NVForm
+                            End If
+                        End If
+                        If Len(formObj) > 0 Then
                             Dim fpv As String
                             'Pass the Form EVENT/coclass GUID - GetProperty matches it
                             'then searches the NEXT typeinfo (the _Form property iface).
-                            fpv = NativeControlProp(NVForm, "{33AD4F38-6699-11CF-B70C-00AA0060D393}", disp)
+                            fpv = NativeControlProp(formObj, "{33AD4F38-6699-11CF-B70C-00AA0060D393}", disp)
                             If Len(fpv) > 0 Then
                                 NVPushTop = 0
                                 NativeProcessInst = ind & fpv & vbCrLf
@@ -3902,6 +3910,13 @@ Private Function NativeSubstituteArgNames(ByVal src As String) As String
     For i = 0 To NVArgN - 1
         NativeSubstituteArgNames = NativeReplaceToken(NativeSubstituteArgNames, NVArgTok(i), NVArgNm(i))
     Next
+End Function
+
+Private Function NativeGlobalTokVa(ByVal tok As String) As Long
+    'Parse the VA out of a global_XXXXXXXX token (0 if malformed). On Error is
+    'function-scoped, so a bad/overflowing parse can't disturb the caller.
+    On Error Resume Next
+    If Left$(tok, 7) = "global_" Then NativeGlobalTokVa = CLng("&H" & Mid$(tok, 8))
 End Function
 
 Private Sub NativeSuppressVarBuild(ByVal base As String)

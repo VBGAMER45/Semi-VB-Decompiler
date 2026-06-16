@@ -619,6 +619,12 @@ Global gControlNameArray() As typeControlName
 'late-bound call on that control resolves against the correct OCX typelib.
 Global gControlClass As Collection
 
+'Maps a form's predeclared-instance global VA -> the form name, so a property put
+'on `frmX` via that global (e.g. `frmMain.Caption = ..` from a .bas module, where
+'there is no current-form context) resolves to the form name.  The instance global
+'is BSS at dword(aObjectInfo + 0x1C) + 8.  (Helpers at end of module.)
+Global gFormInstGlobal As Collection
+
 'Maps an object's own method slot to its code address, keyed "ObjectName:slot",
 'so a native "call [vtable + 0x6F8 + slot*4]" (a form calling its own method)
 'resolves to the method.  Populated from the event-link table during OpenVBExe.
@@ -2562,4 +2568,18 @@ Public Function GetPart(DataStr As String, DataId As Long, Separator As String) 
 errHandler:
     GetPart = False
 End Function
+
+Public Function FormNameByInstGlobal(ByVal va As Long) As String
+    'Form name for a predeclared-instance global VA, or "" if unmapped.
+    On Error Resume Next
+    If gFormInstGlobal Is Nothing Then Exit Function
+    FormNameByInstGlobal = gFormInstGlobal("G" & va)
+End Function
+
+Public Sub AddFormInstGlobal(ByVal va As Long, ByVal formName As String)
+    'Record a form's predeclared-instance global -> its name (deduped; first wins).
+    On Error Resume Next
+    If gFormInstGlobal Is Nothing Then Set gFormInstGlobal = New Collection
+    If va <> 0 And Len(formName) > 0 Then gFormInstGlobal.Add formName, "G" & va
+End Sub
 
