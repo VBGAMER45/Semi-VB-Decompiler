@@ -4389,6 +4389,28 @@ NewControl:
                 gControlOffset(UBound(gControlOffset)).ControlType = cControlHeader.cType
                 ReDim Preserve gControlOffset(UBound(gControlOffset) + 1)
                   gIdentSpaces = gIdentSpaces + 1
+                'Emit the standard position properties for a VISIBLE external control.
+                'After the class string, a visible control's property data leads with a
+                '1-byte opcode then the 8-byte Integer position (Left, Top, Width,
+                'Height); an INVISIBLE control (Winsock, CommonDialog) starts straight
+                'with the OCX "-LB" (0x2D) persistence stream and has no leading position.
+                'Read it from the current file position, guarded by a sanity range so a
+                'mis-aligned record never emits garbage; restore the pointer afterward
+                '(the full OCX property blob is still skipped below).
+                Dim ocxLead As Byte, ocxPos As typeStandardControlSize, ocxAt As Long
+                ocxAt = Loc(F)
+                Get #F, , ocxLead
+                If ocxLead <> &H2D Then
+                    Get #F, , ocxPos
+                    If ocxPos.cLeft > -2000 And ocxPos.cLeft < 30000 And ocxPos.cTop > -2000 And ocxPos.cTop < 30000 _
+                       And ocxPos.cWidth >= 0 And ocxPos.cWidth < 30000 And ocxPos.cHeight >= 0 And ocxPos.cHeight < 30000 Then
+                        Call AddText("Left = " & ocxPos.cLeft)
+                        Call AddText("Top = " & ocxPos.cTop)
+                        Call AddText("Width = " & ocxPos.cWidth)
+                        Call AddText("Height = " & ocxPos.cHeight)
+                    End If
+                End If
+                Seek F, ocxAt
                 Seek F, fPos + cControlHeader.length
                 GoTo EndLabel
         End Select
