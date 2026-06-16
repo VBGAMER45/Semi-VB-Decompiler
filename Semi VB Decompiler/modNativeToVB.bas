@@ -2520,6 +2520,38 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
                     Exit Function
                 Else
+                    'A property call on the form's OWN _Form vtable: `Form1.Caption =
+                    '"Hey"` compiles to `mov this,[formInstance]; push value; push this;
+                    'call [this_vt + off]` (Caption Let = 0x54).  When we are inside a
+                    'form and the offset resolves to a real _Form property (GetProperty
+                    'returns "" for any non-_Form offset, so unrelated calls fall
+                    'through), render it.  Done BEFORE clearing the push stack so the
+                    'Let value (a pushed arg) is recovered.
+                    'Gate tightly so an UNTRACKED control's property call (e.g.
+                    'lblSkillName.Caption, also vtoffset 0x54) is NOT mislabelled as
+                    'the form's: accept only when the receiver is the form's own
+                    'vtable (Me) or the predeclared form-instance global (rendered
+                    'global_XXXX) - a control receiver is a `frmX.ctl`/var_ token,
+                    'never a bare global_.
+                    If Len(NVForm) > 0 And disp >= &H40 And disp < &H250 Then
+                        Dim okForm As Boolean, thisTok As String
+                        If ocb >= 0 And ocb <= 7 Then okForm = NVRegIsFormVt(ocb)
+                        If Not okForm And NVPushTop >= 1 Then
+                            thisTok = NVPushImm(NVPushTop - 1)
+                            If Left$(thisTok, 7) = "global_" Then okForm = True
+                        End If
+                        If okForm Then
+                            Dim fpv As String
+                            'Pass the Form EVENT/coclass GUID - GetProperty matches it
+                            'then searches the NEXT typeinfo (the _Form property iface).
+                            fpv = NativeControlProp(NVForm, "{33AD4F38-6699-11CF-B70C-00AA0060D393}", disp)
+                            If Len(fpv) > 0 Then
+                                NVPushTop = 0
+                                NativeProcessInst = ind & fpv & vbCrLf
+                                Exit Function
+                            End If
+                        End If
+                    End If
                     'A property vtable call that the per-register control tracking
                     'above did NOT resolve.  The old single-slot NVLastControl is
                     'stale-prone (it names whatever control was fetched last, not the
