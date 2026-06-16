@@ -1291,23 +1291,24 @@ Public Sub GenerateProject(ByVal sPath As String)
                 If gObject(i).ObjectType = gObjectTypeList(g).value And gObjectTypeList(g).strType = 2 Then gHasStandardModule = True
             Next g
         Next
+        'Write Forms frx files FIRST: appending OCX sized blobs (TextRTF, etc.)
+        'resolves their $"frx":offset, which WriteForms then substitutes into the
+        '.frm text (placeholders #OCXFRX<id>#).
+        For i = 0 To UBound(gObject)
+            For g = 0 To UBound(gObjectTypeList)
+                If gObject(i).ObjectType = gObjectTypeList(g).value And gObjectTypeList(g).strType = 1 Then
+                    Call modOutput.WriteFormFrx(sPath, gObjectNameArray(i), i)
+                    Exit For
+                End If
+            Next g
+        Next
+
         'Write VB5/6 Forms
         For i = 0 To UBound(gObject)
             For g = 0 To UBound(gObjectTypeList)
                 If gObject(i).ObjectType = gObjectTypeList(g).value And gObjectTypeList(g).strType = 1 Then
 
                     Call modOutput.WriteForms(sPath & "\" & gObjectNameArray(i) & ".frm", gObjectNameArray(i), i)
-                    Exit For
-                End If
-            Next g
-        Next
-
-
-        'Write Forms frx files
-        For i = 0 To UBound(gObject)
-            For g = 0 To UBound(gObjectTypeList)
-                If gObject(i).ObjectType = gObjectTypeList(g).value And gObjectTypeList(g).strType = 1 Then
-                    Call modOutput.WriteFormFrx(sPath, gObjectNameArray(i), i)
                     Exit For
                 End If
             Next g
@@ -4432,7 +4433,7 @@ NewControl:
                 'and IPersistStreamInit::Load-ing its blob (beats commercial's opaque
                 'OleObjectBlob). Best-effort: needs the control registered; silently
                 'skips on any failure.
-                Call modOcx.EmitOcxProperties(F, strExternObject, ocxAt, fPos + cControlHeader.length)
+                Call modOcx.EmitOcxProperties(F, strExternObject, ocxAt, fPos + cControlHeader.length, strCurrentForm)
                 Seek F, fPos + cControlHeader.length
                 GoTo EndLabel
         End Select

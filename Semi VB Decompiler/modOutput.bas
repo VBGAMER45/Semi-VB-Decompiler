@@ -1058,7 +1058,9 @@ On Error GoTo nofile:
                 'Begin Form
                 For i = 0 To frmMain.txtFinal.UBound
                     If frmMain.txtFinal(i).tag = modGlobals.gObjectNameArray(index) Then
-                        Print #F, Trim(frmMain.txtFinal(i).Text)
+                        'Resolve any OCX frx blob placeholders (#OCXFRX<id>#) to the
+                        'byte offsets recorded when WriteFormFrx appended the blobs.
+                        Print #F, modOcx.SubstituteOcxFrxPlaceholders(Trim(frmMain.txtFinal(i).Text), FormName)
                         Exit For
                     End If
                 Next
@@ -1138,12 +1140,15 @@ Sub WriteFormFrx(FilePath As String, FormName As String, index As Integer)
             
         End If
     Next
-        If LOF(fFile) = 0 Then bDeleteFrx = True
+        'Append OCX sized blobs (TextRTF, OleObjectBlob fallback) after the pictures
+        'and record their byte offsets for the .frm placeholder substitution.
+        Call modOcx.WriteOcxFrxForForm(fFile, FormName)
+        If LOF(fFile) = 0 And Not modOcx.HasOcxFrxBlobs(FormName) Then bDeleteFrx = True
     Close fFile
     If bDeleteFrx = True Then
         Kill FilePath & "\" & FormName & ".frx"
     End If
-    
+
 End Sub
 Sub WriteModules(Filename As String, ObjectName As String, index As Integer)
 '*****************************

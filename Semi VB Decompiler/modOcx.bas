@@ -33,6 +33,25 @@ Private Declare Sub CoTaskMemFree Lib "ole32" (ByVal pv As Long)
 Private Const CC_STDCALL As Long = 4
 Private Const VT_I4 As Integer = 3
 
+' --- OCX frx sized-blob registry (TextRTF, OleObjectBlob fallback) -------------
+' VB stores large/binary OCX property values ($"frx":offset) as [Long length][bytes]
+' in the form's .frx. We register each blob during decompile with a placeholder
+' (#OCXFRX<id>#) in the .frm text, then WriteFormFrx appends the blobs AFTER the
+' pictures (untouched) and records each one's real byte offset, which WriteForms
+' substitutes for the placeholder. (frx is written before the .frm - see the
+' swapped loops in the decompile driver.)
+Private Type tOcxFrxBlob
+    FormName As String
+    BlobId As Long
+    Data() As Byte
+    Offset As Long
+End Type
+Private mOcxFrx() As tOcxFrxBlob
+Private mOcxFrxCount As Long
+Private mOcxFrxNextId As Long
+
+Public Const OCXFRX_TAG As String = "#OCXFRX"
+
 ' IPersistStreamInit vtable slots (after IUnknown 0,1,2 + IPersist GetClassID=3):
 '   4 IsDirty, 5 Load, 6 Save, 7 GetSizeMax, 8 InitNew
 Private Const VT_QueryInterface As Long = 0
@@ -58,7 +77,8 @@ Private Const FUNCFLAG_FNONBROWSABLE As Long = &H400
 '   True on success (caller skips its fallback), False to fall back to OleObjectBlob.
 '*****************************
 Public Function EmitOcxProperties(ByVal F As Variant, ByVal className As String, _
-                                  ByVal startPos As Long, ByVal endPos As Long) As Boolean
+                                  ByVal startPos As Long, ByVal endPos As Long, _
+                                  ByVal formName As String) As Boolean
     On Error GoTo fail
     EmitOcxProperties = False
 
@@ -86,6 +106,16 @@ Public Function EmitOcxProperties(ByVal F As Variant, ByVal className As String,
     ' --- 4. Enumerate writable browsable properties, emit the non-default ones ---
     Dim emitted As Long
     emitted = EmitChangedProperties(ctl, fresh, className)
+
+    ' --- 5. Rich-text content (TextRTF) -> frx. The RichEdit-backed property is
+    ' not COM-readable without a window, so extract the RTF straight from the blob
+    ' (brace-balanced) and write it to the form's frx as a $"frx":offset reference.
+    Dim rtf() As Byte
+    If RtfFromBlob(blob, rtf) Then
+        Dim rid As Long
+        rid = AddOcxFrxBlob(formName, rtf)
+        If rid > 0 Then Call AddText("TextRTF = $" & cQuote & formName & ".frx" & cQuote & ":" & OCXFRX_TAG & rid & "#")
+    End If
 
     Set ctl = Nothing
     Set fresh = Nothing
@@ -186,6 +216,120 @@ Public Function GetOcxTrailerLeftTop(ByVal F As Variant, ByVal startPos As Long,
 done:
     On Error Resume Next
     Seek F, savePos
+End Function
+
+'*****************************
+'Purpose: Extract a brace-balanced RTF document ("{\rtf...}") from an OCX blob.
+'   RichTextBox stores its content in the IPersistStream blob; the TextRTF property
+'   is not COM-readable without a window, so we lift the RTF directly. Honours RTF
+'   backslash escapes (\{ \} \\) when balancing braces. Returns the bytes via rtf().
+'*****************************
+Private Function RtfFromBlob(ByRef blob() As Byte, ByRef rtf() As Byte) As Boolean
+    On Error GoTo fail
+    RtfFromBlob = False
+    Dim n As Long
+    n = UBound(blob) + 1
+    Dim s As Long
+    s = FindRtfStart(blob, n)
+    If s < 0 Then Exit Function
+    ' Balance braces from s to the matching close.
+    Dim i As Long, depth As Long
+    For i = s To n - 1
+        Select Case blob(i)
+            Case &H5C    '\  escape - skip next byte
+                i = i + 1
+            Case &H7B    '{
+                depth = depth + 1
+            Case &H7D    '}
+                depth = depth - 1
+                If depth = 0 Then
+                    Dim L As Long
+                    L = i - s + 1
+                    ReDim rtf(L - 1)
+                    CopyMemoryOcx rtf(0), blob(s), L
+                    RtfFromBlob = True
+                    Exit Function
+                End If
+        End Select
+    Next
+fail:
+    RtfFromBlob = False
+End Function
+
+'*****************************
+'Purpose: Offset of the "{\rtf" signature in a blob, or -1.
+'*****************************
+Private Function FindRtfStart(ByRef b() As Byte, ByVal n As Long) As Long
+    Dim i As Long
+    FindRtfStart = -1
+    For i = 0 To n - 6
+        If b(i) = &H7B And b(i + 1) = &H5C And b(i + 2) = &H72 And b(i + 3) = &H74 And b(i + 4) = &H66 Then
+            FindRtfStart = i
+            Exit Function
+        End If
+    Next
+End Function
+
+'*****************************
+'Purpose: Register a sized blob for a form's frx; returns its placeholder id.
+'*****************************
+Public Function AddOcxFrxBlob(ByVal formName As String, ByRef data() As Byte) As Long
+    On Error GoTo fail
+    If mOcxFrxCount = 0 Then ReDim mOcxFrx(15)
+    If mOcxFrxCount > UBound(mOcxFrx) Then ReDim Preserve mOcxFrx(mOcxFrxCount + 15)
+    mOcxFrxNextId = mOcxFrxNextId + 1
+    mOcxFrx(mOcxFrxCount).FormName = formName
+    mOcxFrx(mOcxFrxCount).BlobId = mOcxFrxNextId
+    mOcxFrx(mOcxFrxCount).Data = data
+    mOcxFrx(mOcxFrxCount).Offset = -1
+    mOcxFrxCount = mOcxFrxCount + 1
+    AddOcxFrxBlob = mOcxFrxNextId
+    Exit Function
+fail:
+    AddOcxFrxBlob = 0
+End Function
+
+'*****************************
+'Purpose: True if any frx blob is registered for the form (so WriteFormFrx keeps
+'   the file even when there are no pictures).
+'*****************************
+Public Function HasOcxFrxBlobs(ByVal formName As String) As Boolean
+    Dim i As Long
+    For i = 0 To mOcxFrxCount - 1
+        If StrComp(mOcxFrx(i).FormName, formName, vbTextCompare) = 0 Then HasOcxFrxBlobs = True: Exit Function
+    Next
+End Function
+
+'*****************************
+'Purpose: Append all of a form's registered blobs to its open frx file (each as
+'   [Long length][bytes]), recording the byte offset where each begins.
+'*****************************
+Public Sub WriteOcxFrxForForm(ByVal fFile As Long, ByVal formName As String)
+    On Error Resume Next
+    Dim i As Long, ln As Long
+    For i = 0 To mOcxFrxCount - 1
+        If StrComp(mOcxFrx(i).FormName, formName, vbTextCompare) = 0 Then
+            mOcxFrx(i).Offset = LOF(fFile)              'current end = this blob's offset
+            ln = UBound(mOcxFrx(i).Data) + 1
+            Put fFile, , ln                              '4-byte length prefix
+            Put fFile, , mOcxFrx(i).Data                 'the bytes
+        End If
+    Next
+End Sub
+
+'*****************************
+'Purpose: Replace #OCXFRX<id># placeholders in a form's text with the resolved
+'   4-hex frx offsets recorded by WriteOcxFrxForForm.
+'*****************************
+Public Function SubstituteOcxFrxPlaceholders(ByVal text As String, ByVal formName As String) As String
+    Dim i As Long
+    SubstituteOcxFrxPlaceholders = text
+    For i = 0 To mOcxFrxCount - 1
+        If StrComp(mOcxFrx(i).FormName, formName, vbTextCompare) = 0 And mOcxFrx(i).Offset >= 0 Then
+            SubstituteOcxFrxPlaceholders = Replace(SubstituteOcxFrxPlaceholders, _
+                OCXFRX_TAG & mOcxFrx(i).BlobId & "#", PadHex(Hex$(mOcxFrx(i).Offset), 4))
+        End If
+    Next
 End Function
 
 Private Function DwordAt(ByRef b() As Byte, ByVal idx As Long) As Long
