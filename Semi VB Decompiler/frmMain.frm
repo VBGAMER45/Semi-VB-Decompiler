@@ -1984,7 +1984,17 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
        
                             Dim evHandlerName As String
                             If GetEventNumber(strGuid, CInt(k)) = -1 Then
-                             evHandlerName = ControlName & "_Event" & CInt(k)
+                             'Not an intrinsic (VB6.OLB) event - try the control's OCX
+                             'typelib (e.g. Winsock1_DataArrival). Falls back to the
+                             'generic _Event<k> name only if that fails too.
+                             Dim ocxEv As String
+                             ocxEv = modCOM.OcxEventSig(ControlName, CInt(k), gControl(i).EventCount)
+                             If Len(ocxEv) > 0 Then
+                                 If bCtlArray Then ocxEv = modGlobals.AddIndexParam(ocxEv)
+                                 evHandlerName = ControlName & "_" & ocxEv
+                             Else
+                                 evHandlerName = ControlName & "_Event" & CInt(k)
+                             End If
                              SubNamelist(UBound(SubNamelist)).strName = gObjectNameArray(loopC) & "." & evHandlerName
                              SubNamelist(UBound(SubNamelist)).offset = pointerAevent.aEvent
 

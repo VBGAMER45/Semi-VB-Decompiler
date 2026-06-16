@@ -7,6 +7,7 @@ Option Explicit
 Global tliTypeLibInfo As TypeLibInfo
 '--- Late-bound (__vbaLateIdCall) member resolution: DISPID -> name via the OCX typelib ---
 Private mLateTlbCache As Collection   'OCX file path -> clsTypeLibInfo (each loaded once)
+Private mOcxEvtTlbCache As Collection 'OCX file path -> TypeLibInfo (event sig resolution)
 
 Public Function ResolveLateMember(ByVal ocxFile As String, ByVal dispid As Long, ByVal wantKind As Long, ByRef invKind As Long) As String
     'Load ocxFile's typelib (cached) and return the member NAME whose memid = dispid.
@@ -454,6 +455,100 @@ Public Function ReturnHelpString(ByVal SearchData As Long, ByVal InvokeKinds As 
     End With
 
 End Function
+Public Function OcxEventSig(ByVal ctlName As String, ByVal k As Integer, ByVal EventCount As Long) As String
+'*****************************
+'Purpose: Resolve a control event handler's name+signature when the event source
+'   is an OCX's (not in VB6.OLB, so GetEventNumber returns -1). The form stores a
+'   VB-synthesized sink IID for OCX controls (not the OCX's event dispinterface
+'   IID), so we map the control to its OCX by NAME (the late-bound resolver's
+'   heuristic - Winsock1 -> "Winsock") and read the coclass's DefaultEventInterface.
+'
+'   The hooked events occupy the LAST <member-count> slots of the control's
+'   EventCount-slot table, in declaration order, so the 1-based member index is:
+'       memNum = k - (EventCount - memberCount) + 1
+'   verified against MSWINSCK.OCX (Winsock EventCount=16, 7 events -> k 9/10/11 =
+'   Error/DataArrival/Connect). Returns e.g. "DataArrival (ByVal bytesTotal As
+'   Long)" formatted by getEventInfo, or "" if unresolved.
+'*****************************
+    On Error GoTo done
+    If UBound(gOcxList) < 1 Then Exit Function
+    If mOcxEvtTlbCache Is Nothing Then Set mOcxEvtTlbCache = New Collection
+    Dim base As String
+    base = StripTrailingDigits(ctlName)
+    If Len(base) = 0 Then Exit Function
+    Dim i As Long
+    For i = 0 To UBound(gOcxList) - 1
+        If Len(gOcxList(i).strGuid) > 0 And Len(gOcxList(i).strLibname) > 0 Then
+            Dim coName As String
+            coName = CoClassPart(gOcxList(i).strLibname)      '"MSWinsockLib.Winsock" -> "Winsock"
+            If StrComp(coName, base, vbTextCompare) = 0 Or InStr(1, gOcxList(i).strLibname, base, vbTextCompare) > 0 Then
+                Dim f As String
+                f = OcxFileFromClsid(gOcxList(i).strGuid)
+                If Len(f) > 0 Then
+                    Dim sig As String
+                    sig = OcxEventSigFromTlb(f, coName, k, EventCount)
+                    If Len(sig) > 0 Then OcxEventSig = sig: Exit Function
+                End If
+            End If
+        End If
+    Next
+done:
+End Function
+
+Private Function OcxEventSigFromTlb(ByVal f As String, ByVal coName As String, ByVal k As Integer, ByVal EventCount As Long) As String
+    On Error GoTo done
+    Dim tl As TypeLibInfo
+    Set tl = Nothing
+    On Error Resume Next
+    Set tl = mOcxEvtTlbCache(f)
+    On Error GoTo done
+    If tl Is Nothing Then
+        Set tl = New TypeLibInfo
+        tl.ContainingFile = f
+        On Error Resume Next
+        mOcxEvtTlbCache.Add tl, f
+        On Error GoTo done
+    End If
+    Dim cc As CoClassInfo, ci As Long
+    Set cc = Nothing
+    For ci = 1 To tl.CoClasses.count
+        If StrComp(tl.CoClasses.Item(ci).name, coName, vbTextCompare) = 0 Then
+            Set cc = tl.CoClasses.Item(ci)
+            Exit For
+        End If
+    Next
+    If cc Is Nothing Then Exit Function
+    Dim ev As InterfaceInfo
+    Set ev = cc.DefaultEventInterface
+    If ev Is Nothing Then Exit Function
+    Dim memNum As Long
+    memNum = (k - (EventCount - ev.Members.count)) + 1        '1-based member index
+    If memNum >= 1 And memNum <= ev.Members.count Then
+        OcxEventSigFromTlb = getEventInfo(ev.Members.Item(memNum), "", False)
+    End If
+done:
+End Function
+
+'Strip trailing digits from a control name (Winsock1 -> Winsock) for OCX matching.
+Private Function StripTrailingDigits(ByVal s As String) As String
+    Dim n As Long
+    n = Len(s)
+    Do While n > 0
+        Dim c As Integer
+        c = Asc(Mid$(s, n, 1))
+        If c < 48 Or c > 57 Then Exit Do
+        n = n - 1
+    Loop
+    StripTrailingDigits = Left$(s, n)
+End Function
+
+'Coclass part of an OCX class string ("MSWinsockLib.Winsock" -> "Winsock").
+Private Function CoClassPart(ByVal libClass As String) As String
+    Dim p As Long
+    p = InStrRev(libClass, ".")
+    If p > 0 Then CoClassPart = Mid$(libClass, p + 1) Else CoClassPart = libClass
+End Function
+
 Public Function getEventComplete(sFileName As String, strGuid As String, EventNum As Integer) As String
 '*****************************
 'Purpose: To return all the events from a filename by COM
