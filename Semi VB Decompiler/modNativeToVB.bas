@@ -80,6 +80,7 @@ Private NVPushDisp() As Long       'for each pushed arg, the by-ref local displa
 Private NVPushTop As Long
 Private NVLastPushDisp As Long     'set by NativePushOperand: by-ref local disp of the value just decoded (0 = none)
 Private NVVSlot As Collection      'variant stack slot (disp) -> last value stored (VT tag / string / expr)
+Private NVLastVarData As String    'last value written to a Variant DATA field (offset +8) - the RHS for a following late-bound property put whose value would otherwise be <value>
 Private NVIndent As Long           'current block-indent level
 Private NVIfTarget() As Long       'addresses where open If blocks must close
 Private NVIfTop As Long
@@ -207,6 +208,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVLocalGuid = New Collection
     Set NVStrLits = New Collection
     Set NVVSlot = New Collection
+    NVLastVarData = ""
     Set NVSkipLabels = New Collection
     Set NVLoopHdr = New Collection
     Set NVSelExprReg = New Collection
@@ -1646,6 +1648,10 @@ Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String,
         Dim stVal As String
         stVal = NativePopValue()
         If Len(stVal) = 0 Or stVal = objTok Or stVal = "<value>" Then stVal = "<value>"
+        'The value is usually built into a Variant DATA field just before the call
+        '(the push stack only carried the object), so recover it from there.
+        If stVal = "<value>" And Len(NVLastVarData) > 0 Then stVal = NVLastVarData
+        NVLastVarData = ""
         NativeLateIdCall = mref & " = " & stVal
     ElseIf InStr(apiName, "Ld") > 0 Then
         'A value (property Get / function).  __vbaLateIdCallLd writes the result into a
@@ -1705,7 +1711,12 @@ Private Function NativeLateMemCall(inst As CInstruction, ByVal apiName As String
             NativeLateMemCall = ""
         End If
     ElseIf InStr(apiName, "St") > 0 Then
-        NativeLateMemCall = mref & " = " & NativePopValue()
+        Dim mstVal As String
+        mstVal = NativePopValue()
+        If Len(mstVal) = 0 Or mstVal = objTok Or mstVal = "<value>" Then mstVal = "<value>"
+        If mstVal = "<value>" And Len(NVLastVarData) > 0 Then mstVal = NVLastVarData
+        NVLastVarData = ""
+        NativeLateMemCall = mref & " = " & mstVal
     Else
         NativeLateMemCall = mref
     End If
@@ -4503,6 +4514,9 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         'raw register.
                         If fv89 = lhs89 Then fv89 = NativeRegName(reg)
                         NativeTrackReg = lhs89 & " = " & fv89
+                        'A write to a Variant's DATA field (offset +8) is the value a
+                        'following late-bound property put consumes - remember it.
+                        If disp = 8 And Len(fv89) > 0 And Left$(fv89, 1) <> "e" Then NVLastVarData = fv89
                     End If
                 End If
             End If
@@ -4525,6 +4539,9 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         If fimm >= OptHeader.ImageBase Then fis = NativeStringAt(fimm)
                         If Len(fis) = 0 Then fis = NativeNumFromBits(fimm)
                         NativeTrackReg = lhsC7 & " = " & fis
+                        'Variant DATA field (offset +8) immediate -> remember as the
+                        'value for a following late-bound property put.
+                        If disp = 8 And Len(fis) > 0 Then NVLastVarData = fis
                     End If
                 End If
             End If
