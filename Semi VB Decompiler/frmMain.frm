@@ -4411,6 +4411,15 @@ NewControl:
                     End If
                 End If
                 Seek F, ocxAt
+                'Recover the standard _ExtentX/_ExtentY/_Version from the OCX
+                'IPersistStream header (control-agnostic, deterministic). Beats the
+                'commercial decompiler, which dumps the whole blob to OleObjectBlob.
+                Dim ocxExtentX As Long, ocxExtentY As Long, ocxVersion As Long
+                If GetOcxStandardProps(F, ocxAt, fPos + cControlHeader.length, ocxExtentX, ocxExtentY, ocxVersion) Then
+                    Call AddText("_ExtentX = " & ocxExtentX)
+                    Call AddText("_ExtentY = " & ocxExtentY)
+                    Call AddText("_Version = " & ocxVersion)
+                End If
                 Seek F, fPos + cControlHeader.length
                 GoTo EndLabel
         End Select

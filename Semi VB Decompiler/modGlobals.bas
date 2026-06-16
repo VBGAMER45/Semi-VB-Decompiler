@@ -1907,6 +1907,62 @@ Exit Function
 End Function
 
 
+Public Function GetOcxStandardProps(ByVal FileNum As Variant, ByVal startPos As Long, ByVal endPos As Long, _
+                                    ByRef ExtentX As Long, ByRef ExtentY As Long, ByRef Version As Long) As Boolean
+'*****************************
+'Purpose: Read the standard OCX persistence header (_ExtentX/_ExtentY/_Version)
+'   from a VB external (ActiveX) control's IPersistStream blob. VB writes every
+'   visible/invisible external control's stream framed with the signature
+'   0x12344321, after which a control-AGNOSTIC fixed header follows:
+'       +0x04 : reserved (always 8)
+'       +0x08 : _ExtentX (Long, HiMetric)
+'       +0x0C : _ExtentY (Long, HiMetric)
+'       +0x10 : reserved
+'       +0x14 : _Version (Long)
+'   Verified byte-for-byte against richtx32.ocx (RichTextBox) and MSWINSCK.OCX
+'   (Winsock). These three properties are deterministic without instantiating the
+'   control, so we always recover them - the commercial decompiler punts the whole
+'   blob to an opaque OleObjectBlob="frx" reference instead.
+'   Returns True and fills the ByRef args when the signature is located in
+'   [startPos, endPos); the file pointer is restored before returning.
+'*****************************
+    GetOcxStandardProps = False
+    Dim savePos As Long
+    savePos = Loc(FileNum)
+    On Error GoTo cleanup
+    If endPos <= startPos + 24 Then GoTo cleanup
+    Dim n As Long
+    n = endPos - startPos
+    Dim buf() As Byte
+    ReDim buf(n - 1)
+    Seek FileNum, startPos
+    Get FileNum, , buf
+    Dim i As Long
+    For i = 0 To n - 24
+        If buf(i) = &H21 And buf(i + 1) = &H43 And buf(i + 2) = &H34 And buf(i + 3) = &H12 Then
+            ExtentX = BytesToLongLE(buf, i + 8)
+            ExtentY = BytesToLongLE(buf, i + 12)
+            Version = BytesToLongLE(buf, i + 20)
+            GetOcxStandardProps = True
+            Exit For
+        End If
+    Next
+cleanup:
+    On Error Resume Next
+    Seek FileNum, savePos
+End Function
+
+Private Function BytesToLongLE(ByRef b() As Byte, ByVal idx As Long) As Long
+'*****************************
+'Purpose: Assemble a little-endian 32-bit signed Long from a byte array without
+'   tripping VB's overflow check on a set high bit (Currency intermediary).
+'*****************************
+    Dim v As Currency
+    v = CCur(b(idx)) + CCur(b(idx + 1)) * 256@ + CCur(b(idx + 2)) * 65536@ + CCur(b(idx + 3)) * 16777216@
+    If v > 2147483647@ Then v = v - 4294967296@
+    BytesToLongLE = CLng(v)
+End Function
+
 Public Function GetAllString(ByVal FileNum As Variant) As String
 '*****************************
 'Purpose: Get any kind of string Unicode or Ascii
