@@ -287,6 +287,27 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         Next
     End If
 
+    'A FRAMELESS function (no `push ebp` entry; args at [esp+N], result in eax) is
+    'invisible to the framed decoder - recover its simple arithmetic/accessor body
+    'directly and emit it as a Function.  Bails to the normal (empty) path on any
+    'shape it does not fully understand.
+    If Not (b(0) = &H55 And b(1) = &H8B And b(2) = &HEC) Then
+        Dim flIsFunc As Boolean, flExpr As String
+        flExpr = NativeFramelessBody(col, flIsFunc)
+        If Len(flExpr) > 0 Then
+            Dim flName As String, flParams As String, flpp As Long
+            flName = NativeProcName(addr)
+            flpp = InStr(flName, "(")
+            If flpp > 0 Then flName = Trim$(Left$(flName, flpp - 1))
+            flParams = NativeProcParams("Sub", NVHasMe)        'no hidden-retslot drop (returns via eax)
+            output = "Private Function " & flName & "(" & flParams & ")   '" & Hex$(addr) & vbCrLf
+            output = output & Space$(4) & flName & " = " & flExpr & vbCrLf
+            output = output & "End Function" & vbCrLf
+            DecompileNativeProcToVB = NativeInsertLocalDims(NativeSubstituteArgNames(output))
+            Exit Function
+        End If
+    End If
+
     'Detect Select Case jump tables so the dispatch + case bodies reconstruct as a
     'Select Case block rather than a bogus indirect GoTo.
     NativeDetectSelects col, b, addr
@@ -5970,6 +5991,158 @@ Private Function NativeProcMatchIdx(ByVal addr As Long) As Long
         If d >= 0 And d <= 24 And d < bestDelta Then bestDelta = d: best = i
     Next
     NativeProcMatchIdx = best
+End Function
+
+'---------------------------------------------------------------------------
+' Frameless-function body recovery
+'
+' VB6 compiles a tiny routine (e.g. ReturnNumber = a*b) WITHOUT a stack frame:
+' no `push ebp`, arguments read at [esp+4]/[esp+8], result returned in eax/ax.
+' The general decoder assumes an ebp frame so it renders an empty body.  This is
+' a small, self-contained interpreter for the common simple shapes (load params,
+' deref, one or two arithmetic ops, return) - it BAILS (returns "") on anything
+' it does not fully understand, so a complex frameless proc just keeps its empty
+' body and a framed proc is never touched.
+'---------------------------------------------------------------------------
+Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean) As String
+    On Error GoTo bail
+    isFunc = False
+    Dim regv(7) As String, regPtr(7) As Boolean      '0=eax 1=ecx 2=edx 3=ebx 4=esp 5=ebp 6=esi 7=edi
+    Dim inst As CInstruction, dump As String, n As Long, i As Long, op As Long, op2 As Long
+    For Each inst In col
+        dump = UCase$(Replace(inst.dump, " ", ""))
+        n = Len(dump) \ 2
+        If n = 0 Then GoTo nextI
+        i = NativeOpStart(dump, n)                    'past 0x66 etc.
+        op = NativeDumpByte(dump, i)
+        Select Case op
+            Case &H90, &HCC, &H98, &H99               'nop / int3 / cwde / cdq  -> ignore
+            Case &H70 To &H7F                         'short Jcc (jo/jno overflow guards) -> ignore
+            Case &HEB                                 'short jmp -> ignore (skip over a guard)
+            Case &H8B                                 'mov reg, r/m
+                If Not NativeFLMov(dump, i + 1, regv, regPtr) Then GoTo bail
+            Case &HB8 To &HBF                         'mov reg, imm32
+                Dim rr As Long: rr = op - &HB8
+                regv(rr) = NativeFLNum(NativeDumpInt32(dump, i + 1)): regPtr(rr) = False
+            Case &H3                                  'add reg, r/m
+                If Not NativeFLArith(dump, i + 1, regv, regPtr, " + ") Then GoTo bail
+            Case &H2B                                 'sub reg, r/m
+                If Not NativeFLArith(dump, i + 1, regv, regPtr, " - ") Then GoTo bail
+            Case &H69                                 'imul reg, r/m, imm32
+                If Not NativeFLImul3(dump, i + 1, regv, regPtr, False) Then GoTo bail
+            Case &H6B                                 'imul reg, r/m, imm8
+                If Not NativeFLImul3(dump, i + 1, regv, regPtr, True) Then GoTo bail
+            Case &HF                                  'two-byte opcode
+                op2 = NativeDumpByte(dump, i + 1)
+                Select Case op2
+                    Case &H80 To &H8F                 'near Jcc -> ignore
+                    Case &HAF                         'imul reg, r/m
+                        If Not NativeFLArith(dump, i + 2, regv, regPtr, " * ") Then GoTo bail
+                    Case &HBE, &HBF, &HB6, &HB7       'movsx/movzx reg, r/m -> mov+deref
+                        If Not NativeFLMov(dump, i + 2, regv, regPtr) Then GoTo bail
+                    Case Else: GoTo bail
+                End Select
+            Case &HC3, &HC2                           'ret / ret N -> done
+                Exit For
+            Case Else
+                GoTo bail                             'anything else: not a simple body
+        End Select
+nextI:
+    Next
+    'The return value lives in eax (reg 0).
+    If Len(regv(0)) > 0 Then isFunc = True: NativeFramelessBody = regv(0)
+    Exit Function
+bail:
+    NativeFramelessBody = ""
+End Function
+
+'Decode a ModRM (+SIB+disp) operand at byte `idx`.  Fills regField and the r/m.
+'Returns the byte index after the operand, or -1 for a form we do not handle.
+Private Function NativeFLOperand(ByVal dump As String, ByVal idx As Long, ByRef regField As Long, _
+        ByRef rmIsReg As Boolean, ByRef rmReg As Long, ByRef rmDisp As Long, ByRef rmDeref As Boolean) As Long
+    Dim modrm As Long, md As Long, rm As Long, e As Long
+    modrm = NativeDumpByte(dump, idx)
+    md = (modrm \ &H40) And 3
+    regField = (modrm \ 8) And 7
+    rm = modrm And 7
+    e = idx + 1
+    rmDisp = 0: rmDeref = False: rmIsReg = False: rmReg = -1
+    If md = 3 Then rmIsReg = True: rmReg = rm: NativeFLOperand = e: Exit Function
+    rmDeref = True
+    If rm = 4 Then                                    'SIB
+        Dim sib As Long, base As Long, idx2 As Long
+        sib = NativeDumpByte(dump, e): e = e + 1
+        base = sib And 7: idx2 = (sib \ 8) And 7
+        If idx2 <> 4 Then NativeFLOperand = -1: Exit Function   'a scaled index -> not handled
+        rmReg = base
+        If md = 0 And base = 5 Then
+            rmReg = -1: rmDisp = NativeDumpInt32(dump, e): e = e + 4
+        ElseIf md = 1 Then
+            rmDisp = NativeDumpInt8(dump, e): e = e + 1
+        ElseIf md = 2 Then
+            rmDisp = NativeDumpInt32(dump, e): e = e + 4
+        End If
+        NativeFLOperand = e: Exit Function
+    End If
+    If rm = 5 And md = 0 Then rmReg = -1: rmDisp = NativeDumpInt32(dump, e): e = e + 4: NativeFLOperand = e: Exit Function
+    rmReg = rm
+    If md = 1 Then rmDisp = NativeDumpInt8(dump, e): e = e + 1
+    If md = 2 Then rmDisp = NativeDumpInt32(dump, e): e = e + 4
+    NativeFLOperand = e
+End Function
+
+'Symbolic value of an r/m operand (a register's value, a parameter at [esp+N], or
+'the deref of a register that holds a parameter pointer).  "" if not resolvable.
+Private Function NativeFLRmVal(ByRef regv() As String, ByRef regPtr() As Boolean, _
+        ByVal rmIsReg As Boolean, ByVal rmReg As Long, ByVal rmDisp As Long, ByVal rmDeref As Boolean) As String
+    If rmIsReg Then
+        NativeFLRmVal = regv(rmReg)
+    ElseIf rmDeref Then
+        If rmReg = 4 Then                             'esp-relative -> a parameter
+            If rmDisp >= 4 Then NativeFLRmVal = "arg_" & Hex$(rmDisp + 4)
+        ElseIf rmReg >= 0 And rmReg <= 7 Then         'deref [reg] of a parameter pointer
+            If regPtr(rmReg) Then NativeFLRmVal = regv(rmReg)
+        End If
+    End If
+End Function
+
+Private Function NativeFLMov(ByVal dump As String, ByVal idx As Long, ByRef regv() As String, ByRef regPtr() As Boolean) As Boolean
+    Dim regF As Long, rmIsReg As Boolean, rmReg As Long, rmDisp As Long, rmDeref As Boolean
+    If NativeFLOperand(dump, idx, regF, rmIsReg, rmReg, rmDisp, rmDeref) = -1 Then Exit Function
+    If rmIsReg Then
+        regv(regF) = regv(rmReg): regPtr(regF) = regPtr(rmReg): NativeFLMov = True: Exit Function
+    End If
+    If rmReg = 4 Then                                 'mov reg, [esp+disp] -> POINTER to the parameter
+        If rmDisp >= 4 Then regv(regF) = "arg_" & Hex$(rmDisp + 4): regPtr(regF) = True: NativeFLMov = True
+        Exit Function
+    ElseIf rmReg >= 0 And rmReg <= 7 Then             'mov reg, [reg] -> deref a parameter pointer
+        If regPtr(rmReg) Then regv(regF) = regv(rmReg): regPtr(regF) = False: NativeFLMov = True
+        Exit Function
+    End If
+End Function
+
+Private Function NativeFLArith(ByVal dump As String, ByVal idx As Long, ByRef regv() As String, ByRef regPtr() As Boolean, ByVal opStr As String) As Boolean
+    Dim regF As Long, rmIsReg As Boolean, rmReg As Long, rmDisp As Long, rmDeref As Boolean, rv As String
+    If NativeFLOperand(dump, idx, regF, rmIsReg, rmReg, rmDisp, rmDeref) = -1 Then Exit Function
+    rv = NativeFLRmVal(regv, regPtr, rmIsReg, rmReg, rmDisp, rmDeref)
+    If Len(rv) = 0 Or Len(regv(regF)) = 0 Then Exit Function
+    regv(regF) = "(" & regv(regF) & opStr & rv & ")": regPtr(regF) = False
+    NativeFLArith = True
+End Function
+
+Private Function NativeFLImul3(ByVal dump As String, ByVal idx As Long, ByRef regv() As String, ByRef regPtr() As Boolean, ByVal imm8 As Boolean) As Boolean
+    Dim regF As Long, rmIsReg As Boolean, rmReg As Long, rmDisp As Long, rmDeref As Boolean, e As Long, rv As String, imm As Long
+    e = NativeFLOperand(dump, idx, regF, rmIsReg, rmReg, rmDisp, rmDeref)
+    If e = -1 Then Exit Function
+    rv = NativeFLRmVal(regv, regPtr, rmIsReg, rmReg, rmDisp, rmDeref)
+    If Len(rv) = 0 Then Exit Function
+    If imm8 Then imm = NativeDumpInt8(dump, e) Else imm = NativeDumpInt32(dump, e)
+    regv(regF) = "(" & rv & " * " & NativeFLNum(imm) & ")": regPtr(regF) = False
+    NativeFLImul3 = True
+End Function
+
+Private Function NativeFLNum(ByVal v As Long) As String
+    NativeFLNum = CStr(v)
 End Function
 
 Private Function NativeProcHeader(ByVal addr As Long) As String
