@@ -1928,7 +1928,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
         'Resize the control array
         'Check if its a form
         If gObject(loopC).ObjectType = 98435 Or gObject(loopC).ObjectType = 17926147 Or gObject(loopC).ObjectType = 98467 Or gObject(loopC).ObjectType = 98499 Then
-   
+
           If gOptionalObjectInfo.ControlCount < 5000 And gOptionalObjectInfo.ControlCount <> 0 Then
             ReDim gControl(gOptionalObjectInfo.ControlCount - 1)
             'Get Control Array
@@ -1948,7 +1948,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                 'MsgBox gOptionalObjectInfo.iEventCount & " " & gControl(i).EventCount
                 Get #F, , gEventTable(i)
                 Get #F, , taEventPointer
-      
+
                 If gControl(i).aName + 1 - OptHeader.ImageBase > 0 Then
                  Seek F, gControl(i).aName + 1 - OptHeader.ImageBase
                  ControlName = GetUntilNull(F)
@@ -1970,7 +1970,13 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                         Seek F, taEventPointer(k) + 1 - OptHeader.ImageBase
                         Get F, , pointerAevent
 
-                        If pointerAevent.aEvent <> 0 Then
+                        'For NATIVE EXEs pointerAevent.aEvent is P-Code-layout data
+                        '(often 0) - the real handler address comes from the native
+                        'event-link slot matched by tEventPointer+8 in
+                        'LinkNativeEventNames. So don't gate the name registration on
+                        'aEvent for native (it dropped e.g. Command1_Click on forms
+                        'whose aEvent read 0); P-Code still requires aEvent <> 0.
+                        If pointerAevent.aEvent <> 0 Or gProjectInfo.aNativeCode <> 0 Then
                
                           ' Debug.Print strGuid
                            'Debug.Print "Event #: " & k
