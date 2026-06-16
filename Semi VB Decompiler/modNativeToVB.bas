@@ -107,6 +107,8 @@ Private NVStrCmpReg As Collection  '"P"&strcmpCallVA -> regIdx - the StrCmp resu
 Private NVCounterSlot As Collection '"C"&disp -> "1" - a stack slot that is a loop induction variable (render by name, not a stale value)
 Private NVWhileCond As Collection  '"W"&exitJccVA -> "1" - emit `Do While <cond>` here (top-tested loop header)
 Private NVWhileLoop As Collection  '"W"&backedgeVA -> "1" - emit `Loop` here (the back-edge of a Do While)
+Private NVElemIdx As Collection    '"E"&accessVA -> recovered logical array index expr (e.g. arg_8) for a SAFEARRAY element access at that VA; injected by the SIB read/store renderers
+Private NVCurVa As Long            'VA of the instruction currently being rendered (so the SIB renderers can look up NVElemIdx)
 Private NVArgTok() As String       'per-proc: generic tokens (arg_<offset>) to replace with...
 Private NVArgNm() As String        '...their recovered parameter names, at proc finalisation
 Private NVArgN As Long             'count of recovered parameter-name substitutions this proc
@@ -220,6 +222,8 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVCounterSlot = New Collection
     Set NVWhileCond = New Collection
     Set NVWhileLoop = New Collection
+    Set NVElemIdx = New Collection
+    NVCurVa = 0
     NVArgN = 0
     ReDim NVSelStkBase(31): NVSelTop = 0
     NVBase = NativeSolveControlBase(col)
@@ -307,6 +311,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'jumps around __vbaGenerateBoundsError) so an array access stops rendering as
     'bogus nested `If arr <> 0 / If arr = 1 / If (idx - lb) >= cEls` blocks.
     NativeDetectBoundsChecks col
+
+    'Recover the logical index of each SAFEARRAY element access (Player(i).field) by
+    'back-tracing the byte-offset register through the addressing chain, so the access
+    'renders global_X(12)(i)(field) instead of dropping the index.
+    NativeDetectElemIndices col
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -1415,6 +1424,159 @@ Private Function NativeIdxOfVa(arr() As CInstruction, ByVal n As Long, ByVal va 
     Next
 End Function
 
+Private Sub NativeDetectElemIndices(col As Collection)
+    'SAFEARRAY UDT-element access `Player(i).field` is addressed as
+    '[pvData + (i-lBound)*cbElements + fieldOff].  The element byte-offset
+    '(i-lBound)*cbElements lives in a register VB computes with lea/shl/imul; we
+    'otherwise drop it (rendering global_X(12)(field), which collapses two different
+    'elements to the same text).  Here, for every SIB element access, back-trace the
+    'index register through the addressing chain to the LOGICAL index (the param/var
+    'that was dereferenced, e.g. arg_8) and record it by VA, so the renderers emit
+    'global_X(12)(arg_8)(field).  A trace only succeeds when it passes a scaling step
+    '(shl/imul/lea-scale) or the lBound subtract - so it never fires on a plain
+    'pointer register (the pvData side), only on a genuine element offset.
+    On Error GoTo done
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    If n < 2 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For k = 0 To n - 1
+        Dim dump As String, sb As Long, si As Long
+        dump = Replace(arr(k).dump, " ", "")
+        sb = NativeMemBase(dump): si = NativeMemIndex(dump)
+        If sb < 0 Or si < 0 Then GoTo nextk          'not a [base+index] SIB access
+        Dim origin As String
+        origin = NativeTraceIndexOrigin(arr, n, k, si)
+        If Len(origin) > 0 Then NativeColPut NVElemIdx, "E" & arr(k).va, origin
+nextk:
+    Next k
+done:
+End Sub
+
+Private Function NativeTraceIndexOrigin(arr() As CInstruction, ByVal n As Long, ByVal startK As Long, ByVal idxReg As Long) As String
+    'Walk backwards from the SIB access at startK, following the register that holds
+    'the element byte-offset, through scaling (shl/lea/imul), the lBound subtract, and
+    'reg-reg / deref movs, to the named source of the logical index.  Returns "" unless
+    'a scaling/lBound step was seen (proof it is an element offset, not a raw pointer).
+    Dim k As Long, cur As Long, steps As Long, sawScale As Boolean
+    cur = idxReg
+    For k = startK - 1 To 0 Step -1
+        steps = steps + 1
+        If steps > 80 Then Exit Function
+        Dim ins As CInstruction: Set ins = arr(k)
+        If (ins.cmdType And C_TYPEMASK) = C_CAL Then
+            'VB's array bookkeeping (the bounds-error stub on the jumped-over error
+            'path, the array lock/unlock) sits inside the addressing sequence but does
+            'not really run before the access / preserves the index - trace through it.
+            Dim cnm As String: cnm = NativeApiName(ins)
+            If InStr(cnm, "BoundsError") > 0 Or InStr(cnm, "AryLock") > 0 Or InStr(cnm, "AryUnlock") > 0 Then GoTo contk
+            If cur <= 2 Then Exit Function            'a real call clobbers caller-saved regs
+            GoTo contk                                'callee-saved (ebx/esi/edi/ebp) survive
+        End If
+        If NativeInstDestReg(ins) <> cur Then GoTo contk
+        Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, md As Long, rmf As Long, op2 As Long
+        dump = Replace(ins.dump, " ", "")
+        nn = Len(dump) \ 2
+        i = NativeOpStart(dump, nn)
+        op = NativeDumpByte(dump, i)
+        modrm = NativeDumpByte(dump, i + 1)
+        md = (modrm \ &H40) And 3: rmf = modrm And 7
+        Select Case op
+            Case &HC1, &HD1, &HD3                     'shl/shr -> scale in place
+                sawScale = True
+            Case &H8D                                 'lea dst,[base+idx*s+disp] -> trace base
+                sawScale = True
+                Dim lb As Long: lb = NativeMemBase(dump)
+                If lb >= 0 And lb <= 7 Then cur = lb Else Exit Function
+            Case &H69, &H6B                           'imul dst, r/m, imm -> trace r/m
+                sawScale = True
+                If md = 3 Then cur = rmf Else Exit Function
+            Case &H2B                                 'sub dst,[reg+14] -> lBound subtract
+                Dim sdisp As Long, sAbs As Boolean
+                If md = 3 Then Exit Function
+                If Not NativeDecodeDisp(dump, sdisp, sAbs) Then Exit Function
+                If sAbs Or sdisp <> &H14 Then Exit Function
+                sawScale = True                       'drop the lBound adjust, keep cur
+            Case &H8B                                 'mov dst, r/m
+                If md = 3 Then
+                    cur = rmf                          'reg-reg copy
+                Else
+                    Dim mdisp As Long, mAbs As Boolean, mbase As Long
+                    If Not NativeDecodeDisp(dump, mdisp, mAbs) Then Exit Function
+                    mbase = NativeMemBase(dump)
+                    If mAbs And NativeIsGlobalAddr(mdisp) Then
+                        If sawScale Then NativeTraceIndexOrigin = NativeGlobalName(mdisp)
+                        Exit Function
+                    ElseIf Not mAbs And mbase = 5 And mdisp >= 8 Then
+                        If sawScale Then NativeTraceIndexOrigin = "arg_" & Hex$(mdisp)   'ByVal index param
+                        Exit Function
+                    ElseIf Not mAbs And mbase = 5 And mdisp < 0 Then
+                        If sawScale Then NativeTraceIndexOrigin = NativeGetLocalExpr(mdisp)
+                        Exit Function
+                    ElseIf Not mAbs And mbase >= 0 And mbase <= 7 And mdisp = 0 And NativeMemIndex(dump) < 0 Then
+                        cur = mbase                    'deref of a ByRef index pointer -> trace it
+                    Else
+                        Exit Function
+                    End If
+                End If
+            Case &HF
+                op2 = NativeDumpByte(dump, i + 1)
+                If op2 = &HAF Then                     'imul dst, r/m
+                    sawScale = True
+                    Dim m2 As Long: m2 = NativeDumpByte(dump, i + 2)
+                    If (m2 \ &H40) = 3 Then cur = m2 And 7 Else Exit Function
+                ElseIf op2 = &HBE Or op2 = &HBF Or op2 = &HB6 Or op2 = &HB7 Then   'movsx/movzx
+                    Dim m3 As Long: m3 = NativeDumpByte(dump, i + 2)
+                    If (m3 \ &H40) = 3 Then cur = m3 And 7 Else Exit Function
+                Else
+                    Exit Function
+                End If
+            Case &HB8, &HB9, &HBA, &HBB, &HBC, &HBD, &HBE, &HBF
+                'mov dst, imm: the index register originates at a constant.  This is
+                'almost always a REGISTER-RESIDENT LOOP COUNTER's stale init value
+                '(e.g. `For i = 1` -> `mov edi,1`), NOT a real literal array index, so
+                'binding it would mis-render Player(i) as Player(1).  Bail (leave the
+                'index dropped) rather than emit a wrong constant.
+                Exit Function
+            Case Else
+                Exit Function                          'unrecognised write to cur -> bail
+        End Select
+contk:
+    Next k
+End Function
+
+Private Function NativeInstDestReg(inst As CInstruction) As Long
+    'Destination register index for the reg-writing instructions the index back-trace
+    'follows (lea/shl/imul/mov-to-reg/sub-to-reg/movsx/movzx/mov-imm), else -1.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, op2 As Long
+    NativeInstDestReg = -1
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    Select Case op
+        Case &H8D, &H8B, &H2B, &H3, &H69, &H6B        'lea/mov-r/sub-r/imul3 -> reg field
+            modrm = NativeDumpByte(dump, i + 1)
+            NativeInstDestReg = (modrm \ 8) And 7
+        Case &HC1, &HD1, &HD3                          'shl/shr group -> rm (md=3 only)
+            modrm = NativeDumpByte(dump, i + 1)
+            If (modrm \ &H40) = 3 Then NativeInstDestReg = modrm And 7
+        Case &HB8, &HB9, &HBA, &HBB, &HBC, &HBD, &HBE, &HBF   'mov reg, imm32
+            NativeInstDestReg = op - &HB8
+        Case &HF
+            op2 = NativeDumpByte(dump, i + 1)
+            Select Case op2
+                Case &HAF, &HBE, &HBF, &HB6, &HB7      'imul / movsx / movzx -> reg field
+                    modrm = NativeDumpByte(dump, i + 2)
+                    NativeInstDestReg = (modrm \ 8) And 7
+            End Select
+    End Select
+End Function
+
 Private Function NativeBerrStubFromIdx(arr() As CInstruction, ByVal n As Long, isBerr() As Boolean, ByVal idx As Long) As Boolean
     'True when a bounds-error call begins at idx, allowing the `mov REG,[iat]` helper
     'load(s) VB places just before an indirect `call REG` (only movs may precede).
@@ -1741,6 +1903,7 @@ Private Function NativeProcessInst(inst As CInstruction) As String
     cls = inst.cmdType And C_TYPEMASK
     mn = NativeMnem(inst)
     ind = NativeIndentStr()
+    NVCurVa = inst.va          'so the SIB read/store renderers can look up NVElemIdx
 
     'TEST/CMP set the flags consumed by the next conditional jump.  Record the
     'operands now (the relational operator is resolved later from the Jcc).
@@ -3678,7 +3841,16 @@ Private Function NativeFieldStoreLHS(ByVal base As Long, ByVal off As Long) As S
     If NVHasMe And NVRegIsMe(base) Then
         NativeFieldStoreLHS = NativeFieldName(off)
     ElseIf NativeIsDerefBase(NVReg(base)) Then
-        NativeFieldStoreLHS = NVReg(base) & "(" & CStr(off) & ")"
+        'For a SIB element store the pre-pass may have recovered the logical index;
+        'render base(i)(off) so `Player(dst).f = ...` keeps its element index instead
+        'of collapsing to base(off) (which made distinct elements look identical).
+        Dim eix As String
+        eix = NativeColGet(NVElemIdx, "E" & NVCurVa)
+        If Len(eix) > 0 Then
+            NativeFieldStoreLHS = NVReg(base) & "(" & eix & ")(" & CStr(off) & ")"
+        Else
+            NativeFieldStoreLHS = NVReg(base) & "(" & CStr(off) & ")"
+        End If
     End If
 End Function
 
@@ -4898,13 +5070,18 @@ Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As
                     End If
                 ElseIf Len(pv) > 0 Then
                     'Element index register is untracked (a computed/scaled byte offset
-                    'we did not model, so NVReg(idx) is empty).  Mirror the STORE side,
-                    'which renders `[base + idx + off]` as base(off) via NativeFieldStoreLHS
-                    'and drops the index too (e.g. `global_X(12)(244) = ...`).  Emitting
-                    'the same base(fieldOff) form on the read makes a UDT/array element
-                    'COMPARE render `global_X(12)(244) <op> R` instead of a blank <cond> -
-                    'consistent with our own field stores and the commercial ceiling.
-                    If disp = 0 Then NativeRmVal = pv Else NativeRmVal = pv & "(" & CStr(disp) & ")"
+                    'we did not model, so NVReg(idx) is empty).  If the pre-pass
+                    'recovered the LOGICAL index for this access, render
+                    'global_X(12)(i)(off); otherwise mirror the STORE side, which drops
+                    'the index (NativeFieldStoreLHS -> base(off)).  Either way beats a
+                    'blank <cond> and is consistent with our own field stores.
+                    Dim eix As String
+                    eix = NativeColGet(NVElemIdx, "E" & NVCurVa)
+                    If Len(eix) > 0 Then
+                        If disp = 0 Then NativeRmVal = pv & "(" & eix & ")" Else NativeRmVal = pv & "(" & eix & ")(" & CStr(disp) & ")"
+                    Else
+                        If disp = 0 Then NativeRmVal = pv Else NativeRmVal = pv & "(" & CStr(disp) & ")"
+                    End If
                 End If
             End If
         End If
