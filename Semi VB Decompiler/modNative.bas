@@ -138,7 +138,50 @@ Public Sub ScanNativeProcsByPrologue(ByVal F As Integer)
             End If
         End If
     Next j
+
+    'FRAMELESS procedures (e.g. `ReturnNumber = a*b` -> mov eax,[esp+4]; ...; ret N)
+    'have no 55 8B EC prologue, so they are invisible to the scan above and a whole
+    'module function goes missing.  Recover them from their CALL sites: every E8
+    'rel32 whose target is in the code, is preceded by a function boundary (a ret /
+    'NOP / int3 - so it is a genuine entry, not a jump into the middle of a proc),
+    'and begins with a plausible prologue opcode, is a new procedure.
+    For j = 0 To codeLen - 5
+        If b(j) = &HE8 Then
+            Dim relC As Currency
+            relC = CCur(b(j + 1)) + CCur(b(j + 2)) * 256@ + CCur(b(j + 3)) * 65536@ + CCur(b(j + 4)) * 16777216@
+            If relC > 2147483647@ Then relC = relC - 4294967296@
+            Dim tgtC As Currency
+            tgtC = CCur(startVA) + j + 5 + relC
+            If tgtC > CCur(startVA) And tgtC < CCur(endVA) Then
+                va = CLng(tgtC)
+                Dim ti As Long
+                ti = va - startVA
+                If ti >= 4 And Not KeyExists(seen, "k" & va) Then
+                    Dim pb As Byte, sb As Byte, boundary As Boolean
+                    pb = b(ti - 1)
+                    boundary = (pb = &H90) Or (pb = &HC3) Or (pb = &HCC) Or (b(ti - 3) = &HC2)
+                    sb = b(ti)
+                    If boundary And NativeIsProcStartByte(sb, b(ti + 1)) Then
+                        seen.Add 1, "k" & va
+                        If nNew > UBound(newAddr) Then ReDim Preserve newAddr(nNew + 1024)
+                        newAddr(nNew) = va: nNew = nNew + 1
+                    End If
+                End If
+            End If
+        End If
+    Next j
+
     If nNew = 0 Then GoTo done
+
+    'Keep all discovered addresses in ascending (code) order - the prologue pass is
+    'already sorted but the call-site pass appended frameless targets out of order,
+    'and the region/proportional assignment below relies on address order.
+    Dim sa As Long, sc As Long, st As Long
+    For sa = 0 To nNew - 2
+        For sc = sa + 1 To nNew - 1
+            If newAddr(sc) < newAddr(sa) Then st = newAddr(sa): newAddr(sa) = newAddr(sc): newAddr(sc) = st
+        Next sc
+    Next sa
 
     'Build segment boundaries from the anchored (form/class) objects.  Code is
     'laid out in object-table order, so each anchored object starts a region and
@@ -251,6 +294,23 @@ Private Sub AssignRegionProcs(ByRef newAddr() As Long, ByVal nNew As Long, _
         pIdx = pIdx + 1
     Loop
 End Sub
+
+Private Function NativeIsProcStartByte(ByVal b0 As Byte, ByVal b1 As Byte) As Boolean
+    'A plausible first opcode of a (frameless) procedure entry.  Used with the
+    'preceding-boundary check to validate a call target as a real function start.
+    Select Case b0
+        Case &H50 To &H57            'push eax..edi
+            NativeIsProcStartByte = True
+        Case &H6A, &H68              'push imm8 / imm32
+            NativeIsProcStartByte = True
+        Case &H8B, &H89, &H8D, &H33, &HA1, &H66, &H83, &HFF
+            NativeIsProcStartByte = True       'mov/lea/xor/mov-eax-abs/word-prefix/sub-esp/grp5
+        Case &HB8 To &HBF            'mov reg, imm32
+            NativeIsProcStartByte = True
+        Case Else
+            NativeIsProcStartByte = False
+    End Select
+End Function
 
 Private Sub AddNativeProc(ByVal owner As String, ByVal va As Long)
     gNativeProcArray(UBound(gNativeProcArray)).sName = owner & ".proc_" & Hex$(va)
