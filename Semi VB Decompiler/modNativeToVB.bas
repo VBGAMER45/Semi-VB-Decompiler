@@ -3741,8 +3741,7 @@ Private Sub NativeBuildArgNameMap(ByVal addr As Long, ByVal psig As String)
     base = IIf(NativeProcHasMe(addr), &HC, &H8)
     ReDim NVArgTok(UBound(parts)): ReDim NVArgNm(UBound(parts))
     For i = 0 To UBound(parts)
-        nm = Trim$(parts(i))
-        If InStr(nm, " ") > 0 Then nm = Mid$(nm, InStrRev(nm, " ") + 1)   'keep the bare identifier
+        nm = NativeParamName(parts(i))
         If Len(nm) > 0 And NativeIsIdent(nm) Then
             NVArgTok(NVArgN) = "arg_" & Hex$(base + i * 4)
             NVArgNm(NVArgN) = nm
@@ -3750,6 +3749,24 @@ Private Sub NativeBuildArgNameMap(ByVal addr As Long, ByVal psig As String)
         End If
     Next
 End Sub
+
+Private Function NativeParamName(ByVal p As String) As String
+    'Extract the bare parameter NAME from one parameter declaration. Handles both a
+    'plain reconstructed name ("strName") and a fully-typed event signature part
+    '("ByVal Number As Integer" -> "Number"): strip leading modifiers, then take the
+    'identifier before " As ".
+    p = Trim$(p)
+    If InStr(1, p, "ByVal ", vbTextCompare) = 1 Then p = Trim$(Mid$(p, 7))
+    If InStr(1, p, "ByRef ", vbTextCompare) = 1 Then p = Trim$(Mid$(p, 7))
+    If InStr(1, p, "Optional ", vbTextCompare) = 1 Then p = Trim$(Mid$(p, 10))
+    If InStr(1, p, "ParamArray ", vbTextCompare) = 1 Then p = Trim$(Mid$(p, 12))
+    Dim asP As Long
+    asP = InStr(1, p, " As ", vbTextCompare)
+    If asP > 0 Then p = Trim$(Left$(p, asP - 1))
+    'Defensive: if anything still has spaces, keep the last token.
+    If InStr(p, " ") > 0 Then p = Mid$(p, InStrRev(p, " ") + 1)
+    NativeParamName = p
+End Function
 
 Private Sub NativeDetectReturnSlot(col As Collection, ByVal addr As Long)
     'A class Function / Property Get returns through a hidden [out,retval] pointer -
@@ -5906,6 +5923,18 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
         Else
             'Generic arg_<offset> list from the `ret N` count.
             nm = nm & "(" & NativeProcParams(kindStr, NativeProcHasMe(addr)) & ")"
+        End If
+    Else
+        'The name already carries a typed signature (an event handler, from
+        'getEventComplete - e.g. Winsock1_Error (ByVal Number As Integer, ...)).
+        'Map those declared parameter names into the body too, so it reads `Number`
+        'instead of arg_C.
+        Dim ep As Long, eq As Long, eParams As String
+        ep = InStr(nm, "(")
+        eq = InStrRev(nm, ")")
+        If eq > ep + 1 Then
+            eParams = Trim$(Mid$(nm, ep + 1, eq - ep - 1))
+            If Len(eParams) > 0 Then NativeBuildArgNameMap addr, eParams
         End If
     End If
     NativeProcHeader = vis & " " & kindStr & " " & nm & "   '" & Hex$(addr)
