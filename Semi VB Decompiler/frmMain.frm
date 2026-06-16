@@ -4411,6 +4411,14 @@ NewControl:
                     End If
                 End If
                 Seek F, ocxAt
+                'Invisible external controls (Winsock, CommonDialog) carry their
+                'design-time Left/Top in a trailer after the property payload.
+                Dim ocxLeft As Long, ocxTop As Long, ocxHasLeft As Boolean, ocxHasTop As Boolean
+                If modOcx.GetOcxTrailerLeftTop(F, ocxAt, fPos + cControlHeader.length, ocxLeft, ocxTop, ocxHasLeft, ocxHasTop) Then
+                    If ocxHasLeft Then Call AddText("Left = " & ocxLeft)
+                    If ocxHasTop Then Call AddText("Top = " & ocxTop)
+                End If
+                Seek F, ocxAt
                 'Recover the standard _ExtentX/_ExtentY/_Version from the OCX
                 'IPersistStream header (control-agnostic, deterministic). Beats the
                 'commercial decompiler, which dumps the whole blob to OleObjectBlob.

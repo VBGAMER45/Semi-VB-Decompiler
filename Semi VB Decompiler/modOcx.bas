@@ -129,6 +129,73 @@ done:
 End Function
 
 '*****************************
+'Purpose: Recover an invisible external control's design-time Left/Top. VB stores
+'   these for windowless OCX controls (Winsock, CommonDialog) in a trailer AFTER
+'   the IPersistStream payload, as opcode records: 0x39 + Long (Left), 0x3A + Long
+'   (Top), 0x00 padding, terminated by the control separator. Returns True if a
+'   Left or Top was found (in-range). Restores the file pointer.
+'*****************************
+Public Function GetOcxTrailerLeftTop(ByVal F As Variant, ByVal startPos As Long, ByVal endPos As Long, _
+                                     ByRef leftV As Long, ByRef topV As Long, ByRef hasLeft As Boolean, ByRef hasTop As Boolean) As Boolean
+    GetOcxTrailerLeftTop = False
+    hasLeft = False: hasTop = False
+    Dim savePos As Long
+    savePos = Loc(F)
+    On Error GoTo done
+    If endPos <= startPos + 8 Then GoTo done
+    Dim n As Long
+    n = endPos - startPos
+    Dim scan() As Byte
+    ReDim scan(n - 1)
+    Seek F, startPos
+    Get F, , scan
+
+    ' Locate signature + payload length, then start parsing after the payload.
+    Dim i As Long, magicAt As Long, payLen As Long
+    magicAt = -1
+    For i = 4 To n - 5
+        If scan(i) = &H21 And scan(i + 1) = &H43 And scan(i + 2) = &H34 And scan(i + 3) = &H12 Then
+            magicAt = i
+            payLen = scan(i - 4) Or (CLng(scan(i - 3)) * &H100&) Or (CLng(scan(i - 2)) * &H10000) Or (CLng(scan(i - 1)) * &H1000000)
+            Exit For
+        End If
+    Next
+    If magicAt = -1 Then GoTo done
+    Dim p As Long
+    p = magicAt + payLen
+    If payLen < 8 Or p < 0 Or p > n - 1 Then GoTo done
+
+    ' Parse the trailer opcode records.
+    Do While p <= n - 5
+        Select Case scan(p)
+            Case &H39   'Left
+                leftV = DwordAt(scan, p + 1): hasLeft = True: p = p + 5
+            Case &H3A   'Top
+                topV = DwordAt(scan, p + 1): hasTop = True: p = p + 5
+            Case &H0    'padding
+                p = p + 1
+            Case Else
+                Exit Do  'separator / unknown -> stop
+        End Select
+    Loop
+
+    ' Sanity: reject out-of-range coordinates.
+    If hasLeft Then If leftV < -2000 Or leftV > 30000 Then hasLeft = False
+    If hasTop Then If topV < -2000 Or topV > 30000 Then hasTop = False
+    GetOcxTrailerLeftTop = hasLeft Or hasTop
+done:
+    On Error Resume Next
+    Seek F, savePos
+End Function
+
+Private Function DwordAt(ByRef b() As Byte, ByVal idx As Long) As Long
+    Dim v As Currency
+    v = CCur(b(idx)) + CCur(b(idx + 1)) * 256@ + CCur(b(idx + 2)) * 65536@ + CCur(b(idx + 3)) * 16777216@
+    If v > 2147483647@ Then v = v - 4294967296@
+    DwordAt = CLng(v)
+End Function
+
+'*****************************
 'Purpose: Find the registered coclass CLSID for a control's external class string
 '   (e.g. "RichTextLib.RichTextBox") via gOcxList (same source the late-bound call
 '   resolver uses). Returns "{...}" or "".
