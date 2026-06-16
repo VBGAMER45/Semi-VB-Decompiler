@@ -483,7 +483,8 @@ nextInst:
     If Len(NVPendingCall) > 0 Then output = output & NativeIndentStr() & NVPendingCall & vbCrLf: NVPendingCall = ""
     NativeCloseIfs output, &H7FFFFFFF
     output = output & "End " & NVProcEndWord & vbCrLf
-    DecompileNativeProcToVB = NativeStripOrphanLabels(NativeSubstituteConstants(NativeSubstituteArgNames(output)))
+    output = NativeStripOrphanLabels(NativeSubstituteConstants(NativeSubstituteArgNames(output)))
+    DecompileNativeProcToVB = NativeInsertLocalDims(output)
     Exit Function
 fail:
     DecompileNativeProcToVB = "' Error decompiling " & Hex$(addr) & ": " & Err.Description & vbCrLf
@@ -516,6 +517,313 @@ Private Function NativeStripOrphanLabels(ByVal src As String) As String
 skipLine:
     Next
     NativeStripOrphanLabels = out
+End Function
+
+Private Function NativeInsertLocalDims(ByVal body As String) As String
+    'Task A: declare local stack slots (var_XX) with a USAGE-inferred type, emitted
+    'as a `Dim` block after the proc header.  Native compilation strips local names
+    'AND types, but the type is often inferable from how the slot is assigned - which
+    'beats the commercial decompiler's blanket `As Variant`:
+    '  String   - assigned a string function (Left$/Trim$/UCase$...), a `&` concat,
+    '             a string literal, or CStr.
+    '  Long/Integer - Len/UBound/CLng/CInt/InStr/Asc or an arithmetic expression.
+    '  As <class>   - `Set v = New clsX` (the class is already resolved in the body).
+    '  Object       - other `Set v = ...`.
+    '  Variant      - no signal, or conflicting signals (also the commercial default).
+    'A post-pass over the FINISHED body text (after arg/const substitution, so the
+    'return-slot local is already the proc name and parameters are arg_XX/real names -
+    'neither is a var_XX, so neither gets a bogus Dim).
+    On Error GoTo done
+    Dim lines() As String, i As Long, lt As String, work As String
+    Dim seen As Collection, typ As Collection
+    lines = Split(body, vbCrLf)
+    If UBound(lines) < 0 Then GoTo done
+    'Only operate on a real proc body (header line is Private/Public Sub/Function/...).
+    If Not NativeIsProcHeaderLine(lines(0)) Then GoTo done
+    Set seen = New Collection: Set typ = New Collection
+    For i = 1 To UBound(lines)
+        lt = Trim$(lines(i))
+        If Len(lt) = 0 Then GoTo nextLine
+        NativeScanVarTokens lt, seen
+        'For <var> = ... -> a Long loop counter.
+        If Left$(lt, 4) = "For " Then
+            Dim fv As String
+            fv = NativeFirstVarTokAt(Mid$(lt, 5))
+            If Len(fv) > 0 Then NativeMergeType typ, fv, "Long"
+            GoTo nextLine
+        End If
+        'An assignment whose LHS is a lone var_XX: infer the slot's type from the RHS.
+        Dim isSet As Boolean, eqp As Long, lhs As String, rhs As String, t As String
+        work = lt: isSet = False
+        If Left$(work, 4) = "Set " Then isSet = True: work = Mid$(work, 5)
+        eqp = InStr(work, " = ")
+        If eqp > 0 Then
+            lhs = Trim$(Left$(work, eqp - 1))
+            rhs = Trim$(Mid$(work, eqp + 3))
+            If NativeIsLoneVarTok(lhs) Then
+                If isSet Then t = NativeInferSetType(rhs) Else t = NativeInferValType(rhs)
+                If Len(t) > 0 Then NativeMergeType typ, lhs, t
+            End If
+        End If
+nextLine:
+    Next
+    If seen.Count = 0 Then GoTo done
+    'Order the locals by their ebp offset (the hex in var_XX) ascending.
+    Dim names() As String, offs() As Long, c As Long, v As Variant, j As Long
+    ReDim names(seen.Count - 1): ReDim offs(seen.Count - 1)
+    c = 0
+    For Each v In seen
+        names(c) = CStr(v): offs(c) = NativeHexVal(Mid$(CStr(v), 5)): c = c + 1
+    Next
+    For i = 0 To c - 2
+        For j = 0 To c - 2 - i
+            If offs(j) > offs(j + 1) Then
+                Dim ts As Long, tn As String
+                ts = offs(j): offs(j) = offs(j + 1): offs(j + 1) = ts
+                tn = names(j): names(j) = names(j + 1): names(j + 1) = tn
+            End If
+        Next
+    Next
+    Dim block As String, ty As String
+    For i = 0 To c - 1
+        ty = NativeColGet(typ, names(i))
+        If Len(ty) = 0 Then ty = "Variant"
+        block = block & "    Dim " & names(i) & " As " & ty & vbCrLf
+    Next
+    'Splice the block in after the header line.
+    Dim res As String
+    res = lines(0) & vbCrLf & block
+    For i = 1 To UBound(lines)
+        res = res & lines(i)
+        If i < UBound(lines) Then res = res & vbCrLf
+    Next
+    NativeInsertLocalDims = res
+    Exit Function
+done:
+    NativeInsertLocalDims = body
+End Function
+
+Private Function NativeIsProcHeaderLine(ByVal ln As String) As Boolean
+    Dim s As String
+    s = Trim$(ln)
+    If Left$(s, 8) <> "Private " And Left$(s, 7) <> "Public " And Left$(s, 7) <> "Friend " Then Exit Function
+    NativeIsProcHeaderLine = (InStr(s, " Sub ") > 0 Or InStr(s, " Function ") > 0 Or InStr(s, " Property ") > 0)
+End Function
+
+Private Sub NativeScanVarTokens(ByVal line As String, seen As Collection)
+    'Record every whole-identifier var_<hex> token in line into seen (deduped).
+    Dim q As Long, j As Long, n As Long, before As Long, ch As Long, tok As String
+    n = Len(line)
+    q = InStr(1, line, "var_")
+    Do While q > 0
+        before = 0
+        If q > 1 Then before = Asc(Mid$(line, q - 1, 1))
+        If Not NativeIsIdentChar(before) Then
+            j = q + 4
+            Do While j <= n
+                ch = Asc(Mid$(line, j, 1))
+                If (ch >= 48 And ch <= 57) Or (ch >= 65 And ch <= 70) Or (ch >= 97 And ch <= 102) Then
+                    j = j + 1
+                Else
+                    Exit Do
+                End If
+            Loop
+            If j > q + 4 Then
+                Dim okEnd As Boolean: okEnd = True
+                If j <= n Then If NativeIsIdentChar(Asc(Mid$(line, j, 1))) Then okEnd = False
+                If okEnd Then
+                    tok = Mid$(line, q, j - q)
+                    NativeColPut seen, tok, tok        'value = token (For Each yields values)
+                End If
+            End If
+        End If
+        q = InStr(q + 4, line, "var_")
+    Loop
+End Sub
+
+Private Function NativeIsLoneVarTok(ByVal s As String) As Boolean
+    'True when s is exactly one var_<hex> token (a simple slot LHS, not an element
+    'store like global_X(12)(244) or an array index expression).
+    Dim i As Long, ch As Long
+    If Left$(s, 4) <> "var_" Or Len(s) <= 4 Then Exit Function
+    For i = 5 To Len(s)
+        ch = Asc(Mid$(s, i, 1))
+        If Not ((ch >= 48 And ch <= 57) Or (ch >= 65 And ch <= 70) Or (ch >= 97 And ch <= 102)) Then Exit Function
+    Next
+    NativeIsLoneVarTok = True
+End Function
+
+Private Function NativeFirstVarTokAt(ByVal s As String) As String
+    Dim seen As Collection
+    Set seen = New Collection
+    NativeScanVarTokens s, seen
+    'Return the first token by appearance: re-scan for position.
+    Dim q As Long
+    q = InStr(1, s, "var_")
+    If q > 0 Then
+        Dim j As Long, n As Long, ch As Long
+        n = Len(s): j = q + 4
+        Do While j <= n
+            ch = Asc(Mid$(s, j, 1))
+            If (ch >= 48 And ch <= 57) Or (ch >= 65 And ch <= 70) Or (ch >= 97 And ch <= 102) Then j = j + 1 Else Exit Do
+        Loop
+        If j > q + 4 Then NativeFirstVarTokAt = Mid$(s, q, j - q)
+    End If
+End Function
+
+Private Function NativeInferValType(ByVal rhs As String) As String
+    'Infer a local's type from a value (non-Set) assignment's right-hand side.
+    'Strong signals only; returns "" when the RHS carries no reliable type.
+    Dim s As String
+    s = Trim$(rhs)
+    If Len(s) = 0 Then Exit Function
+    If InStr(s, " & ") > 0 Then NativeInferValType = "String": Exit Function     'concat
+    If Left$(s, 1) = """" Then NativeInferValType = "String": Exit Function       'literal
+    If NativeStartsWithFn(s, "CStr|Left$|Right$|Mid$|Trim$|LTrim$|RTrim$|UCase$|LCase$|Chr$|ChrW$|Space$|String$|Format$|Hex$|Oct$|Str$") Then NativeInferValType = "String": Exit Function
+    If NativeStartsWithFn(s, "CInt|Asc") Then NativeInferValType = "Integer": Exit Function
+    If NativeStartsWithFn(s, "CLng|Len|UBound|LBound|InStr") Then NativeInferValType = "Long": Exit Function
+    If NativeStartsWithFn(s, "CBool") Then NativeInferValType = "Boolean": Exit Function
+    If NativeStartsWithFn(s, "CDbl") Then NativeInferValType = "Double": Exit Function
+    If NativeStartsWithFn(s, "CSng") Then NativeInferValType = "Single": Exit Function
+    'A parenthesised arithmetic expression (has + - * but no concat/quote) -> numeric.
+    If Left$(s, 1) = "(" And InStr(s, """") = 0 Then
+        If InStr(s, " + ") > 0 Or InStr(s, " - ") > 0 Or InStr(s, " * ") > 0 Then NativeInferValType = "Long"
+    End If
+End Function
+
+Private Function NativeInferSetType(ByVal rhs As String) As String
+    'Infer an object reference's type from `Set v = <rhs>`.
+    Dim s As String
+    s = Trim$(rhs)
+    If Left$(s, 4) = "New " Then
+        Dim nm As String, i As Long, ch As Long
+        nm = Trim$(Mid$(s, 5))
+        'Class name = leading identifier run.
+        Dim outn As String
+        For i = 1 To Len(nm)
+            ch = Asc(Mid$(nm, i, 1))
+            If NativeIsIdentChar(ch) Then outn = outn & Mid$(nm, i, 1) Else Exit For
+        Next
+        If Len(outn) > 0 Then NativeInferSetType = outn Else NativeInferSetType = "Object"
+    Else
+        'A control reference (`Set v = frmMain.picView`) -> the intrinsic control
+        'class (PictureBox / Label / ...), looked up by the control's name; falls
+        'back to Object for a non-control object or an ambiguous/unknown name.
+        Dim ct As String
+        ct = NativeControlTypeOf(s)
+        If Len(ct) > 0 Then NativeInferSetType = ct Else NativeInferSetType = "Object"
+    End If
+End Function
+
+Private Function NativeControlTypeOf(ByVal rhs As String) As String
+    'Map a control reference (the last `.`-segment is the control name) to its VB
+    'intrinsic control class via gControlOffset (populated during form parsing).
+    'Returns "" unless exactly one control class matches the name.
+    On Error GoTo done
+    Dim name As String, p As Long, i As Long, ch As Long
+    name = rhs
+    p = InStrRev(name, ".")
+    If p > 0 Then name = Mid$(name, p + 1)
+    'Trim to a leading identifier run (drop any trailing `(idx)` etc.).
+    Dim clean As String
+    For i = 1 To Len(name)
+        ch = Asc(Mid$(name, i, 1))
+        If NativeIsIdentChar(ch) Then clean = clean & Mid$(name, i, 1) Else Exit For
+    Next
+    If Len(clean) = 0 Then Exit Function
+    Dim found As String, cn As String
+    For i = 0 To UBound(gControlOffset)
+        If gControlOffset(i).ControlName = clean Then
+            cn = NativeControlClassName(gControlOffset(i).ControlType)
+            If Len(cn) > 0 Then
+                If Len(found) = 0 Then
+                    found = cn
+                ElseIf found <> cn Then
+                    Exit Function                'ambiguous name across forms -> Object
+                End If
+            End If
+        End If
+    Next
+    NativeControlTypeOf = found
+done:
+End Function
+
+Private Function NativeControlClassName(ByVal t As Long) As String
+    'VB intrinsic control type byte (modControls.ControlType enum) -> class name.
+    Select Case t
+        Case 0: NativeControlClassName = "PictureBox"
+        Case 1: NativeControlClassName = "Label"
+        Case 2: NativeControlClassName = "TextBox"
+        Case 3: NativeControlClassName = "Frame"
+        Case 4: NativeControlClassName = "CommandButton"
+        Case 5: NativeControlClassName = "CheckBox"
+        Case 6: NativeControlClassName = "OptionButton"
+        Case 7: NativeControlClassName = "ComboBox"
+        Case 8: NativeControlClassName = "ListBox"
+        Case 9: NativeControlClassName = "HScrollBar"
+        Case 10: NativeControlClassName = "VScrollBar"
+        Case 11: NativeControlClassName = "Timer"
+        Case 16: NativeControlClassName = "DriveListBox"
+        Case 17: NativeControlClassName = "DirListBox"
+        Case 18: NativeControlClassName = "FileListBox"
+        Case 22: NativeControlClassName = "Shape"
+        Case 23: NativeControlClassName = "Line"
+        Case 24: NativeControlClassName = "Image"
+        Case 37: NativeControlClassName = "Data"
+        Case 38: NativeControlClassName = "OLE"
+        Case Else: NativeControlClassName = ""   'menu/form/usercontrol/unknown -> leave Object
+    End Select
+End Function
+
+Private Function NativeStartsWithFn(ByVal s As String, ByVal pipeList As String) As Boolean
+    'True when s begins with one of the pipe-delimited function names followed by "(".
+    Dim parts() As String, i As Long
+    parts = Split(pipeList, "|")
+    For i = 0 To UBound(parts)
+        If Left$(s, Len(parts(i)) + 1) = parts(i) & "(" Then NativeStartsWithFn = True: Exit Function
+    Next
+End Function
+
+Private Sub NativeMergeType(typ As Collection, ByVal var As String, ByVal newType As String)
+    'Merge a new type signal for var into the running inference, reconciling
+    'compatible families and degrading genuine conflicts to Variant.
+    Dim cur As String
+    cur = NativeColGet(typ, var)
+    If Len(cur) = 0 Then NativeColPut typ, var, newType: Exit Sub
+    If cur = newType Or cur = "Variant" Then Exit Sub
+    If NativeIsObjType(cur) And NativeIsObjType(newType) Then
+        If cur = "Object" Then NativeColPut typ, var, newType: Exit Sub      'prefer the specific class
+        If newType = "Object" Then Exit Sub                                  'keep the specific class
+        NativeColPut typ, var, "Object": Exit Sub                            'two classes -> Object
+    End If
+    If (cur = "Integer" Or cur = "Long") And (newType = "Integer" Or newType = "Long") Then NativeColPut typ, var, "Long": Exit Sub
+    NativeColPut typ, var, "Variant"
+End Sub
+
+Private Function NativeIsObjType(ByVal t As String) As Boolean
+    Select Case t
+        Case "String", "Integer", "Long", "Boolean", "Double", "Single", "Byte", "Variant", "Currency", "Date"
+            NativeIsObjType = False
+        Case Else
+            NativeIsObjType = True
+    End Select
+End Function
+
+Private Function NativeHexVal(ByVal h As String) As Long
+    'Parse a hex string (e.g. "1C", "100") to a Long.  Hand-rolled: CLng("&H..&")
+    'errors on the string form and CLng("&HFFFF") sign-extends as 16-bit.
+    Dim i As Long, ch As Long, acc As Long
+    For i = 1 To Len(h)
+        ch = Asc(UCase$(Mid$(h, i, 1)))
+        If ch >= 48 And ch <= 57 Then
+            acc = acc * 16 + (ch - 48)
+        ElseIf ch >= 65 And ch <= 70 Then
+            acc = acc * 16 + (ch - 55)
+        Else
+            Exit For
+        End If
+    Next
+    NativeHexVal = acc
 End Function
 
 Private Sub NativeAddRefLabel(refs As Collection, ByVal ln As String, ByVal kw As String)
