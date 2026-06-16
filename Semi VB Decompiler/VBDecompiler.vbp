@@ -18,6 +18,7 @@ Module=modNativeToVB; modNativeToVB.bas
 Module=modControls; modControls.bas
 Form=frmOptions.frm
 Module=modCOM; modCOM.bas
+Module=modOcx; modOcx.bas
 Class=clsMemoryMap; clsMemoryMap.cls
 Class=clsFile; clsFile.cls
 Module=modFrx; modFrx.bas

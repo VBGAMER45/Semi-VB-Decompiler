@@ -4420,6 +4420,11 @@ NewControl:
                     Call AddText("_ExtentY = " & ocxExtentY)
                     Call AddText("_Version = " & ocxVersion)
                 End If
+                'Decode the control-specific property values by instantiating the OCX
+                'and IPersistStreamInit::Load-ing its blob (beats commercial's opaque
+                'OleObjectBlob). Best-effort: needs the control registered; silently
+                'skips on any failure.
+                Call modOcx.EmitOcxProperties(F, strExternObject, ocxAt, fPos + cControlHeader.length)
                 Seek F, fPos + cControlHeader.length
                 GoTo EndLabel
         End Select
