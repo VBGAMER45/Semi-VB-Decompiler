@@ -2524,19 +2524,45 @@ Private Function NativeNumConvWrap(ByVal v As String, ByVal conv As String) As S
 End Function
 
 Private Function NativeIsFoldableArith(ByVal v As String) As Boolean
-    'A FUNCTION-CALL result worth extending with `+ N` / `- N` - a numeric value such
-    'as Len(s), InStr(...), Asc(...) where the immediate is a real computation (so
-    '`Right$(s, Len(s) - 4)` keeps the "- 4").  Deliberately narrow: a deref chain
-    '(arg_8(96) / global_X(12)) is usually address/field arithmetic and a bare local
-    '(var_38) is often a loop counter/limit, so both are excluded - folding onto them
-    'produced misleading `(arg_8(96) + 4)` / off-by-one `(var_38 + 1)` expressions.
+    'A value worth extending with `+ N` / `- N`:
+    '  (1) a FUNCTION-CALL result (Len(s), InStr, Asc) where the immediate is a real
+    '      computation, so `Right$(s, Len(s) - 4)` keeps the "- 4"; OR
+    '  (2) a fully-dereferenced ARRAY-ELEMENT VALUE that carries a recovered VARIABLE
+    '      index group (global_X(12)(arg_8)(252), arr(var_C)(4) - a UDT field read),
+    '      so a read-modify-write `Stamina = Stamina - 1` keeps its "- 1".
+    'Deliberately EXCLUDES a bare deref/pointer (global_X(12) / arg_8(96)) whose only
+    'paren groups are NUMERIC, and a bare local (var_38, often a loop counter): those
+    'are address/index math, and folding onto them rendered misleading `(arg_8(96) +
+    '4)` / off-by-one `(var_38 + 1)`.  A recovered variable index `(arg_/var_/global_)`
+    'is the tell that distinguishes a genuine element VALUE from that pointer math.
     If Len(v) = 0 Then Exit Function
     If Left$(v, 1) = Chr$(34) Then Exit Function                    'a string literal
+    'A recovered array-element value is a CLEAN DEREF CHAIN that carries a variable
+    'index/arg group (global_X(12)(arg_8)(252)).  It must NOT start with "(" nor
+    'contain a top-level operator - else it is a parenthesised arithmetic / relational
+    'expression (`(arg_C >= arg_14)`, `(var_38 + var_24)`) that merely begins with a
+    'variable, where appending `+ N` is nonsense (folding `+4` onto a Boolean).
+    If Left$(v, 1) <> "(" And Not NativeHasArithOp(v) Then
+        If InStr(v, "(arg_") > 0 Or InStr(v, "(var_") > 0 Or InStr(v, "(global_") > 0 Then
+            NativeIsFoldableArith = True: Exit Function
+        End If
+    End If
     If InStr(v, "(") < 2 Then Exit Function                         'need a name before "("
     'reject synthetic-local derefs (those are pointer/field math, not a call result)
     If Left$(v, 4) = "var_" Or Left$(v, 4) = "arg_" Or Left$(v, 4) = "loc_" _
        Or Left$(v, 7) = "global_" Or Left$(v, 6) = "field_" Then Exit Function
     NativeIsFoldableArith = True
+End Function
+
+Private Function NativeHasArithOp(ByVal v As String) As Boolean
+    'True when v contains a rendered (space-delimited) arithmetic / relational / logical
+    'operator - i.e. it is an EXPRESSION, not a clean deref-chain value.  A deref chain
+    'like global_X(12)(arg_8)(252) has no spaces, so this is False for it.
+    NativeHasArithOp = (InStr(v, " + ") > 0 Or InStr(v, " - ") > 0 Or InStr(v, " * ") > 0 _
+        Or InStr(v, " / ") > 0 Or InStr(v, " \ ") > 0 Or InStr(v, " Mod ") > 0 _
+        Or InStr(v, " >= ") > 0 Or InStr(v, " <= ") > 0 Or InStr(v, " <> ") > 0 _
+        Or InStr(v, " > ") > 0 Or InStr(v, " < ") > 0 Or InStr(v, " = ") > 0 _
+        Or InStr(v, " And ") > 0 Or InStr(v, " Or ") > 0 Or InStr(v, " Is ") > 0)
 End Function
 
 Private Function NativeFoldArith(ByVal val As String, ByVal isSub As Boolean, ByVal imm As Long) As String
