@@ -81,6 +81,8 @@ Private NVPushTop As Long
 Private NVLastPushDisp As Long     'set by NativePushOperand: by-ref local disp of the value just decoded (0 = none)
 Private NVVSlot As Collection      'variant stack slot (disp) -> last value stored (VT tag / string / expr)
 Private NVLastVarData As String    'last value written to a Variant DATA field (offset +8) - the RHS for a following late-bound property put whose value would otherwise be <value>
+Private NVLastVarBase As String    'the base local (e.g. var_C) of that Variant temp - its field-build stores are suppressed once a late put consumes the value
+Private NVSuppressVarBuild As Collection 'set of Variant-temp base names whose numeric-field-store lines to strip in finalisation
 Private NVIndent As Long           'current block-indent level
 Private NVIfTarget() As Long       'addresses where open If blocks must close
 Private NVIfTop As Long
@@ -208,7 +210,8 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVLocalGuid = New Collection
     Set NVStrLits = New Collection
     Set NVVSlot = New Collection
-    NVLastVarData = ""
+    NVLastVarData = "": NVLastVarBase = ""
+    Set NVSuppressVarBuild = New Collection
     Set NVSkipLabels = New Collection
     Set NVLoopHdr = New Collection
     Set NVSelExprReg = New Collection
@@ -502,7 +505,7 @@ nextInst:
     If Len(NVPendingCall) > 0 Then output = output & NativeIndentStr() & NVPendingCall & vbCrLf: NVPendingCall = ""
     NativeCloseIfs output, &H7FFFFFFF
     output = output & "End " & NVProcEndWord & vbCrLf
-    output = NativeStripOrphanLabels(NativeSubstituteConstants(NativeSubstituteArgNames(output)))
+    output = NativeStripOrphanLabels(NativeSubstituteConstants(NativeSubstituteArgNames(NativeStripVarBuild(output))))
     DecompileNativeProcToVB = NativeInsertLocalDims(output)
     Exit Function
 fail:
@@ -1649,9 +1652,13 @@ Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String,
         stVal = NativePopValue()
         If Len(stVal) = 0 Or stVal = objTok Or stVal = "<value>" Then stVal = "<value>"
         'The value is usually built into a Variant DATA field just before the call
-        '(the push stack only carried the object), so recover it from there.
-        If stVal = "<value>" And Len(NVLastVarData) > 0 Then stVal = NVLastVarData
-        NVLastVarData = ""
+        '(the push stack only carried the object), so recover it from there - and
+        'mark that temp's build statements (var_C(4/8/12)=...) for removal.
+        If stVal = "<value>" And Len(NVLastVarData) > 0 Then
+            stVal = NVLastVarData
+            If Len(NVLastVarBase) > 0 Then NativeSuppressVarBuild NVLastVarBase
+        End If
+        NVLastVarData = "": NVLastVarBase = ""
         NativeLateIdCall = mref & " = " & stVal
     ElseIf InStr(apiName, "Ld") > 0 Then
         'A value (property Get / function).  __vbaLateIdCallLd writes the result into a
@@ -1714,8 +1721,11 @@ Private Function NativeLateMemCall(inst As CInstruction, ByVal apiName As String
         Dim mstVal As String
         mstVal = NativePopValue()
         If Len(mstVal) = 0 Or mstVal = objTok Or mstVal = "<value>" Then mstVal = "<value>"
-        If mstVal = "<value>" And Len(NVLastVarData) > 0 Then mstVal = NVLastVarData
-        NVLastVarData = ""
+        If mstVal = "<value>" And Len(NVLastVarData) > 0 Then
+            mstVal = NVLastVarData
+            If Len(NVLastVarBase) > 0 Then NativeSuppressVarBuild NVLastVarBase
+        End If
+        NVLastVarData = "": NVLastVarBase = ""
         NativeLateMemCall = mref & " = " & mstVal
     Else
         NativeLateMemCall = mref
@@ -3894,6 +3904,44 @@ Private Function NativeSubstituteArgNames(ByVal src As String) As String
     Next
 End Function
 
+Private Sub NativeSuppressVarBuild(ByVal base As String)
+    'Mark a Variant-temp base (var_C) whose numeric-field build statements
+    '(var_C(4/8/12)=...) should be stripped - its data was consumed by a late put.
+    If Len(base) = 0 Or Left$(base, 4) <> "var_" Then Exit Sub
+    If NVSuppressVarBuild Is Nothing Then Set NVSuppressVarBuild = New Collection
+    On Error Resume Next
+    NVSuppressVarBuild.Add base, base                'keyed -> deduped
+End Sub
+
+Private Function NativeStripVarBuild(ByVal src As String) As String
+    'Remove the Variant-construction statements (base(<digit>) = ...) for any temp
+    'whose value was folded into a late-bound property put, leaving just the put.
+    NativeStripVarBuild = src
+    If NVSuppressVarBuild Is Nothing Then Exit Function
+    If NVSuppressVarBuild.Count = 0 Then Exit Function
+    Dim lines() As String, i As Long, t As String, drop As Boolean, b As Variant, rest As String, cp As Long
+    Dim outp As String
+    lines = Split(src, vbCrLf)
+    For i = 0 To UBound(lines)
+        t = Trim$(lines(i))
+        drop = False
+        For Each b In NVSuppressVarBuild
+            If Left$(t, Len(b) + 1) = b & "(" Then
+                rest = Mid$(t, Len(b) + 2)
+                cp = InStr(rest, ")")
+                If cp > 1 Then
+                    If IsNumeric(Left$(rest, cp - 1)) And InStr(Mid$(rest, cp), ") = ") = 1 Then drop = True: Exit For
+                End If
+            End If
+        Next b
+        If Not drop Then
+            If Len(outp) > 0 Then outp = outp & vbCrLf
+            outp = outp & lines(i)
+        End If
+    Next i
+    NativeStripVarBuild = outp
+End Function
+
 Private Function NativeSubstituteConstants(ByVal src As String) As String
     'Replace distinctive Win32 magic numbers with their constant names.  The ternary
     'raster-ops (SRCCOPY etc.) are 24-bit structured codes that can't plausibly be an
@@ -4515,8 +4563,9 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         If fv89 = lhs89 Then fv89 = NativeRegName(reg)
                         NativeTrackReg = lhs89 & " = " & fv89
                         'A write to a Variant's DATA field (offset +8) is the value a
-                        'following late-bound property put consumes - remember it.
-                        If disp = 8 And Len(fv89) > 0 And Left$(fv89, 1) <> "e" Then NVLastVarData = fv89
+                        'following late-bound property put consumes - remember it (and
+                        'the temp's base, to strip its build statements if consumed).
+                        If disp = 8 And Len(fv89) > 0 And Left$(fv89, 1) <> "e" Then NVLastVarData = fv89: NVLastVarBase = NVReg(NativeMemBase(dump))
                     End If
                 End If
             End If
@@ -4540,8 +4589,8 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         If Len(fis) = 0 Then fis = NativeNumFromBits(fimm)
                         NativeTrackReg = lhsC7 & " = " & fis
                         'Variant DATA field (offset +8) immediate -> remember as the
-                        'value for a following late-bound property put.
-                        If disp = 8 And Len(fis) > 0 Then NVLastVarData = fis
+                        'value (and base temp) for a following late-bound property put.
+                        If disp = 8 And Len(fis) > 0 Then NVLastVarData = fis: NVLastVarBase = NVReg(NativeMemBase(dump))
                     End If
                 End If
             End If
