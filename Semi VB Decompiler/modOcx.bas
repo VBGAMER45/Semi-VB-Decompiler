@@ -339,8 +339,12 @@ Private Function EmitOneProperty(ByVal ctl As Object, ByVal fresh As Object, ByV
     On Error GoTo skip
     If Not okLoad Then Exit Function
 
-    ' Object-valued properties (Font, Picture, MouseIcon) handled elsewhere (Build 2/3).
-    If IsObject(vLoad) Then Exit Function
+    ' Object-valued properties: Font -> BeginProperty block; others (Picture,
+    ' MouseIcon) deferred to the frx path (Build 3).
+    If IsObject(vLoad) Then
+        EmitOneProperty = EmitFontProperty(propName, vLoad, vDef)
+        Exit Function
+    End If
 
     ' Skip when unchanged from the control's fresh default.
     If okDef Then
@@ -444,4 +448,106 @@ Private Function IsBlobString(ByVal s As String) As Boolean
         c = AscW(Mid$(s, i, 1))
         If c < 32 And c <> 9 Then IsBlobString = True: Exit Function   'control char (tab allowed)
     Next
+End Function
+
+'*****************************
+'Purpose: Emit a Font property as VB's BeginProperty Font {GUID} ... EndProperty
+'   block when the loaded font differs from the control's default font. Returns
+'   True if a block was written. vLoad is the loaded font object; vDef may hold the
+'   fresh control's default font (or not be a font - then we always emit).
+'*****************************
+Private Function EmitFontProperty(ByVal propName As String, ByVal vLoad As Variant, ByVal vDef As Variant) As Boolean
+    On Error GoTo skip
+    EmitFontProperty = False
+    If Not IsObject(vLoad) Then Exit Function
+
+    ' Only handle objects that look like a font (have Name + Size).
+    Dim lName As String, lSize As String
+    If Not FontSig(vLoad, lName, lSize) Then Exit Function
+
+    ' Compare against the default font; emit only when something changed.
+    Dim changed As Boolean
+    changed = True
+    If IsObject(vDef) Then
+        Dim dName As String, dSize As String
+        If FontSig(vDef, dName, dSize) Then
+            changed = (FontSignature(vLoad) <> FontSignature(vDef))
+        End If
+    End If
+    If Not changed Then Exit Function
+
+    ' Standard StdFont/IFontDisp dispinterface GUID (fixed).
+    Call AddText("BeginProperty " & propName & " {0BE35203-8F91-11CE-9DE3-00AA004BB851} ")
+    gIdentSpaces = gIdentSpaces + 1
+    Call AddText("Name = """ & lName & """")
+    Call AddText("Size = " & lSize)
+    Call AddText("Charset = " & FontNum(vLoad, "Charset", 0))
+    Call AddText("Weight = " & FontWeight(vLoad))
+    Call AddText("Underline = " & FontBool(vLoad, "Underline"))
+    Call AddText("Italic = " & FontBool(vLoad, "Italic"))
+    Call AddText("Strikethrough = " & FontBool(vLoad, "Strikethrough"))
+    gIdentSpaces = gIdentSpaces - 1
+    Call AddText("EndProperty")
+    EmitFontProperty = True
+    Exit Function
+skip:
+    EmitFontProperty = False
+End Function
+
+'*****************************
+'Purpose: True if obj is a font-like object; returns its Name + formatted Size.
+'*****************************
+Private Function FontSig(ByVal obj As Variant, ByRef outName As String, ByRef outSize As String) As Boolean
+    On Error GoTo no
+    outName = CStr(CallByName(obj, "Name", VbGet))
+    outSize = Trim$(Str$(CDbl(CallByName(obj, "Size", VbGet))))
+    FontSig = True
+    Exit Function
+no:
+    FontSig = False
+End Function
+
+'*****************************
+'Purpose: A change-detection signature over a font's persisted fields.
+'*****************************
+Private Function FontSignature(ByVal obj As Variant) As String
+    On Error Resume Next
+    Dim nm As String, sz As String
+    Call FontSig(obj, nm, sz)
+    FontSignature = nm & "|" & sz & "|" & FontNum(obj, "Charset", 0) & "|" & FontWeight(obj) & "|" & _
+                    FontBool(obj, "Underline") & "|" & FontBool(obj, "Italic") & "|" & FontBool(obj, "Strikethrough")
+End Function
+
+Private Function FontNum(ByVal obj As Variant, ByVal field As String, ByVal dflt As Long) As Long
+    On Error GoTo d
+    FontNum = CLng(CDbl(CStr(CallByName(obj, field, VbGet))))
+    Exit Function
+d:
+    FontNum = dflt
+End Function
+
+'*****************************
+'Purpose: Font weight - prefer .Weight; fall back to .Bold (700/400).
+'*****************************
+Private Function FontWeight(ByVal obj As Variant) As Long
+    On Error GoTo tryBold
+    FontWeight = CLng(CDbl(CStr(CallByName(obj, "Weight", VbGet))))
+    If FontWeight > 0 Then Exit Function
+tryBold:
+    On Error GoTo d
+    If CBool(CallByName(obj, "Bold", VbGet)) Then FontWeight = 700 Else FontWeight = 400
+    Exit Function
+d:
+    FontWeight = 400
+End Function
+
+'*****************************
+'Purpose: A font Boolean field as VB form text ("0  'False" / "-1  'True").
+'*****************************
+Private Function FontBool(ByVal obj As Variant, ByVal field As String) As String
+    On Error GoTo f
+    If CBool(CallByName(obj, field, VbGet)) Then FontBool = "-1  'True" Else FontBool = "0  'False"
+    Exit Function
+f:
+    FontBool = "0  'False"
 End Function
