@@ -1467,6 +1467,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
     SFilePath = vbNullString
     SFile = vbNullString
     ReDim gControlNameArray(0) 'Treeveiw control list
+    Set gControlClass = New Collection
     ReDim gControlOffset(0)
     ReDim gProcedureList(0)
     ReDim gOcxList(0)
@@ -4360,6 +4361,10 @@ NewControl:
                 strExternObject = GetAllString(F)
                 Call AddText("Begin " & strExternObject & " " & cControlHeader.cName & " 'Length:" & cControlHeader.length)
                 Call AddExternalObject(strCurrentForm, strExternObject)
+                'Record control -> external class so a late-bound call on it resolves
+                'against the right OCX typelib (the control name alone, e.g. "MFD",
+                'gives no hint of its class "TabDlg.SSTab").
+                Call AddControlClass(strCurrentForm & "." & cControlHeader.cName, strExternObject)
                 'Load the control view COM if its on the computer
                 'Dim iGuid As Integer
                 'For iGuid = 0 To UBound(gOcxList)

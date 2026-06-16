@@ -1481,16 +1481,18 @@ Private Sub NativeDetectLateCalls(col As Collection)
     For k = 0 To n - 1
         If (arr(k).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nextk
         Dim an As String: an = NativeApiName(arr(k))
-        If InStr(an, "__vbaLateIdCall") = 0 And InStr(an, "__vbaLateMem") = 0 Then GoTo nextk
-        'For an Id call (member by DISPID) collect the candidate immediate pushes; a
-        'Mem call carries the member NAME as a string arg, so it needs no DISPID.
-        If InStr(an, "__vbaLateIdCall") > 0 Then
+        'Id family (member by DISPID): __vbaLateIdCall/CallLd/CallSt/St/StAd/NamedCall.
+        'Mem family (member by NAME string): __vbaLateMem*.
+        If InStr(an, "__vbaLateId") = 0 And InStr(an, "__vbaLateMem") = 0 Then GoTo nextk
+        'For an Id call collect the candidate immediate pushes (the DISPID); a Mem call
+        'carries the member NAME as a string arg, so it needs no DISPID.
+        If InStr(an, "__vbaLateId") > 0 Then
             Dim cand As String, j As Long, lim As Long, pv As Long
             cand = ""                          'reset per call (VB6 Dim-in-loop does NOT)
             lim = k - 30: If lim < 0 Then lim = 0
             For j = k - 1 To lim Step -1
                 If (arr(j).cmdType And C_TYPEMASK) = C_CAL Then
-                    If InStr(NativeApiName(arr(j)), "__vbaLateIdCall") > 0 Then Exit For   'previous late call -> stop
+                    If InStr(NativeApiName(arr(j)), "__vbaLateId") > 0 Then Exit For   'previous late call -> stop
                 End If
                 If NativeIsPushImm(arr(j), pv) Then
                     If pv <> 0 Then cand = cand & CStr(pv) & ","     '0 is the flags arg, never a member id
@@ -1609,14 +1611,26 @@ Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String,
     If Len(objTok) = 0 Then Exit Function
     baseName = NativeCtlBaseName(objTok)
     If Len(baseName) = 0 Then Exit Function
+    Dim libClass As String
+    libClass = GetControlClass(objTok)               'exact external class (e.g. TabDlg.SSTab)
     cand = NativeColGet(NVLateDispid, "L" & inst.va)
     If Len(cand) = 0 Then Exit Function
+    'Which invoke kind this call wants - breaks ties when one memid has both a
+    'method and a property on the control's typelib (1=Func, 2=Get, 4=Put).
+    Dim wantKind As Long
+    If InStr(apiName, "St") > 0 Then
+        wantKind = 4
+    ElseIf InStr(apiName, "Ld") > 0 Then
+        wantKind = 2
+    Else
+        wantKind = 1
+    End If
     Dim parts() As String, pi As Long, d As Long
     parts = Split(cand, ",")
     For pi = 0 To UBound(parts)
         If Len(parts(pi)) > 0 Then
             d = CLng(parts(pi))
-            memName = modCOM.LateMemberName(baseName, d, invKind)
+            memName = modCOM.LateMemberName(libClass, baseName, d, wantKind, invKind)
             If Len(memName) > 0 Then Exit For
         End If
     Next pi
@@ -1624,7 +1638,16 @@ Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String,
     resolved = True
     Dim mref As String
     mref = objTok & "." & memName
-    If InStr(apiName, "__vbaLateIdCallLd") > 0 Then
+    If InStr(apiName, "St") > 0 Or invKind = 4 Then
+        'A property/array STORE (__vbaLateIdSt/StAd/CallSt, or a PROPERTYPUT member):
+        'obj.Member = value.  The value is usually a Variant temp; if the only thing
+        'available is the object itself (the push stack held the control), don't echo
+        'it as the RHS - leave a <value> placeholder.
+        Dim stVal As String
+        stVal = NativePopValue()
+        If Len(stVal) = 0 Or stVal = objTok Or stVal = "<value>" Then stVal = "<value>"
+        NativeLateIdCall = mref & " = " & stVal
+    ElseIf InStr(apiName, "Ld") > 0 Then
         'A value (property Get / function).  __vbaLateIdCallLd writes the result into a
         'lea'd buffer (the var_ token) - assign to it so the value is captured; if no
         'buffer was recovered, thread through eax for the consumer instead.
@@ -1637,9 +1660,6 @@ Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String,
             NVPendingCall = "Call " & mref     'flushed as a statement if the result is unused
             NativeLateIdCall = ""
         End If
-    ElseIf InStr(apiName, "__vbaLateIdCallSt") > 0 Or invKind = 4 Then
-        'A property/array store: obj.Member = value.
-        NativeLateIdCall = mref & " = " & NativePopValue()
     Else
         'A method/sub call; arguments are not reliably recoverable from the push stack
         'here (the nested object-getter reset it), so render the bare member call.
@@ -3437,7 +3457,7 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
     'Late-bound dispatch: __vbaLateIdCall(obj, DISPID, ...) -> obj.Member[(args)].
     'Resolve the DISPID to the member name via the control's OCX typelib; on failure
     'fall through to the generic Call below (current behaviour, no regression).
-    If InStr(nm, "__vbaLateIdCall") > 0 Then
+    If InStr(nm, "__vbaLateId") > 0 Then
         Dim lcRes As String, lcResolved As Boolean
         lcRes = NativeLateIdCall(inst, nm, lcResolved)
         If lcResolved Then NativeRuntimeCall = lcRes: Exit Function

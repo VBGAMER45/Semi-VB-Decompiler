@@ -8,9 +8,12 @@ Global tliTypeLibInfo As TypeLibInfo
 '--- Late-bound (__vbaLateIdCall) member resolution: DISPID -> name via the OCX typelib ---
 Private mLateTlbCache As Collection   'OCX file path -> clsTypeLibInfo (each loaded once)
 
-Public Function ResolveLateMember(ByVal ocxFile As String, ByVal dispid As Long, ByRef invKind As Long) As String
-    'Load ocxFile's typelib (cached) and return the member NAME whose memid = dispid
-    'among its dispatch/interface types.  invKind: 1=Func, 2=Get, 4=Put.  "" if none.
+Public Function ResolveLateMember(ByVal ocxFile As String, ByVal dispid As Long, ByVal wantKind As Long, ByRef invKind As Long) As String
+    'Load ocxFile's typelib (cached) and return the member NAME whose memid = dispid.
+    'wantKind (1=Func, 2=Get, 4=Put, 0=any) breaks ties: a control typelib can carry
+    'the SAME memid in two dispinterfaces (e.g. TABCTL32 has 0x4 = IVBDataObject.SetData
+    '[Func] AND ISSTabCtl.Tab [Put]); a property STORE must pick the Put. Returns the
+    'best (wantKind) match, else the first match.  "" if none.
     On Error GoTo done
     If Len(ocxFile) = 0 Then Exit Function
     If mLateTlbCache Is Nothing Then Set mLateTlbCache = New Collection
@@ -23,21 +26,26 @@ Public Function ResolveLateMember(ByVal ocxFile As String, ByVal dispid As Long,
         If Not tlb.OpenTypeLib(ocxFile) Then Exit Function
         mLateTlbCache.Add tlb, ocxFile
     End If
-    Dim i As Long, g As Long
+    Dim i As Long, g As Long, anyName As String, anyKind As Long
     For i = 0 To tlb.TypeInfoCount - 1
         tlb.SelectTypeInfo i
         If tlb.TypeInfoKind = TKIND_DISPATCH Or tlb.TypeInfoKind = TKIND_INTERFACE Then
             For g = 0 To tlb.TypeInfoFunctions - 1
                 If tlb.SelectFunction(g) Then
                     If tlb.FunctionMemberId = dispid Then
-                        ResolveLateMember = tlb.FunctionName
-                        invKind = tlb.FunctionInvKind
-                        Exit Function
+                        If wantKind <> 0 And (tlb.FunctionInvKind And wantKind) <> 0 Then
+                            ResolveLateMember = tlb.FunctionName       'exact invoke-kind match
+                            invKind = tlb.FunctionInvKind
+                            Exit Function
+                        ElseIf Len(anyName) = 0 Then
+                            anyName = tlb.FunctionName: anyKind = tlb.FunctionInvKind  'remember first
+                        End If
                     End If
                 End If
             Next g
         End If
     Next i
+    ResolveLateMember = anyName: invKind = anyKind
 done:
 End Function
 
@@ -57,30 +65,36 @@ Public Function OcxFileFromClsid(ByVal clsid As String) As String
     End If
 End Function
 
-Public Function LateMemberName(ByVal ctlBase As String, ByVal dispid As Long, ByRef invKind As Long) As String
-    'Resolve a late-bound member (dispid) on an OCX control to its name.  ctlBase is the
-    'control's base name (e.g. "Winsock" from "Winsock1"), used to prefer the matching
-    'OCX among the project's references; falls back to scanning every referenced OCX.
+Public Function LateMemberName(ByVal libClass As String, ByVal ctlBase As String, ByVal dispid As Long, ByVal wantKind As Long, ByRef invKind As Long) As String
+    'Resolve a late-bound member (dispid) on an OCX control to its name.  Prefer the
+    'control's EXACT external class (libClass, e.g. "TabDlg.SSTab" from gControlClass);
+    'else its base name (Winsock1 -> "Winsock" -> MSWinsockLib.Winsock).  Deliberately
+    'does NOT blind-scan every OCX - that mis-resolved e.g. MFD.Tab to a same-dispid
+    'Winsock property when the control name gave no hint.
     On Error Resume Next
     Dim i As Long, f As String, nm As String
     If UBound(gOcxList) < 1 Then Exit Function
-    For i = 0 To UBound(gOcxList) - 1                 'pass 1: OCX whose name matches the control base
-        If Len(gOcxList(i).strGuid) > 0 And Len(ctlBase) > 0 Then
-            If InStr(1, gOcxList(i).strLibname, ctlBase, vbTextCompare) > 0 _
-               Or InStr(1, gOcxList(i).strocxName, ctlBase, vbTextCompare) > 0 Then
+    If Len(libClass) > 0 Then                         'pass 1: exact external class
+        For i = 0 To UBound(gOcxList) - 1
+            If Len(gOcxList(i).strGuid) > 0 And StrComp(gOcxList(i).strLibname, libClass, vbTextCompare) = 0 Then
                 f = OcxFileFromClsid(gOcxList(i).strGuid)
-                nm = ResolveLateMember(f, dispid, invKind)
+                nm = ResolveLateMember(f, dispid, wantKind, invKind)
                 If Len(nm) > 0 Then LateMemberName = nm: Exit Function
             End If
-        End If
-    Next i
-    For i = 0 To UBound(gOcxList) - 1                 'pass 2: any referenced OCX carrying this dispid
-        If Len(gOcxList(i).strGuid) > 0 Then
-            f = OcxFileFromClsid(gOcxList(i).strGuid)
-            nm = ResolveLateMember(f, dispid, invKind)
-            If Len(nm) > 0 Then LateMemberName = nm: Exit Function
-        End If
-    Next i
+        Next i
+    End If
+    If Len(ctlBase) > 0 Then                          'pass 2: OCX whose name matches the control base
+        For i = 0 To UBound(gOcxList) - 1
+            If Len(gOcxList(i).strGuid) > 0 Then
+                If InStr(1, gOcxList(i).strLibname, ctlBase, vbTextCompare) > 0 _
+                   Or InStr(1, gOcxList(i).strocxName, ctlBase, vbTextCompare) > 0 Then
+                    f = OcxFileFromClsid(gOcxList(i).strGuid)
+                    nm = ResolveLateMember(f, dispid, wantKind, invKind)
+                    If Len(nm) > 0 Then LateMemberName = nm: Exit Function
+                End If
+            End If
+        Next i
+    End If
 End Function
 
 Public Function GetSearchType(ByVal SearchData As Long) As TliSearchTypes

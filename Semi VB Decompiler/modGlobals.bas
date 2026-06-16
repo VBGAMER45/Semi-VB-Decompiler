@@ -615,6 +615,9 @@ Private Type typeControlName
     lControlIndex As Long   'tControl.index - used to map P-Code VCallAd offsets to controls
 End Type
 Global gControlNameArray() As typeControlName
+'Maps "<form>.<control>" -> the control's external class (e.g. "TabDlg.SSTab"), so a
+'late-bound call on that control resolves against the correct OCX typelib.
+Global gControlClass As Collection
 
 'Maps an object's own method slot to its code address, keyed "ObjectName:slot",
 'so a native "call [vtable + 0x6F8 + slot*4]" (a form calling its own method)
@@ -1210,6 +1213,19 @@ Sub SetupEvents()
     
     
 End Sub
+Public Sub AddControlClass(ByVal key As String, ByVal cls As String)
+    'Record a control's external class (deduped; first wins).  Isolated here so the
+    'caller's On Error context is untouched.
+    On Error Resume Next
+    If gControlClass Is Nothing Then Set gControlClass = New Collection
+    gControlClass.Add cls, key
+End Sub
+
+Public Function GetControlClass(ByVal key As String) As String
+    On Error Resume Next
+    If Not gControlClass Is Nothing Then GetControlClass = gControlClass(key)
+End Function
+
 Public Function NormalizeCtlArrayGuid(ByVal g As String) As String
     'A VB6 control ARRAY exposes the same event set as the single control, but its
     'event-interface IID is the single control's IID + 1 in Data1 (e.g. CommandButton
