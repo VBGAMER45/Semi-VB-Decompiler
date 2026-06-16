@@ -130,12 +130,31 @@ tracking then emits `<field> = CInt(var_30)`. Dungeon: `iNumber = Int(Trim$(Righ
 reconstructs as `var_24 = CInt(var_30)`; ItemDef array fields recover too. All bare conversion
 Calls gone; no regressions (known-good identical, no new `<arg>`/`CInt(<arg>)`/dangling GoTo).
 
-### C. Nested-loop register induction variables (high value, high effort, regression-prone)
-Nested draw loops (`For i = -radius To radius`) keep their counters in registers and show
-raw/first-iteration conditions like `If -((picView.ScaleHeight/32)/2) <= ((picView.ScaleHeight/32)/2)`.
-Full `For` reconstruction needs induction-variable tracking for register-resident counters
-(the existing For detection only handles const-init, top-tested, cmp/jg/inc/jmp loops with a
-single back-edge). The simple register->local mirror (committed) named some counters but not these.
+### C. Register-resident loop induction variables (high value, high effort, regression-prone)  ← NEXT UP
+The counter-naming pass (`NativeDetectCounterSlots`) only binds STACK-slot counters; a loop whose
+counter lives purely in a REGISTER shows a blank `<cond>` (or a stale first-iteration value) and
+isn't reconstructed as `For`.
+
+**Concrete reproducer (do this first — simplest case): customocx `Project1.exe` `Winsock1_DataArrival`.**
+`C:\Users\Owner\Desktop\websites\customocx\Project1.exe` (source alongside; the proc decompiles now,
+just the loop cond is blank). Source = `For x = 0 To 1000 / RichTextBox1.Text = RichTextBox1.Text & x & vbCrLf / Next x`.
+We emit `Do While <cond>` with `x` shown as `CStr(0)` (stale init). Disasm of the header:
+`xor edi,edi` (x=0, counter in **edi**); `mov ecx, 0x3E8` (limit 1000 in **ecx**);
+`66 3b f9` = **`cmp di, cx`** (16-bit register-vs-register); `0f 8f .. jg exit`. So the condition is
+`x <= 1000` but BOTH operands are registers (di=counter, cx=limit-imm) and the 16-bit `3B` reg-reg
+`cmp` isn't decoded into a relational, so the While-loop reconstructor gets no cond. To finish:
+(1) decode `cmp r16,r16` (0x66 + 0x3B) in NativeDecodeCompare; (2) recognise edi as a register loop
+counter (extend NativeDetectCounterSlots / a new NativeDetectRegCounter: a reg `xor`'d to 0 (or `mov
+reg,imm`), read+`inc`/`add reg,1`'d inside a back-edge loop, compared at the header) and bind it to a
+NAME so the cond reads `<ctr> <= 1000` and the body's `x` resolves (not `CStr(0)`); (3) ideally emit
+`For <ctr> = 0 To 1000 / Next` instead of `Do While`. GOTCHA: at decompile time (linear) the reg holds
+its INIT value at the header compare, so naively reading NVReg gives `0 <= 1000` (the old Phase-1
+stale-init bug) — the counter must be bound to a name BEFORE the cond renders.
+
+Also (the harder, original case): nested draw loops (`For i = -radius To radius`) keep counters in
+registers and show `If -((picView.ScaleHeight/32)/2) <= ((picView.ScaleHeight/32)/2)`. Same root;
+gated on the same reg-counter tracking. The simple register->local mirror (committed earlier) named
+some counters but not these. Couples with D (FPU integer-expression tracking) for the draw-loop coords.
 
 ### D. FPU integer-expression tracking (medium value, high effort — coupled with C)
 `picView.Line (var_100, var_F8)-(31, 31), 255` shows float-temp coords where commercial got
@@ -179,6 +198,20 @@ register-counter naming via stack mirror · As-New private form-field method/pro
 value-returning Function folding (Property Get + Function via retbuf detection) ·
 string-comparison reconstruction (B: __vbaStrCmp→relational + string-transform folding +
 Line Input/Get zero-init invalidation).
+
+### DONE 2026-06-16 cycle (OCX / customocx Project1.exe focus — see auto-memory)
+OCX form-property decode via IPersistStreamInit::Load + TLI (modOcx.bas: _ExtentX/Y/Version,
+real prop values, Font BeginProperty block, invisible Left/Top trailer, TextRTF→frx,
+OleObjectBlob fallback) · OCX control EVENT names via the coclass DefaultEventInterface
+(modCOM.OcxEventSig; Winsock1_Connect/DataArrival/Error) + the aEvent-gate fix (native event
+names were dropped when the P-Code aEvent field read 0) · event-handler bodies use the declared
+PARAM NAMES (Number/Description not arg_C) · form-self property puts (`Form1.Caption = "Hey"` via
+the _Form GUID + a global→form-instance map so it works from a .bas module too) · late-bound
+property PUT VALUE + late-bound METHOD ARGS recovered from the Variant DATA fields
+(`RichTextBox1.Text = "Connected"`, `Winsock1.Connect "127.0.0.1", 535`) + Variant-build-line
+suppression · FRAMELESS function discovery (E8 call sites + boundary filter, so module functions
+aren't missing) AND simple frameless BODY decode (`proc = (arg_8 * arg_C)`, typed Function).
+**Remaining from that cycle → task C above** (register-counter For-loop `<cond>` in DataArrival).
 
 See the per-topic notes in the auto-memory dir
 (`...\memory\*.md` — MEMORY.md is the index) for implementation details and gotchas.
