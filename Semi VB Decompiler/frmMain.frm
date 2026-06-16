@@ -4433,7 +4433,11 @@ NewControl:
                 'and IPersistStreamInit::Load-ing its blob (beats commercial's opaque
                 'OleObjectBlob). Best-effort: needs the control registered; silently
                 'skips on any failure.
-                Call modOcx.EmitOcxProperties(F, strExternObject, ocxAt, fPos + cControlHeader.length, strCurrentForm)
+                If Not modOcx.EmitOcxProperties(F, strExternObject, ocxAt, fPos + cControlHeader.length, strCurrentForm) Then
+                    'Could not instantiate/Load the control (e.g. OCX not registered)
+                    '- preserve its raw blob as OleObjectBlob, like commercial.
+                    Call modOcx.EmitOleObjectBlobFallback(F, ocxAt, fPos + cControlHeader.length, strCurrentForm)
+                End If
                 Seek F, fPos + cControlHeader.length
                 GoTo EndLabel
         End Select

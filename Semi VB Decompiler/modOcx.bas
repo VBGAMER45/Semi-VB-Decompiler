@@ -126,6 +126,34 @@ fail:
 End Function
 
 '*****************************
+'Purpose: Fallback for controls we cannot instantiate/Load (e.g. the OCX is not
+'   registered on this machine). Writes the control's raw IPersistStream blob to
+'   the form frx and emits OleObjectBlob = "Form.frx":offset - the same recover
+'   path the commercial decompiler always uses. Best-effort: preserves the bytes
+'   so the control round-trips even though its properties stay opaque.
+'*****************************
+Public Sub EmitOleObjectBlobFallback(ByVal F As Variant, ByVal startPos As Long, ByVal endPos As Long, ByVal formName As String)
+    On Error GoTo done
+    Dim savePos As Long
+    savePos = Loc(F)
+    If endPos <= startPos Then GoTo done
+    Dim n As Long
+    n = endPos - startPos
+    If n <= 0 Or n > 16000000 Then GoTo done
+    Dim blob() As Byte
+    ReDim blob(n - 1)
+    Seek F, startPos
+    Get F, , blob
+    Seek F, savePos
+    Dim rid As Long
+    rid = AddOcxFrxBlob(formName, blob)
+    If rid > 0 Then Call AddText("OleObjectBlob = " & cQuote & formName & ".frx" & cQuote & ":" & OCXFRX_TAG & rid & "#")
+done:
+    On Error Resume Next
+    Seek F, savePos
+End Sub
+
+'*****************************
 'Purpose: Locate the 0x12344321 signature in [startPos,endPos), read the 4-byte
 '   payload length stored immediately before it, and copy [magic, magic+len) into
 '   blob(). Restores the file pointer. Returns False if no signature.
