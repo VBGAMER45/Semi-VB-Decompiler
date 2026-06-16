@@ -82,8 +82,11 @@ Writes `Form1.frm`, `*.cls`, `*.bas`, a `Dungeon.vbp`, and `decompile.log` into 
    arithmetic fold that produced `(arg_8(96) + 4)` / `(var_38 + 1)`).
 
 Useful counters to watch over time (whole-program): `<cond>` (blank conditions),
-`<arg>`, `GoTo`, garbage `0 <> 0`. Session trajectory: `<cond>` 426→92, GoTo
-925→413, garbage 77→7, output roughly halved.
+`<arg>`, `GoTo`, garbage `0 <> 0`. Trajectory: `<cond>` 426→92→**65** (feada43:
+UDT/array-element compares resolve to `global_X(12)(244) <op> R`), GoTo 925→413,
+garbage 77→7, output roughly halved. The remaining ~65 `<cond>` are the hard
+ceiling: boolean-materialization (`test ax,ax`, Task-A-structural) + word reg-reg
+juggling (resolving yields garbage).
 
 ---
 
@@ -140,20 +143,15 @@ from native EXEs — unrecoverable (verified by binary string search).**
 See `NEXT_TASKS.md` for the full done-list and the hard/unrecoverable limits. The
 concrete next candidates:
 
-### A. Local `Dim` declarations with type inference (the requested one)
-The commercial emits `Dim var_2C As Variant`; we emit none. Native compilation strips
-local var **names and types**, but the **type can often be inferred from usage** —
-which would beat the commercial's blanket `As Variant`:
-- assigned a string function (`Left$`/`Trim$`/`Right$`/`UCase$`) → **String**
-- assigned `Len`/`CInt`/`CLng`/`Val` or used in integer arithmetic → **Long/Integer**
-- `Set var = New clsX` / a method call resolves its class → **As clsX** (we already
-  know the class via the Object Info chain)
-- holds a control (tagged via `__vbaObjSet` + control GUID) → the **control type**
-- a recognized loop counter (NVCounterSlot) → **Long**
-- otherwise → **Variant** (or omit).
-Implementation: collect each local's inferred type during the decompile pass (a
-per-proc map keyed by stack offset), then emit a `Dim` block at the top of the proc
-body. Ties into the "does it recompile in VB6?" quality bar. Medium effort.
+### A. Local `Dim` declarations with type inference — DONE (443472f, 2026-06-15)
+`NativeInsertLocalDims` post-pass emits a sorted `Dim var_X As <type>` block after
+each proc header, types inferred from usage: String (string funcs/`&`/literal),
+Long/Integer (Len/UBound/CLng/CInt/arithmetic), control class (`Set v=frmMain.picView`
+→ PictureBox/Label/... via gControlOffset), `clsX` (`Set v=New clsX`), else Variant.
+49% of Dungeon's 507 locals concretely typed (beats commercial's blanket Variant).
+Runs after arg/const substitution so the return-slot/param names aren't var_X.
+See memory `local-dim-inference.md`. Follow-up: transitive `var=otherVar` propagation;
+ties into the recompile-ability triage (E).
 
 ### B. LoadImage-position / general API flag constants (Tier-2 continuation)
 Now that arg truncation is fixed, `LoadImage(…, 0, …, 16)` shows the flags. Add a
