@@ -110,6 +110,7 @@ Private NVWhileLoop As Collection  '"W"&backedgeVA -> "1" - emit `Loop` here (th
 Private NVElemIdx As Collection    '"E"&accessVA -> recovered logical array index expr (e.g. arg_8) for a SAFEARRAY element access at that VA; injected by the SIB read/store renderers
 Private NVCurVa As Long            'VA of the instruction currently being rendered (so the SIB renderers can look up NVElemIdx)
 Private NVLateDispid As Collection '"L"&callVA -> comma list of candidate DISPIDs pushed to a __vbaLateIdCall (resolve to the OCX member name at render)
+Private NVSuppressObjSet As Collection '"O"&objSetVA -> "1" - a __vbaObjSet whose only purpose is to pass the control into the very next late call; drop the redundant `Set temp = control`
 Private NVArgTok() As String       'per-proc: generic tokens (arg_<offset>) to replace with...
 Private NVArgNm() As String        '...their recovered parameter names, at proc finalisation
 Private NVArgN As Long             'count of recovered parameter-name substitutions this proc
@@ -225,6 +226,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVWhileLoop = New Collection
     Set NVElemIdx = New Collection
     Set NVLateDispid = New Collection
+    Set NVSuppressObjSet = New Collection
     NVCurVa = 0
     NVArgN = 0
     ReDim NVSelStkBase(31): NVSelTop = 0
@@ -1478,22 +1480,71 @@ Private Sub NativeDetectLateCalls(col As Collection)
     For Each inst In col: Set arr(k) = inst: k = k + 1: Next
     For k = 0 To n - 1
         If (arr(k).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nextk
-        If InStr(NativeApiName(arr(k)), "__vbaLateIdCall") = 0 Then GoTo nextk
-        Dim cand As String, j As Long, lim As Long, pv As Long
-        lim = k - 30: If lim < 0 Then lim = 0
-        For j = k - 1 To lim Step -1
-            If (arr(j).cmdType And C_TYPEMASK) = C_CAL Then
-                If InStr(NativeApiName(arr(j)), "__vbaLateIdCall") > 0 Then Exit For   'previous late call -> stop
+        Dim an As String: an = NativeApiName(arr(k))
+        If InStr(an, "__vbaLateIdCall") = 0 And InStr(an, "__vbaLateMem") = 0 Then GoTo nextk
+        'For an Id call (member by DISPID) collect the candidate immediate pushes; a
+        'Mem call carries the member NAME as a string arg, so it needs no DISPID.
+        If InStr(an, "__vbaLateIdCall") > 0 Then
+            Dim cand As String, j As Long, lim As Long, pv As Long
+            lim = k - 30: If lim < 0 Then lim = 0
+            For j = k - 1 To lim Step -1
+                If (arr(j).cmdType And C_TYPEMASK) = C_CAL Then
+                    If InStr(NativeApiName(arr(j)), "__vbaLateIdCall") > 0 Then Exit For   'previous late call -> stop
+                End If
+                If NativeIsPushImm(arr(j), pv) Then
+                    If pv <> 0 Then cand = cand & CStr(pv) & ","     '0 is the flags arg, never a member id
+                End If
+            Next j
+            If Len(cand) > 0 Then NativeColPut NVLateDispid, "L" & arr(k).va, cand
+        End If
+        'A `__vbaObjSet` that is the FIRST call scanning back from this late call (only
+        'push/lea/mov plumbing between them) exists solely to pass the just-fetched
+        'control into the call - mark it so the redundant `Set temp = control` drops.
+        Dim jb As Long, blim As Long
+        blim = k - 10: If blim < 0 Then blim = 0
+        For jb = k - 1 To blim Step -1
+            If (arr(jb).cmdType And C_TYPEMASK) = C_CAL Then
+                If NativeBackCallIsObjSet(arr, jb) Then NativeColPut NVSuppressObjSet, "O" & arr(jb).va, "1"
+                Exit For
             End If
-            If NativeIsPushImm(arr(j), pv) Then
-                If pv <> 0 Then cand = cand & CStr(pv) & ","     '0 is the flags arg, never a member id
-            End If
-        Next j
-        If Len(cand) > 0 Then NativeColPut NVLateDispid, "L" & arr(k).va, cand
+        Next jb
 nextk:
     Next k
 done:
 End Sub
+
+Private Function NativeCallReg(inst As CInstruction) As Long
+    'Register index of an indirect `call reg` (FF /2, mod=3), else -1.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
+    NativeCallReg = -1
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &HFF Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) = 3 And ((modrm \ 8) And 7) = 2 Then NativeCallReg = modrm And 7
+End Function
+
+Private Function NativeBackCallIsObjSet(arr() As CInstruction, ByVal callIdx As Long) As Boolean
+    'True when the call at callIdx is __vbaObjSet - either direct (call [iat]) or via a
+    'register VB cached it into (`mov edi,[__vbaObjSet iat]; call edi`).
+    If InStr(NativeApiName(arr(callIdx)), "__vbaObjSet") > 0 Then NativeBackCallIsObjSet = True: Exit Function
+    Dim rg As Long
+    rg = NativeCallReg(arr(callIdx))
+    If rg < 0 Then Exit Function
+    'Find the most recent load of that register (VB caches the helper IAT into a
+    'callee-saved register once near the proc top, then calls it many times), so scan
+    'the whole preceding range, not a short window.
+    Dim j As Long
+    For j = callIdx - 1 To 0 Step -1
+        If NativeInstDestReg(arr(j)) = rg Then
+            NativeBackCallIsObjSet = (InStr(NativeApiName(arr(j)), "__vbaObjSet") > 0)
+            Exit Function
+        End If
+    Next j
+End Function
 
 Private Function NativeIsPushImm(inst As CInstruction, ByRef val As Long) As Boolean
     'Match `push imm8` (6A ib) or `push imm32` (68 id); set val to the pushed value.
@@ -1593,6 +1644,64 @@ Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String,
         'here (the nested object-getter reset it), so render the bare member call.
         NativeLateIdCall = mref
     End If
+End Function
+
+Private Function NativeLateMemCall(inst As CInstruction, ByVal apiName As String, ByRef resolved As Boolean) As String
+    'Name-based late dispatch: __vbaLateMemCall[Ld/St](result?, obj, "Member", cArgs..)
+    'carries the member name as a STRING argument, so it needs no typelib - render
+    'obj.Member directly.  Variants mirror the Id form (Ld -> result = obj.Member,
+    'St / PROPERTYPUT -> obj.Member = value, plain -> obj.Member).
+    resolved = False
+    Dim objExpr As String
+    objExpr = NativeArgList()
+    NVPushTop = 0
+    If Len(objExpr) = 0 Then Exit Function
+    Dim toks() As String, ti As Long, memName As String, memIdx As Long, objTok As String, resTok As String
+    toks = Split(objExpr, ", ")
+    memIdx = -1
+    For ti = 0 To UBound(toks)                    'the member name is the first quoted token
+        If Left$(Trim$(toks(ti)), 1) = Chr$(34) And memIdx < 0 Then memName = Trim$(toks(ti)): memIdx = ti
+    Next ti
+    If memIdx < 1 Or Len(memName) < 3 Then Exit Function
+    memName = Mid$(memName, 2, Len(memName) - 2)   'strip the quotes
+    If Len(memName) = 0 Or Not NativeIsIdentName(memName) Then Exit Function
+    objTok = Trim$(toks(memIdx - 1))              'object = the token just before the name
+    If Len(objTok) = 0 Then Exit Function
+    For ti = 0 To memIdx - 2                       'result buffer (Ld) = the first var_/arg_ before the object
+        If Left$(Trim$(toks(ti)), 4) = "var_" Or Left$(Trim$(toks(ti)), 4) = "arg_" Then resTok = Trim$(toks(ti)): Exit For
+    Next ti
+    resolved = True
+    Dim mref As String
+    mref = objTok & "." & memName
+    If InStr(apiName, "Ld") > 0 Then
+        If Len(resTok) > 0 Then
+            NativeLateMemCall = resTok & " = " & mref
+        Else
+            NVReg(0) = mref
+            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+            NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+            NVPendingCall = "Call " & mref
+            NativeLateMemCall = ""
+        End If
+    ElseIf InStr(apiName, "St") > 0 Then
+        NativeLateMemCall = mref & " = " & NativePopValue()
+    Else
+        NativeLateMemCall = mref
+    End If
+End Function
+
+Private Function NativeIsIdentName(ByVal s As String) As Boolean
+    'A plausible member identifier (letters/digits/underscore, leading letter) - guards
+    'against treating a non-name string literal as a member name.
+    Dim i As Long, ch As Long
+    If Len(s) = 0 Then Exit Function
+    ch = Asc(UCase$(Left$(s, 1)))
+    If Not ((ch >= 65 And ch <= 90) Or ch = 95) Then Exit Function
+    For i = 1 To Len(s)
+        ch = Asc(Mid$(s, i, 1))
+        If Not ((ch >= 65 And ch <= 90) Or (ch >= 97 And ch <= 122) Or (ch >= 48 And ch <= 57) Or ch = 95) Then Exit Function
+    Next
+    NativeIsIdentName = True
 End Function
 
 Private Function NativeTraceIndexOrigin(arr() As CInstruction, ByVal n As Long, ByVal startK As Long, ByVal idxReg As Long) As String
@@ -2965,8 +3074,14 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             If NVLastLeaSet And Len(osGuid) > 0 Then
                 NativeSetLocalGuid NVLastLea, osGuid
                 NativeSetLocalExpr NVLastLea, osName
-                NativeRuntimeCall = "Set var_" & Hex$(Abs(NVLastLea)) & " = " & osName
                 NVLastLeaSet = False
+                'A `Set temp = control` that exists only to pass the control into the
+                'immediately-following late call is redundant (the late call renders the
+                'control directly) - drop it, keeping the re-tag above so the call resolves.
+                If Len(NativeColGet(NVSuppressObjSet, "O" & inst.va)) > 0 Then
+                    NativeRuntimeCall = "": Exit Function
+                End If
+                NativeRuntimeCall = "Set var_" & Hex$(Abs(NVLastLea)) & " = " & osName
                 Exit Function
             End If
             NativeRuntimeCall = "": Exit Function    'object-store plumbing - drop
@@ -3325,6 +3440,10 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
         Dim lcRes As String, lcResolved As Boolean
         lcRes = NativeLateIdCall(inst, nm, lcResolved)
         If lcResolved Then NativeRuntimeCall = lcRes: Exit Function
+    ElseIf InStr(nm, "__vbaLateMem") > 0 Then
+        Dim lmRes As String, lmResolved As Boolean
+        lmRes = NativeLateMemCall(inst, nm, lmResolved)
+        If lmResolved Then NativeRuntimeCall = lmRes: Exit Function
     End If
 
     'Unknown helper: emit a visible Call with whatever arguments were collected
