@@ -83,6 +83,9 @@ Private NVVSlot As Collection      'variant stack slot (disp) -> last value stor
 Private NVLastVarData As String    'last value written to a Variant DATA field (offset +8) - the RHS for a following late-bound property put whose value would otherwise be <value>
 Private NVLastVarBase As String    'the base local (e.g. var_C) of that Variant temp - its field-build stores are suppressed once a late put consumes the value
 Private NVSuppressVarBuild As Collection 'set of Variant-temp base names whose numeric-field-store lines to strip in finalisation
+Private NVVarArgList() As String   'ordered Variant data-field (offset +8) values built since the last consumer - the argument list for a following control-method call (obj.Method a, b)
+Private NVVarArgBase() As String   'parallel: the temp base of each, to strip the build statements
+Private NVVarArgN As Long
 Private NVIndent As Long           'current block-indent level
 Private NVIfTarget() As Long       'addresses where open If blocks must close
 Private NVIfTop As Long
@@ -211,6 +214,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVStrLits = New Collection
     Set NVVSlot = New Collection
     NVLastVarData = "": NVLastVarBase = ""
+    ReDim NVVarArgList(15): ReDim NVVarArgBase(15): NVVarArgN = 0
     Set NVSuppressVarBuild = New Collection
     Set NVSkipLabels = New Collection
     Set NVLoopHdr = New Collection
@@ -492,7 +496,14 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
            And Len(selCV) = 0 And Len(NativeColGet(NVSelEnd, svaKey)) = 0 Then
             output = output & "loc_" & Right$("00000000" & Hex$(inst.va), 8) & ":" & vbCrLf
         End If
-        output = output & NativeProcessInst(inst)
+        Dim stmtTxt As String
+        stmtTxt = NativeProcessInst(inst)
+        output = output & stmtTxt
+        'Reset the pending Variant-method-arg list when a NON-build statement is
+        'emitted (a Variant field-build line var_X(<digit>) = .. keeps accumulating;
+        'anything else - a call that consumed them, or unrelated code - clears them so
+        'a stale sequence never bleeds into the next control-method call).
+        If Len(Trim$(stmtTxt)) > 0 And Not NativeIsVarBuildLine(stmtTxt) Then NativeResetVarArgs
         'A call clobbers the CALLER-SAVED registers (ecx, edx; eax holds the return
         'and is re-tagged by the call handler), so their tracked object/control
         'identity is invalid afterwards - drop it.  The CALLEE-SAVED registers
@@ -1695,10 +1706,25 @@ Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String,
             NativeLateIdCall = ""
         End If
     Else
-        'A method/sub call; arguments are not reliably recoverable from the push stack
-        'here (the nested object-getter reset it), so render the bare member call.
-        NativeLateIdCall = mref
+        'A method/sub call.  Its arguments are passed as Variants by pointer (the push
+        'stack was reset by the nested object-getter), so use the Variant data-field
+        'values built just before the call - e.g. Winsock1.Connect "127.0.0.1", 535 -
+        'and strip their build statements.
+        NativeLateIdCall = mref & NativeTakeVarArgs()
     End If
+End Function
+
+Private Function NativeTakeVarArgs() As String
+    'Consume the pending Variant-method-argument list as " a, b, c" (leading space),
+    'mark each temp's build statements for removal, and reset.  "" if none.
+    Dim s As String, vk As Long
+    For vk = 0 To NVVarArgN - 1
+        If Len(s) > 0 Then s = s & ", "
+        s = s & NVVarArgList(vk)
+        NativeSuppressVarBuild NVVarArgBase(vk)
+    Next
+    NativeResetVarArgs
+    If Len(s) > 0 Then NativeTakeVarArgs = " " & s
 End Function
 
 Private Function NativeLateMemCall(inst As CInstruction, ByVal apiName As String, ByRef resolved As Boolean) As String
@@ -1749,7 +1775,7 @@ Private Function NativeLateMemCall(inst As CInstruction, ByVal apiName As String
         NVLastVarData = "": NVLastVarBase = ""
         NativeLateMemCall = mref & " = " & mstVal
     Else
-        NativeLateMemCall = mref
+        NativeLateMemCall = mref & NativeTakeVarArgs()
     End If
 End Function
 
@@ -3940,6 +3966,33 @@ Private Function NativeGlobalTokVa(ByVal tok As String) As Long
     If Left$(tok, 7) = "global_" Then NativeGlobalTokVa = CLng("&H" & Mid$(tok, 8))
 End Function
 
+Private Sub NativeAddVarArg(ByVal v As String, ByVal base As String)
+    'Append a Variant data-field value (a method argument being built) to the
+    'pending argument list for a following control-method call.
+    On Error Resume Next
+    If NVVarArgN > UBound(NVVarArgList) Then ReDim Preserve NVVarArgList(NVVarArgN + 15): ReDim Preserve NVVarArgBase(NVVarArgN + 15)
+    NVVarArgList(NVVarArgN) = v
+    NVVarArgBase(NVVarArgN) = base
+    NVVarArgN = NVVarArgN + 1
+End Sub
+
+Private Sub NativeResetVarArgs()
+    NVVarArgN = 0
+End Sub
+
+Private Function NativeIsVarBuildLine(ByVal s As String) As Boolean
+    'True when a statement is a Variant field-build line: var_<hex>(<digits>) = ...
+    Dim t As String, p As Long, q As Long
+    t = Trim$(Replace(s, vbCrLf, ""))
+    If Left$(t, 4) <> "var_" Then Exit Function
+    p = InStr(t, "(")
+    If p < 5 Then Exit Function
+    q = InStr(p, t, ")")
+    If q <= p + 1 Then Exit Function
+    If Not IsNumeric(Mid$(t, p + 1, q - p - 1)) Then Exit Function
+    NativeIsVarBuildLine = (InStr(Mid$(t, q), ") = ") = 1)
+End Function
+
 Private Sub NativeSuppressVarBuild(ByVal base As String)
     'Mark a Variant-temp base (var_C) whose numeric-field build statements
     '(var_C(4/8/12)=...) should be stripped - its data was consumed by a late put.
@@ -4599,9 +4652,12 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         If fv89 = lhs89 Then fv89 = NativeRegName(reg)
                         NativeTrackReg = lhs89 & " = " & fv89
                         'A write to a Variant's DATA field (offset +8) is the value a
-                        'following late-bound property put consumes - remember it (and
+                        'following late put / method call consumes - remember it (and
                         'the temp's base, to strip its build statements if consumed).
-                        If disp = 8 And Len(fv89) > 0 And Left$(fv89, 1) <> "e" Then NVLastVarData = fv89: NVLastVarBase = NVReg(NativeMemBase(dump))
+                        If disp = 8 And Len(fv89) > 0 And Left$(fv89, 1) <> "e" Then
+                            NVLastVarData = fv89: NVLastVarBase = NVReg(NativeMemBase(dump))
+                            NativeAddVarArg fv89, NVLastVarBase
+                        End If
                     End If
                 End If
             End If
@@ -4625,8 +4681,11 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         If Len(fis) = 0 Then fis = NativeNumFromBits(fimm)
                         NativeTrackReg = lhsC7 & " = " & fis
                         'Variant DATA field (offset +8) immediate -> remember as the
-                        'value (and base temp) for a following late-bound property put.
-                        If disp = 8 And Len(fis) > 0 Then NVLastVarData = fis: NVLastVarBase = NVReg(NativeMemBase(dump))
+                        'value (and base temp) for a following late put / method call.
+                        If disp = 8 And Len(fis) > 0 Then
+                            NVLastVarData = fis: NVLastVarBase = NVReg(NativeMemBase(dump))
+                            NativeAddVarArg fis, NVLastVarBase
+                        End If
                     End If
                 End If
             End If
