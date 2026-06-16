@@ -109,6 +109,7 @@ Private NVWhileCond As Collection  '"W"&exitJccVA -> "1" - emit `Do While <cond>
 Private NVWhileLoop As Collection  '"W"&backedgeVA -> "1" - emit `Loop` here (the back-edge of a Do While)
 Private NVElemIdx As Collection    '"E"&accessVA -> recovered logical array index expr (e.g. arg_8) for a SAFEARRAY element access at that VA; injected by the SIB read/store renderers
 Private NVCurVa As Long            'VA of the instruction currently being rendered (so the SIB renderers can look up NVElemIdx)
+Private NVLateDispid As Collection '"L"&callVA -> comma list of candidate DISPIDs pushed to a __vbaLateIdCall (resolve to the OCX member name at render)
 Private NVArgTok() As String       'per-proc: generic tokens (arg_<offset>) to replace with...
 Private NVArgNm() As String        '...their recovered parameter names, at proc finalisation
 Private NVArgN As Long             'count of recovered parameter-name substitutions this proc
@@ -223,6 +224,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVWhileCond = New Collection
     Set NVWhileLoop = New Collection
     Set NVElemIdx = New Collection
+    Set NVLateDispid = New Collection
     NVCurVa = 0
     NVArgN = 0
     ReDim NVSelStkBase(31): NVSelTop = 0
@@ -316,6 +318,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'back-tracing the byte-offset register through the addressing chain, so the access
     'renders global_X(12)(i)(field) instead of dropping the index.
     NativeDetectElemIndices col
+
+    'Decode late-bound dispatch calls (__vbaLateIdCall): collect each call's DISPID
+    'so it can resolve to obj.Member via the control's OCX typelib at render time.
+    NativeDetectLateCalls col
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -1455,6 +1461,139 @@ nextk:
     Next k
 done:
 End Sub
+
+Private Sub NativeDetectLateCalls(col As Collection)
+    'VB6 late-bound dispatch `obj.Member(args)` compiles to __vbaLateIdCall(obj, DISPID,
+    'flags) (cdecl).  The DISPID is a `push imm` among the args; the nested object-getter
+    '/ __vbaObjSet reset our push stack, so the dispid is gone by render time.  Here we
+    'scan a backward window from each __vbaLateIdCall and record the candidate immediate
+    'pushes (DISPIDs) by call VA; the renderer resolves them against the OCX typelib.
+    On Error GoTo done
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    If n < 2 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For k = 0 To n - 1
+        If (arr(k).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nextk
+        If InStr(NativeApiName(arr(k)), "__vbaLateIdCall") = 0 Then GoTo nextk
+        Dim cand As String, j As Long, lim As Long, pv As Long
+        lim = k - 30: If lim < 0 Then lim = 0
+        For j = k - 1 To lim Step -1
+            If (arr(j).cmdType And C_TYPEMASK) = C_CAL Then
+                If InStr(NativeApiName(arr(j)), "__vbaLateIdCall") > 0 Then Exit For   'previous late call -> stop
+            End If
+            If NativeIsPushImm(arr(j), pv) Then
+                If pv <> 0 Then cand = cand & CStr(pv) & ","     '0 is the flags arg, never a member id
+            End If
+        Next j
+        If Len(cand) > 0 Then NativeColPut NVLateDispid, "L" & arr(k).va, cand
+nextk:
+    Next k
+done:
+End Sub
+
+Private Function NativeIsPushImm(inst As CInstruction, ByRef val As Long) As Boolean
+    'Match `push imm8` (6A ib) or `push imm32` (68 id); set val to the pushed value.
+    Dim dump As String, nn As Long, i As Long, op As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op = &H6A Then
+        val = NativeDumpInt8(dump, i + 1): NativeIsPushImm = True
+    ElseIf op = &H68 Then
+        val = NativeDumpInt32(dump, i + 1): NativeIsPushImm = True
+    End If
+End Function
+
+Private Function NativeCtlBaseName(ByVal s As String) As String
+    'From an object expression like "frmClient.Winsock1" extract the control base name
+    '"Winsock" (drop the form prefix, any (index), and trailing digits) for matching the
+    'right OCX among the project's references.
+    Dim t As String, p As Long, ch As Long
+    t = Trim$(s)
+    p = InStrRev(t, ".")
+    If p > 0 Then t = Mid$(t, p + 1)
+    p = InStr(t, "(")
+    If p > 0 Then t = Left$(t, p - 1)
+    Do While Len(t) > 0
+        ch = Asc(Right$(t, 1))
+        If ch >= 48 And ch <= 57 Then t = Left$(t, Len(t) - 1) Else Exit Do
+    Loop
+    NativeCtlBaseName = t
+End Function
+
+Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String, ByRef resolved As Boolean) As String
+    'Render a late-bound dispatch call obj.Member by resolving its DISPID (recorded by
+    'NativeDetectLateCalls) against the control's OCX typelib.  Sets resolved=True (and
+    'returns the statement / "" for a value) when it resolves; resolved stays False so
+    'the caller falls back to the raw Call otherwise.  Variants:
+    '  __vbaLateIdCall   - a method/sub call, result discarded -> statement obj.M[(a)]
+    '  __vbaLateIdCallLd - returns a value (a property Get / function) -> thread the
+    '                      expression through eax so the consumer assigns it
+    '  __vbaLateIdCallSt - a property/array store -> statement obj.M = value
+    resolved = False
+    Dim objExpr As String, cand As String, baseName As String, memName As String, invKind As Long
+    objExpr = NativeArgList()
+    NVPushTop = 0
+    If Len(objExpr) = 0 Then Exit Function
+    'The object is the control-reference token (form.control) - NOT necessarily the
+    'first arg: __vbaLateIdCall is (obj, dispid,..) but __vbaLateIdCallLd is
+    '(result, obj, ..).  Pick the token that is a `<...>.<name>` reference.
+    Dim toks() As String, ti As Long, objTok As String, resTok As String
+    toks = Split(objExpr, ", ")
+    For ti = 0 To UBound(toks)
+        Dim tkv As String: tkv = Trim$(toks(ti))
+        If Len(objTok) = 0 And InStr(tkv, ".") > 0 And InStr(tkv, "(") = 0 Then
+            objTok = tkv
+        ElseIf Len(resTok) = 0 And (Left$(tkv, 4) = "var_" Or Left$(tkv, 4) = "arg_") Then
+            resTok = tkv                     'the Ld result buffer (a lea'd local)
+        End If
+    Next ti
+    If Len(objTok) = 0 Then Exit Function
+    baseName = NativeCtlBaseName(objTok)
+    If Len(baseName) = 0 Then Exit Function
+    cand = NativeColGet(NVLateDispid, "L" & inst.va)
+    If Len(cand) = 0 Then Exit Function
+    Dim parts() As String, pi As Long, d As Long
+    parts = Split(cand, ",")
+    For pi = 0 To UBound(parts)
+        If Len(parts(pi)) > 0 Then
+            d = CLng(parts(pi))
+            memName = modCOM.LateMemberName(baseName, d, invKind)
+            If Len(memName) > 0 Then Exit For
+        End If
+    Next pi
+    If Len(memName) = 0 Then Exit Function
+    resolved = True
+    Dim mref As String
+    mref = objTok & "." & memName
+    If InStr(apiName, "__vbaLateIdCallLd") > 0 Then
+        'A value (property Get / function).  __vbaLateIdCallLd writes the result into a
+        'lea'd buffer (the var_ token) - assign to it so the value is captured; if no
+        'buffer was recovered, thread through eax for the consumer instead.
+        If Len(resTok) > 0 Then
+            NativeLateIdCall = resTok & " = " & mref
+        Else
+            NVReg(0) = mref
+            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+            NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+            NVPendingCall = "Call " & mref     'flushed as a statement if the result is unused
+            NativeLateIdCall = ""
+        End If
+    ElseIf InStr(apiName, "__vbaLateIdCallSt") > 0 Or invKind = 4 Then
+        'A property/array store: obj.Member = value.
+        NativeLateIdCall = mref & " = " & NativePopValue()
+    Else
+        'A method/sub call; arguments are not reliably recoverable from the push stack
+        'here (the nested object-getter reset it), so render the bare member call.
+        NativeLateIdCall = mref
+    End If
+End Function
 
 Private Function NativeTraceIndexOrigin(arr() As CInstruction, ByVal n As Long, ByVal startK As Long, ByVal idxReg As Long) As String
     'Walk backwards from the SIB access at startK, following the register that holds
@@ -3177,6 +3316,15 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             NativeRuntimeCall = ""
         End If
         Exit Function
+    End If
+
+    'Late-bound dispatch: __vbaLateIdCall(obj, DISPID, ...) -> obj.Member[(args)].
+    'Resolve the DISPID to the member name via the control's OCX typelib; on failure
+    'fall through to the generic Call below (current behaviour, no regression).
+    If InStr(nm, "__vbaLateIdCall") > 0 Then
+        Dim lcRes As String, lcResolved As Boolean
+        lcRes = NativeLateIdCall(inst, nm, lcResolved)
+        If lcResolved Then NativeRuntimeCall = lcRes: Exit Function
     End If
 
     'Unknown helper: emit a visible Call with whatever arguments were collected

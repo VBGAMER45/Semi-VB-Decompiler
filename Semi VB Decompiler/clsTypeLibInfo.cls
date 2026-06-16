@@ -469,6 +469,11 @@ Public Property Get FunctionVTOffset() As Long
     FunctionVTOffset = curFuncDesc.oVft
 End Property
 
+' the current function's member id (the DISPID, for late-bound __vbaLateIdCall resolution)
+Public Property Get FunctionMemberId() As Long
+    FunctionMemberId = curFuncDesc.memid
+End Property
+
 ' return type of the current function
 Public Property Get FunctionReturnType() As String
     ' convert the DESCTYPE to a string
