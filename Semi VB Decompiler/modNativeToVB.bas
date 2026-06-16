@@ -3976,6 +3976,15 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     'reg = <baseVal>(disp).  Builds the chained struct / SAFEARRAY
                     'field expressions the operand renderer emits as global_X(12)(20).
                     If disp = 0 Then NVReg(reg) = NVReg(bse) Else NVReg(reg) = NVReg(bse) & "(" & CStr(disp) & ")"
+                ElseIf Not isAbs And NativeMemIndex(dump) >= 0 Then
+                    'SIB element READ [pvData + idx + field]: track the element value
+                    'so a field-to-field copy `field = REG` reconstructs the source
+                    'element (global_X(12)(i)(off)) instead of leaking the bare
+                    'register.  NativeRmVal mirrors the compare/store renderers and
+                    'injects the recovered index (NVElemIdx, keyed by NVCurVa); it
+                    'returns "" when the base is not a tracked array pointer, so a
+                    'non-element SIB read stays untracked as before.
+                    NVReg(reg) = NativeRmVal(dump, md, rm)
                 Else
                     NVReg(reg) = ""
                 End If
@@ -4123,6 +4132,13 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     If Len(lhs89) > 0 Then
                         fv89 = NVReg(reg)
                         If Len(fv89) = 0 Then fv89 = NativeRegName(reg)
+                        'A tracked RHS identical to the LHS is a same-element
+                        'read-modify-write whose intervening arithmetic did NOT fold
+                        'onto the element value (NativeIsFoldableArith deliberately
+                        'excludes deref chains, e.g. `Stamina = Stamina - 1`): rather
+                        'than emit a misleading no-op `x = x`, fall back to the honest
+                        'raw register.
+                        If fv89 = lhs89 Then fv89 = NativeRegName(reg)
                         NativeTrackReg = lhs89 & " = " & fv89
                     End If
                 End If
