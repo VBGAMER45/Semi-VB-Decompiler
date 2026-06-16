@@ -4588,6 +4588,15 @@ Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As
                     Else
                         NativeRmVal = pv & "(" & iv & ")(" & CStr(disp) & ")"
                     End If
+                ElseIf Len(pv) > 0 Then
+                    'Element index register is untracked (a computed/scaled byte offset
+                    'we did not model, so NVReg(idx) is empty).  Mirror the STORE side,
+                    'which renders `[base + idx + off]` as base(off) via NativeFieldStoreLHS
+                    'and drops the index too (e.g. `global_X(12)(244) = ...`).  Emitting
+                    'the same base(fieldOff) form on the read makes a UDT/array element
+                    'COMPARE render `global_X(12)(244) <op> R` instead of a blank <cond> -
+                    'consistent with our own field stores and the commercial ceiling.
+                    If disp = 0 Then NativeRmVal = pv Else NativeRmVal = pv & "(" & CStr(disp) & ")"
                 End If
             End If
         End If
