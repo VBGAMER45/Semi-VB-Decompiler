@@ -3521,7 +3521,16 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             'value in ECX (`mov ecx,1; call __vbaI2I4`, e.g. setting a small Integer
             'field); there eax is untracked, so fold the clean ecx value into eax -
             'else the consuming store leaks a raw `field = eax`.
-            If Len(NVReg(0)) = 0 And (NativeIsCleanNamedVal(NVReg(1)) Or NativeIsNumLit(NVReg(1))) Then NVReg(0) = NVReg(1)
+            'A fresh `mov ecx, imm; call __vbaI2I4` (the Select-Case-on-Integer arm:
+            'coerce the Long case-label to Integer for `cmp KeyCode, ax`) puts the
+            'INPUT in ecx and returns it in eax - so the numeric literal in ecx is the
+            'result regardless of any stale value eax held.  A clean NAMED ecx value is
+            'only the input when eax is otherwise untracked (the original case).
+            If NativeIsNumLit(NVReg(1)) Then
+                NVReg(0) = NVReg(1)
+            ElseIf Len(NVReg(0)) = 0 And NativeIsCleanNamedVal(NVReg(1)) Then
+                NVReg(0) = NVReg(1)
+            End If
             'Do NOT touch the push stack: it belongs to the FOLLOWING consumer call
             '(clearing it dropped EOF/Close/UBound arguments).
             NativeRuntimeCall = "": Exit Function
