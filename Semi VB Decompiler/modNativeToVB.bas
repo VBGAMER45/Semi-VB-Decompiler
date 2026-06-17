@@ -2901,12 +2901,21 @@ End Function
 
 Private Function NativeSubRegImm(inst As CInstruction, ByVal reg As Long, ByRef imm As Long) As Boolean
     'Match `sub reg, imm` (83 /5 imm8 or 81 /5 imm32) for a Select Case lower-bound base.
+    'Also `dec reg` (48+reg, or FF /1) - the common 1-based index (Select Case on a
+    '1..N value compiles to `movsx reg,[v]; dec reg; cmp reg,N-1; jmp [reg*4+tbl]`), so
+    'case k corresponds to value k+1.  Without this `dec` the case values were off by one.
     Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
     On Error Resume Next
     dump = Replace(inst.dump, " ", "")
     nn = Len(dump) \ 2
     i = NativeOpStart(dump, nn)
     op = NativeDumpByte(dump, i)
+    If op = &H48 + reg Then imm = 1: NativeSubRegImm = True: Exit Function      'dec reg (1-byte)
+    If op = &HFF Then
+        modrm = NativeDumpByte(dump, i + 1)
+        If (modrm \ &H40) = 3 And (((modrm \ 8) And 7) = 1) And ((modrm And 7) = reg) Then imm = 1: NativeSubRegImm = True
+        Exit Function
+    End If
     If op <> &H83 And op <> &H81 Then Exit Function
     modrm = NativeDumpByte(dump, i + 1)
     If (modrm \ &H40) <> 3 Then Exit Function

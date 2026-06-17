@@ -27,6 +27,30 @@ benchmarked against the Dungeon test program. Written to survive a context reset
 - **Key structure reference:** `C:\Users\Owner\Downloads\Alex_Ionescu_vb_structures(2).pdf`
   (VB image internal format — Object Info §8, Public Object Descriptor §7, etc.). Use it instead of guessing struct layouts.
 
+## Select Case jump-table: 1-based index (dec) + dual-table limit (2026-06-17)
+
+**DONE (this change)**: a Select Case on a 1-based value compiles to
+`movsx reg,[v] ; dec reg ; cmp reg,N-1 ; jmp [reg*4+tbl]`, so case k = value k+1.
+NativeDetectSelects read the base only from `sub reg,imm`, missing the `dec`, so case
+values came out 0-based (Case 0..8 skipping 4) instead of 1-based (Case 1..9 skipping 5).
+NativeSubRegImm now also matches `dec reg` (= sub 1).  Fixes the case values for every
+1-based jump-table Select (modItem proc_4145E0, modMap, modPlayer, frmMain - 4 files);
+Select/Case counts unchanged, no structural change, no regressions.  NativeSubRegImm is
+only called from the Select-base detection, so the change is fully scoped.
+
+**NOT fixable without a major overhaul** (modMap_Quarter_Direction, 414350): a nested
+`If Turn=1 Then Select Case Direction ... Else Select Case Direction ...` where the
+compiler DEDUPLICATED case bodies SHARED between the two Selects (Turn=1/Dir1->7 and
+Turn<>1/Dir9->7 are one physical body).  Our linear renderer keys case values by body
+address globally, so the two Selects' cases merge (`Case 1, 9 -> proc=7`, losing the Turn
+condition) and the structure collapses.  Correctly reconstructing it needs: (a) per-Select
+case keying, (b) DUPLICATING a shared body into both Selects (a physical body can't sit in
+two Select blocks in a linear render), (c) tracking the `movsx [Direction]` index (it
+shows the stale arg_C/Turn because movsx doesn't update the reg value), (d) fixing the
+On-Error detection (the case-exit `push <END>; jmp <ret>` is mis-read as the error
+epilogue, so the handler lands mid-function).  High effort, niche payoff (this dedup is
+rare) - deferred.
+
 ## Module Function detection + return type via accumulator epilogue (2026-06-17) — DONE
 
 Standard-module functions (modMap_Direction, modItem_ID, modSkill_Value, ...) rendered
