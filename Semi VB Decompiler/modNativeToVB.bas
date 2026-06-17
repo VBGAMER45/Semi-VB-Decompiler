@@ -4661,8 +4661,12 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             NativeArgsSnapshot rdA, rdN
             'A dynamic array of a user RECORD has an element size (arg index 1) larger
             'than any primitive; recover a byte-buffer UDT from it (descriptor-less UDTs
-            'have no __vbaRec* descriptor - this is the only size signal for them).
-            If rdN > 1 Then NativeRegisterUDTBySize rdA(1)
+            'have no __vbaRec* descriptor - this is the only size signal for them).  Name
+            'it after the array variable's address (arg index 2) so it reads like the
+            'descriptor UDTs (UDT_<va>), falling back to the ReDim call site.
+            Dim rdArr As String
+            If rdN > 2 Then rdArr = rdA(2)
+            If rdN > 1 Then NativeRegisterUDTBySize rdA(1), rdArr, inst.va
             NativeRuntimeCall = NativeRedimStmt(rdA, rdN, (InStr(nm, "Preserve") > 0))
             Exit Function
         Case InStr(nm, "__vbaEraseKeepData") > 0
@@ -7840,24 +7844,28 @@ Public Sub NativeRegisterUDT(ByVal va As Long)
     On Error GoTo 0
 End Sub
 
-Public Sub NativeRegisterUDTBySize(ByVal sizeStr As String)
+Public Sub NativeRegisterUDTBySize(ByVal sizeStr As String, ByVal arrayPtr As String, ByVal callVa As Long)
     'Fallback for a DESCRIPTOR-LESS UDT (all fixed-string/numeric fields - nothing for
-    'the runtime to deep-copy, so no __vbaRec* descriptor): recover only the SIZE (e.g.
-    'a dynamic UDT array's element size from __vbaRedim) and emit a byte-buffer Type
+    'the runtime to deep-copy, so no __vbaRec* descriptor): recover only the SIZE (a
+    'dynamic UDT array's element size from __vbaRedim) and emit a byte-buffer Type
     '`bStruc(1 To N) As Byte` - the commercial decompiler's ceiling (no field types/names
     'without a descriptor).  Gated to UDT-plausible sizes (>16 excludes every primitive
-    'incl. Variant) and keyed by size for dedup.
-    Dim n As Long, key As String, typeName As String, body As String, tmp As String
+    'incl. Variant).  Named/keyed by the array variable's ADDRESS (so it reads like the
+    'descriptor UDTs UDT_<va> and dedups per array), falling back to the ReDim call site
+    'when the array is a form field (no module-level VA).  The size is kept in the name.
+    Dim n As Long, key As String, typeName As String, body As String, tmp As String, addr As String
     If Not IsNumeric(Trim$(sizeStr)) Then Exit Sub
     n = CLng(Trim$(sizeStr))
     If n <= 16 Or n > 65535 Then Exit Sub
     If gUDTDesc Is Nothing Then Set gUDTDesc = New Collection
-    key = "S" & n
+    addr = NativeExtractGlobalHex(arrayPtr)
+    If Len(addr) = 0 Then addr = Right$("00000000" & Hex$(callVa), 8)
+    key = "U" & addr
     On Error Resume Next
     tmp = "": tmp = gUDTDesc.Item(key)
     On Error GoTo 0
     If Len(tmp) > 0 Then Exit Sub
-    typeName = "UDT_" & n & "Bytes"
+    typeName = "UDT_" & addr & "_" & n & "Bytes"
     body = "Type " & typeName & vbCrLf & _
            "    bStruc(1 To " & n & ") As Byte" & vbCrLf & _
            "End Type" & vbCrLf & vbCrLf
@@ -7865,6 +7873,21 @@ Public Sub NativeRegisterUDTBySize(ByVal sizeStr As String)
     gUDTDesc.Add body, key
     On Error GoTo 0
 End Sub
+
+Private Function NativeExtractGlobalHex(ByVal s As String) As String
+    'Extract the 8-hex address from a `global_XXXXXXXX` token (the array variable's VA),
+    'or "" if s holds no global reference (e.g. a form field `(arg_8 + 52)`).
+    Dim p As Long, i As Long, ch As Long, h As String
+    p = InStr(s, "global_")
+    If p = 0 Then Exit Function
+    For i = p + 7 To p + 7 + 7
+        If i > Len(s) Then Exit Function
+        ch = Asc(UCase$(Mid$(s, i, 1)))
+        If Not ((ch >= 48 And ch <= 57) Or (ch >= 65 And ch <= 70)) Then Exit Function
+        h = h & Mid$(s, i, 1)
+    Next
+    If Len(h) = 8 Then NativeExtractGlobalHex = UCase$(h)
+End Function
 
 Public Function GetUDTBlock(Optional ByVal scope As String = "Public") As String
     'Concatenate every recovered UDT Type block (insertion order), prefixing each with
