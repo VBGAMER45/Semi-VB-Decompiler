@@ -105,6 +105,8 @@ Private NVForHdr As Collection     '"F"&headerVA -> counter register index (0..7
 Private NVForJmp As Collection     '"F"&backedgeVA -> headerVA (string) - emit "Next <var>"
 Private NVForSkip As Collection    '"F"&va -> "1" - suppress this instruction (the exit Jcc)
 Private NVForName As Collection    '"F"&headerVA -> the loop variable name assigned at emit time
+Private NVForStart As Collection   '"F"&headerVA -> start value (detect-time, for register-counter loops where the header isn't a plain cmp)
+Private NVForLimit As Collection   '"F"&headerVA -> limit value (detect-time, ditto)
 Private NVForCnt As Long           'per-proc loop-variable name allocation index
 '--- Floating-point comparison idiom (fcom/fnstsw/test ah,mask/jcc -> boolean) ---
 Private NVFpCmp As Collection      '"P"&testVA -> "<relOp>|<regIdx>" - set NVReg(reg) to the relational
@@ -226,6 +228,8 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVForJmp = New Collection
     Set NVForSkip = New Collection
     Set NVForName = New Collection
+    Set NVForStart = New Collection
+    Set NVForLimit = New Collection
     NVForCnt = 0
     Set NVFpCmp = New Collection
     Set NVFpSkip = New Collection
@@ -470,13 +474,22 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         fCtrS = NativeColGet(NVForHdr, "F" & inst.va)
         If Len(fCtrS) > 0 Then
             Dim fCtr As Long, fName As String, fStart As String, fLimit As String
+            Dim fStoreL As String
             fCtr = CLng(fCtrS)
-            NativeDecodeCompare inst, "CMP"          'fills NVCmpL (start=counter init) / NVCmpR (limit)
-            fStart = NVCmpL: fLimit = NVCmpR
-            NVCmpSet = False: NVCmpL = "": NVCmpR = ""
-            If Len(fStart) = 0 Then fStart = NativeRegVal(fCtr)
-            If Len(fStart) = 0 Then fStart = "1"
-            If Len(fLimit) = 0 Then fLimit = "?"
+            fStoreL = NativeColGet(NVForLimit, "F" & inst.va)
+            If Len(fStoreL) > 0 Then
+                'Register-counter loop: the back-edge targets a limit-register reload
+                'so the header isn't the plain cmp the render-time decode can read.
+                'start/limit were captured at detect time.
+                fStart = NativeColGet(NVForStart, "F" & inst.va): fLimit = fStoreL
+            Else
+                NativeDecodeCompare inst, "CMP"          'fills NVCmpL (start=counter init) / NVCmpR (limit)
+                fStart = NVCmpL: fLimit = NVCmpR
+                NVCmpSet = False: NVCmpL = "": NVCmpR = ""
+                If Len(fStart) = 0 Then fStart = NativeRegVal(fCtr)
+                If Len(fStart) = 0 Then fStart = "1"
+                If Len(fLimit) = 0 Then fLimit = "?"
+            End If
             fName = NativeLoopVarName(NVForCnt): NVForCnt = NVForCnt + 1
             NativeColPut NVForName, "F" & inst.va, fName
             output = output & NativeIndentStr() & "For " & fName & " = " & fStart & " To " & fLimit & vbCrLf
@@ -1097,8 +1110,16 @@ Private Sub NativeDetectForLoops(col As Collection)
     'Populate NVFor* so the main loop emits For <var> = <start> To <limit> / Next
     'in place of the If <cond> ... GoTo back-edge.  Strict: every check must pass
     'or the loop is left as-is (a missed loop is harmless; a false match is not).
+    '
+    'Two header shapes are handled.  (1) STACK counter: the header IS the `cmp` and
+    'the limit operand resolves at render time (memory limits / variables included).
+    '(2) REGISTER counter: VB6 keeps the counter (and the limit) in registers and
+    'RELOADS the limit register at the top of the loop, so the back-edge targets a
+    '`mov limitReg, imm` and the cmp - often a 16-bit `cmp di,cx` - is a couple of
+    'instructions later.  For shape (2) the render-time decode can't read the cmp, so
+    'start/limit are captured here into NVForStart/NVForLimit.
     On Error GoTo done
-    Dim n As Long, k As Long, hi As Long, bi As Long, i As Long, inst As CInstruction
+    Dim n As Long, k As Long, hi As Long, ci As Long, bi As Long, i As Long, inst As CInstruction
     n = col.Count
     If n < 4 Then Exit Sub
     Dim arr() As CInstruction
@@ -1112,27 +1133,37 @@ Private Sub NativeDetectForLoops(col As Collection)
         hdrVA = arr(bi).jmpConst
         If hdrVA = 0 Or hdrVA > arr(bi).va Then GoTo nextb
         If Len(NativeColGet(NVForHdr, "F" & hdrVA)) > 0 Then GoTo nextb   'header already claimed
-        'Locate the header instruction in the array.
+        'Locate the header instruction (the back-edge target) in the array.
         hi = -1
         For i = 0 To bi - 1
             If arr(i).va = hdrVA Then hi = i: Exit For
         Next i
         If hi < 0 Or hi + 1 >= bi Then GoTo nextb
-        'Header = `cmp <ctr>, <limit>` immediately followed by an exit Jcc that
+        'Find the compare: the header itself, or - for a register-counter loop - the
+        'first cmp after one or more leading limit-setup `mov reg,imm` instructions.
+        ci = hi
+        Do While ci < bi And NativeMnem(arr(ci)) <> "CMP"
+            If Not NativeIsMovRegImm(arr(ci)) Then GoTo nextb
+            ci = ci + 1
+        Loop
+        If ci + 1 >= bi Then GoTo nextb
+        'Compare = `cmp <ctr>, <limit>` immediately followed by an exit Jcc that
         'leaves the loop forward (past the back-edge).
         Dim ctrReg As Long
-        ctrReg = NativeForCounterReg(arr(hi))
+        ctrReg = NativeForCounterReg(arr(ci))
         If ctrReg < 0 Then GoTo nextb
-        If (arr(hi + 1).cmdType And C_TYPEMASK) <> C_JMC Then GoTo nextb
-        If Not NativeIsExitJcc(NativeMnem(arr(hi + 1))) Then GoTo nextb
-        If arr(hi + 1).jmpConst <= arr(bi).va Then GoTo nextb
+        If (arr(ci + 1).cmdType And C_TYPEMASK) <> C_JMC Then GoTo nextb
+        If Not NativeIsExitJcc(NativeMnem(arr(ci + 1))) Then GoTo nextb
+        If arr(ci + 1).jmpConst <= arr(bi).va Then GoTo nextb
         'The counter must be incremented within the body.
-        If Not NativeForHasIncrement(arr, hi + 2, bi - 1, ctrReg) Then GoTo nextb
-        'The counter must be initialised to a CONSTANT before the header (a real
+        If Not NativeForHasIncrement(arr, ci + 2, bi - 1, ctrReg) Then GoTo nextb
+        'The counter must be initialised to a CONSTANT before the compare (a real
         'For starts at 0/1/2...).  Rejects false matches where the "counter"
         'register was just loaded from memory, which produced degenerate output
         'like `For i = var_38 To var_38` or `For i = ebx To edi`.
-        If Not NativeForStartIsConst(arr, hi, ctrReg) Then GoTo nextb
+        Dim startVal As String
+        startVal = ""
+        If Not NativeForStartIsConst(arr, ci, ctrReg, startVal) Then GoTo nextb
         'The header must be reached ONLY by this back-edge (a single, clean
         'counted loop - no extra continue-jumps that would need a second Next).
         Dim refs As Long
@@ -1142,15 +1173,102 @@ Private Sub NativeDetectForLoops(col As Collection)
                And arr(i).jmpConst = hdrVA Then refs = refs + 1
         Next i
         If refs <> 1 Then GoTo nextb
+        'Register-counter shape (the cmp isn't the header, or it is a word reg-reg
+        'compare): capture start/limit now since the render-time decode can't read it.
+        If ci <> hi Or NativeHas66(Replace(arr(ci).dump, " ", "")) Then
+            Dim limitVal As String
+            limitVal = NativeForLimitVal(arr, ci, ctrReg)
+            If Len(limitVal) = 0 Then GoTo nextb           'unresolved limit -> leave for Do While
+            If Len(startVal) = 0 Then startVal = "0"
+            NativeColPut NVForStart, "F" & hdrVA, startVal
+            NativeColPut NVForLimit, "F" & hdrVA, limitVal
+        End If
         'Record.
         NativeColPut NVForHdr, "F" & hdrVA, CStr(ctrReg)
         NativeColPut NVForJmp, "F" & arr(bi).va, CStr(hdrVA)
-        NativeColPut NVForSkip, "F" & arr(hi + 1).va, "1"     'the exit Jcc (replaced by For)
+        'Suppress everything between the header and the exit Jcc inclusive: the
+        'limit-setup movs that aren't the header itself, the cmp, and the Jcc.  (When
+        'the header IS the cmp this is just the Jcc, as before.)  The header
+        'instruction at hi is replaced by the emitted For line.
+        For i = hi + 1 To ci + 1
+            NativeColPut NVForSkip, "F" & arr(i).va, "1"
+        Next i
         NativeAddUnique NVSkipLabels, hdrVA                   'header label -> the For line
 nextb:
     Next bi
 done:
 End Sub
+
+Private Function NativeIsMovRegImm(inst As CInstruction) As Boolean
+    'True for `mov reg, imm32` (B8+r) or `mov r/m32, imm32` with r/m a register
+    '(C7 /0, md=3) - the limit-register setup that can precede a counted loop's cmp.
+    Dim dump As String, n As Long, p As Long, op As Long, modrm As Long, md As Long, reg As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If n < 1 Then Exit Function
+    p = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, p)
+    If op >= &HB8 And op <= &HBF Then NativeIsMovRegImm = True: Exit Function
+    If op = &HC7 Then
+        modrm = NativeDumpByte(dump, p + 1)
+        md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7
+        If md = 3 And reg = 0 Then NativeIsMovRegImm = True
+    End If
+End Function
+
+Private Function NativeForLimitVal(arr() As CInstruction, ByVal ci As Long, ByVal ctrReg As Long) As String
+    'Resolve the limit operand of the header compare arr(ci) to a constant value.
+    'Handles `cmp r,imm` (immediate) and `cmp r,r` / `cmp r16,r16` (the limit lives
+    'in a register loaded by an earlier `mov limitReg, imm`).  Empty when the limit
+    'is not a recoverable constant (e.g. a memory variable).
+    Dim dump As String, n As Long, p As Long, op As Long, modrm As Long, md As Long, reg As Long, rm As Long
+    Dim limReg As Long
+    On Error Resume Next
+    dump = Replace(arr(ci).dump, " ", "")
+    n = Len(dump) \ 2
+    p = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, p)
+    modrm = NativeDumpByte(dump, p + 1)
+    md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+    Select Case op
+        Case &H3D                       'cmp eax, imm32
+            NativeForLimitVal = NativeNumFromBits(NativeDumpInt32(dump, p + 1)): Exit Function
+        Case &H83                       'cmp r/m, imm8 (sign-extended)
+            If md = 3 Then NativeForLimitVal = CStr(NativeDumpInt8(dump, n - 1))
+            Exit Function
+        Case &H81                       'cmp r/m, imm32
+            If md = 3 Then NativeForLimitVal = NativeNumFromBits(NativeDumpInt32(dump, n - 4))
+            Exit Function
+        Case &H3B                       'cmp reg, r/m  -> counter is reg, limit is r/m
+            If md <> 3 Then Exit Function              'memory limit (a variable) - not a constant
+            limReg = rm
+        Case &H39                       'cmp r/m, reg  -> counter is r/m, limit is reg
+            limReg = reg
+        Case Else
+            Exit Function
+    End Select
+    'Limit lives in a register: find the nearest preceding `mov limReg, imm32`.
+    Dim i As Long, lo As Long, d2 As String, n2 As Long, p2 As Long, o2 As Long
+    Dim mr As Long, mmd As Long, mrg As Long, mrm As Long
+    lo = ci - 16: If lo < 0 Then lo = 0
+    For i = ci - 1 To lo Step -1
+        d2 = Replace(arr(i).dump, " ", "")
+        n2 = Len(d2) \ 2
+        If n2 < 1 Then GoTo prev2
+        p2 = NativeOpStart(d2, n2)
+        o2 = NativeDumpByte(d2, p2)
+        If o2 = (&HB8 + limReg) Then              'mov limReg, imm32
+            NativeForLimitVal = NativeNumFromBits(NativeDumpInt32(d2, p2 + 1)): Exit Function
+        End If
+        mr = NativeDumpByte(d2, p2 + 1)
+        mmd = (mr \ &H40) And 3: mrg = (mr \ 8) And 7: mrm = mr And 7
+        If o2 = &H8B And mrg = limReg Then Exit Function                          'mov limReg, r/m
+        If o2 = &H89 And mmd = 3 And mrm = limReg Then Exit Function              'mov limReg, reg
+        If o2 = &H33 And mmd = 3 And mrg = limReg And mrm = limReg Then NativeForLimitVal = "0": Exit Function  'xor limReg,limReg
+prev2:
+    Next i
+End Function
 
 Private Sub NativeDetectWhileLoops(col As Collection)
     'Reconstruct a top-tested loop as `Do While <cond> ... Loop`.  Shape:
@@ -1219,26 +1337,31 @@ End Sub
 
 Private Function NativeForCounterReg(inst As CInstruction) As Long
     'Counter register of a header `cmp <reg>, <limit>`: 3B (cmp r32,r/m32) -> reg
-    'field; 83/81 (cmp r/m32,imm with r/m a register) -> rm; 3D -> eax.  A 16-bit
-    '(0x66) compare juggles low-word partials we cannot model, so it is rejected.
+    'field; 39 (cmp r/m32,r32 with r/m a register) -> rm; 83/81 (cmp r/m32,imm with
+    'r/m a register) -> rm; 3D -> eax.  A 16-bit (0x66) compare is accepted ONLY for
+    'the reg-reg form `cmp r16,r16` (VB6's register loop counter vs a limit register);
+    'other 0x66 compares juggle low-word partials we cannot model, so stay rejected.
     Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, md As Long
     NativeForCounterReg = -1
     If NativeMnem(inst) <> "CMP" Then Exit Function
     On Error Resume Next
     dump = Replace(inst.dump, " ", "")
-    If NativeHas66(dump) Then Exit Function
     nn = Len(dump) \ 2
     i = NativeOpStart(dump, nn)
     op = NativeDumpByte(dump, i)
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3
+    If NativeHas66(dump) Then
+        If Not ((op = &H3B Or op = &H39) And md = 3) Then Exit Function
+    End If
     Select Case op
         Case &H3D                       'cmp eax, imm32
             NativeForCounterReg = 0
         Case &H3B                       'cmp r32, r/m32 -> counter is the reg field
-            modrm = NativeDumpByte(dump, i + 1)
             NativeForCounterReg = (modrm \ 8) And 7
+        Case &H39                       'cmp r/m32, r32 -> counter is the r/m (register only)
+            If md = 3 Then NativeForCounterReg = modrm And 7
         Case &H83, &H81                 'cmp r/m32, imm -> counter is the r/m (register only)
-            modrm = NativeDumpByte(dump, i + 1)
-            md = (modrm \ &H40) And 3
             If md = 3 And ((modrm \ 8) And 7) = 7 Then NativeForCounterReg = modrm And 7
     End Select
 End Function
@@ -1287,11 +1410,12 @@ nexti:
     Next i
 End Function
 
-Private Function NativeForStartIsConst(arr() As CInstruction, ByVal hi As Long, ByVal ctrReg As Long) As Boolean
+Private Function NativeForStartIsConst(arr() As CInstruction, ByVal hi As Long, ByVal ctrReg As Long, Optional ByRef startVal As String) As Boolean
     'A counted For initialises its counter to a constant (mov ctr,imm or xor
     'ctr,ctr) before the header.  Scan backward to the NEAREST writer of the
     'counter and require it to be such an init; any other writer first (or none
-    'within range) means this is not a clean counted loop, so reject it.
+    'within range) means this is not a clean counted loop, so reject it.  When it is
+    'such an init, startVal is set to the constant ("0" for xor/sub-to-self).
     Dim i As Long, lo As Long, dump As String, nn As Long, p As Long, op As Long, modrm As Long, md As Long, rg As Long, rm As Long
     On Error Resume Next
     lo = hi - 12: If lo < 0 Then lo = 0
@@ -1301,10 +1425,13 @@ Private Function NativeForStartIsConst(arr() As CInstruction, ByVal hi As Long, 
         If nn < 1 Then GoTo prev
         p = NativeOpStart(dump, nn)
         op = NativeDumpByte(dump, p)
-        If op = (&HB8 + ctrReg) Then NativeForStartIsConst = True: Exit Function       'mov ctr, imm
+        If op = (&HB8 + ctrReg) Then                                                   'mov ctr, imm
+            startVal = NativeNumFromBits(NativeDumpInt32(dump, p + 1))
+            NativeForStartIsConst = True: Exit Function
+        End If
         modrm = NativeDumpByte(dump, p + 1)
         md = (modrm \ &H40) And 3: rg = (modrm \ 8) And 7: rm = modrm And 7
-        If (op = &H33 Or op = &H31 Or op = &H2B Or op = &H29) And md = 3 And rg = ctrReg And rm = ctrReg Then NativeForStartIsConst = True: Exit Function  'xor/sub ctr,ctr -> 0
+        If (op = &H33 Or op = &H31 Or op = &H2B Or op = &H29) And md = 3 And rg = ctrReg And rm = ctrReg Then startVal = "0": NativeForStartIsConst = True: Exit Function  'xor/sub ctr,ctr -> 0
         'Any OTHER writer of the counter seen first -> not a constant-init loop.
         If op = (&H40 + ctrReg) Or op = (&H48 + ctrReg) Then Exit Function             'inc/dec ctr
         If op = (&H58 + ctrReg) Then Exit Function                                      'pop ctr
