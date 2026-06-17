@@ -665,6 +665,7 @@ Global gNativeGlobalClass As Collection  'key "g"&VA -> recovered user class nam
 '(lea reg,[Me+off]; push reg; push <ObjInfo>; call __vbaNew).  Key "Owner:offset"
 '(decimal) -> class name, so a method call on Me.<field> resolves like a New'd object.
 Global gFormFieldClass As Collection
+Global gRetbufFunc As Collection       'module Functions returning a Variant/String/UDT via a hidden retbuf (key "V"&procVA -> arg byte count from `ret N`).  The epilogue returns the retbuf ptr (`mov eax,[ebp+8]`); the first param (arg_8) IS the retbuf, so callers render `<dest> = proc(<rest>)` and the proc is a Function.
 
 'The Win32 API Declare block (from the VB external table) is project-wide, but the
 'EXE does not record which module owned each Declare - so it is emitted ONCE, as

@@ -171,6 +171,7 @@ Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
 Private NVProcEndWord As String    'closing keyword for this proc: "Sub" / "Function" / "Property"
 Private NVAccumRet As Boolean      'the proc returns a simple value in the accumulator (ax/eax) - a module Function whose kind/type is stripped (recovered from the epilogue return-load)
+Private NVRetbuf As Boolean        'the proc returns a Variant/String/UDT via a hidden retbuf (first param, ebp+8) - a module Function (from gRetbufFunc); the header drops that param and renders `As Variant`
 Private NVAccumRetType As String   'recovered return type from that load: "Integer" (word/ax) or "Long" (dword/eax)
 Private NVAccumRetSlot As Long      'the return slot's ebp displacement (negative; 0 = none) - so a constant store `mov [ebp-slot],imm` (0xC7) to it renders `FuncName = imm`
 Private NVRetN As Long             'the proc's `ret imm16` operand (callee-popped arg bytes), -1 if none
@@ -202,6 +203,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'Build the As-New private-field class map once, program-wide, so method calls
     'on Me.<clsBitmap field> resolve regardless of which proc auto-instantiated it.
     If gFormFieldClass Is Nothing Then NativeScanFormFieldClasses
+    'Build the retbuf-returning-Function map once (a module Function returning a
+    'Variant/String/UDT passes a hidden retbuf as its first param; callers render
+    '`<dest> = proc(args)` and the proc itself is a Function).
+    If gRetbufFunc Is Nothing Then NativeScanRetbufFuncs
 
     'The procedure list hands back an address a few bytes into the prologue
     '(the SEH setup), so snap back to the real "push ebp / mov ebp,esp" entry.
@@ -229,7 +234,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVForm = NativeFormOf(addr)
     NVHasMe = NativeProcHasMe(addr)
     NVProcEndWord = "Sub"
-    NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0
+    NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0: NVRetbuf = False
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVCmpIsBool = False: NVFpuChk = False
@@ -421,6 +426,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'the proc name so `FuncName = value` reads as VB's implicit return.  MUST run before
     'NativeProcHeader (which reads NVAccumRet to emit `Function ... As <type>`).
     NativeDetectAccumReturn b, addr
+    'A module Function returning a Variant/String/UDT via a hidden retbuf (first param):
+    'mark it so NativeProcHeader emits `Function ... As Variant` and drops the retbuf
+    'param.  Mutually exclusive with the accumulator return (different epilogue).
+    If Not NVAccumRet Then NVRetbuf = (Len(NativeColGet(gRetbufFunc, "V" & addr)) > 0)
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -3513,6 +3522,25 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     pname = NativeCallTargetName(tgt)
                     uargs = NativeArgList()
                     NVPushTop = 0
+                    'A module Function returning a Variant/String/UDT via a hidden retbuf:
+                    'its FIRST arg (the topmost push, rendered first by NativeArgList) is
+                    'the return slot - emit `<dest> = proc(<rest>)` instead of a Call that
+                    'leaks the retbuf local as an argument + a raw `= eax` at the consumer.
+                    Dim rbN As String, rbDest As String, rbRest As String, rbCp As Long
+                    rbN = NativeColGet(gRetbufFunc, "V" & tgt)
+                    If Len(rbN) > 0 Then
+                        rbCp = InStr(uargs, ", ")
+                        If rbCp > 0 Then
+                            rbDest = Left$(uargs, rbCp - 1): rbRest = Mid$(uargs, rbCp + 2)
+                        Else
+                            rbDest = uargs: rbRest = ""
+                        End If
+                        If Left$(rbDest, 4) = "var_" Or Left$(rbDest, 4) = "arg_" Or Left$(rbDest, 7) = "global_" Then
+                            NVReg(0) = "": NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
+                            NativeProcessInst = ind & rbDest & " = " & pname & "(" & rbRest & ")" & vbCrLf
+                            Exit Function
+                        End If
+                    End If
                     'Keep the call as the value in eax and defer the "Call X()"
                     'statement: if the next instruction consumes the result it
                     'folds into an assignment / argument / condition; otherwise
@@ -6374,6 +6402,65 @@ nextpp:
     Next pp
 End Sub
 
+Private Sub NativeScanRetbufFuncs()
+    'Find module Functions that return a Variant/String/UDT through a hidden retbuf: the
+    'epilogue returns the retbuf POINTER (the first param) in eax - `mov eax,[ebp+8]`
+    '(8B 45 08) - right before the SEH-frame restore + `ret N`.  The first param (arg_8)
+    'IS the retbuf return slot, so a caller renders `<dest> = proc(<rest>)`.  Distinct from
+    'the accumulator return (NativeDetectAccumReturn loads a NEGATIVE-disp local into ax/eax).
+    'Byte-scans the raw proc bytes (the epilogue lives in the SEH tail past the body `ret`).
+    Set gRetbufFunc = New Collection
+    On Error Resume Next
+    Dim pp As Long, addr As Long, b() As Byte, fp As Integer, hi As Long, qq As Long, dd As Long
+    Dim j As Long, k As Long, restoreAt As Long, retN As Long, lo As Long, foundLoad As Boolean
+    For pp = 0 To UBound(gNativeProcArray) - 1
+        addr = gNativeProcArray(pp).offset
+        If addr = 0 Then GoTo nextpp
+        'ONLY .bas module procedures: a retbuf is the first param (ebp+8).  A class/form
+        'method has Me/this at ebp+8 instead, and its epilogue `mov eax,[ebp+8]` is Me
+        'cleanup - NOT a retbuf return (this wrongly promoted event handlers / methods).
+        If NativeProcHasMe(addr) Then GoTo nextpp
+        addr = NativeSnapEntry(addr)
+        hi = 8190
+        For qq = 0 To UBound(gNativeProcArray) - 1
+            dd = gNativeProcArray(qq).offset - addr
+            If dd > 0 And dd < hi Then hi = dd
+        Next
+        ReDim b(8191)
+        fp = FreeFile
+        Open SFilePath For Binary Access Read As #fp
+            Get #fp, addr + 1 - OptHeader.ImageBase, b
+        Close #fp
+        'Locate the SEH-frame restore `mov fs:[0],reg` (64 89 <m> 00000000, reg<>esp).
+        restoreAt = -1
+        For j = 8 To hi - 7
+            If b(j) = &H64 And b(j + 1) = &H89 And (b(j + 2) And &HC7) = 5 _
+               And ((b(j + 2) \ 8) And 7) <> 4 _
+               And b(j + 3) = 0 And b(j + 4) = 0 And b(j + 5) = 0 And b(j + 6) = 0 Then
+                restoreAt = j: Exit For
+            End If
+        Next j
+        If restoreAt < 0 Then GoTo nextpp
+        'The retbuf-ptr load `mov eax,[ebp+8]` (8B 45 08) must sit in the epilogue, within
+        '~64 bytes before the restore (the result is copied to [retbuf] right after it).
+        foundLoad = False
+        lo = restoreAt - 64: If lo < 8 Then lo = 8
+        For k = lo To restoreAt - 1
+            If b(k) = &H8B And b(k + 1) = &H45 And b(k + 2) = 8 Then foundLoad = True: Exit For
+        Next k
+        If Not foundLoad Then GoTo nextpp
+        'Epilogue ends with `ret N` (C2 lo hi); a plain `ret` (C3) before it means this is
+        'not the stdcall arg-cleanup epilogue we want.
+        retN = -1
+        For j = restoreAt + 7 To hi - 2
+            If b(j) = &HC2 Then retN = b(j + 1) + b(j + 2) * &H100&: Exit For
+            If b(j) = &HC3 Then Exit For
+        Next j
+        If retN >= 4 Then NativeColPut gRetbufFunc, "V" & addr, CStr(retN)
+nextpp:
+    Next pp
+End Sub
+
 Private Function NativeIsVbaNewCall(inst As CInstruction) As Boolean
     'A `call dword ptr [abs]` that resolves (via the IAT) to __vbaNew / __vbaNew2.
     Dim disp As Long, isAbs As Boolean
@@ -7606,6 +7693,9 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
     'An unclassified module Function recovered from its accumulator-return epilogue
     '(NativeDetectAccumReturn): promote Sub -> Function and remember the return type.
     If kindStr = "Sub" And NVAccumRet Then kindStr = "Function": NVProcEndWord = "Function"
+    'A module Function returning a Variant/String/UDT via a hidden retbuf (first param).
+    'Promote Sub -> Function; the param list drops the retbuf slot (NativeProcParams).
+    If kindStr = "Sub" And NVRetbuf Then kindStr = "Function": NVProcEndWord = "Function"
     'Add the parameter list when the name carries no signature yet (event handlers
     'already get a typed one from getEventComplete).  Parameters are named generically
     'arg_<ebp offset> with the count from the proc's `ret N`.
@@ -7635,6 +7725,8 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
     'Append the recovered return type for an accumulator-return module Function.
     Dim asType As String
     If NVAccumRet And Len(NVAccumRetType) > 0 And InStr(kindStr, "Function") > 0 Then asType = " As " & NVAccumRetType
+    'A retbuf return is a Variant/String/UDT - indistinguishable from the binary, so As Variant.
+    If NVRetbuf And InStr(kindStr, "Function") > 0 Then asType = " As Variant"
     NativeProcHeader = vis & " " & kindStr & " " & nm & asType & "   '" & Hex$(addr)
 End Function
 
@@ -7648,13 +7740,18 @@ Private Function NativeProcParams(ByVal kindStr As String, ByVal hasMe As Boolea
     Dim slots As Long, nParams As Long, i As Long, off As Long, base As Long, s As String
     If NVRetN < 4 Then Exit Function           '-1 (plain ret) or ret 0 -> no stack args
     slots = NVRetN \ 4
-    If hasMe Then nParams = slots - 1 Else nParams = slots    'drop the hidden Me/this slot
+    'A module Function returning via a hidden retbuf has that retbuf as its FIRST param
+    '(ebp+8), so user params start at ebp+0xC - exactly like a method's Me slot.  Treat it
+    'that way and skip the class-style (last-slot) retbuf drop below.
+    Dim retbufFirst As Boolean
+    retbufFirst = (NVRetbuf And Not hasMe)
+    If hasMe Or retbufFirst Then nParams = slots - 1 Else nParams = slots   'drop the hidden Me/this or retbuf slot
     'A CLASS Function returns via a hidden [out,retval] retbuf param - drop it.  An
     'accumulator-return module Function (NVAccumRet) returns in ax/eax with NO stack
     'retslot, so keep every parameter (else a real argument is wrongly dropped).
-    If InStr(kindStr, "Function") > 0 And Not NVAccumRet Then nParams = nParams - 1
+    If InStr(kindStr, "Function") > 0 And Not NVAccumRet And Not retbufFirst Then nParams = nParams - 1
     If nParams < 0 Then nParams = 0
-    base = IIf(hasMe, &HC, &H8)                 'first user parameter's ebp offset
+    base = IIf(hasMe Or retbufFirst, &HC, &H8)   'first user parameter's ebp offset
     For i = 0 To nParams - 1
         off = base + i * 4
         If Len(s) > 0 Then s = s & ", "
