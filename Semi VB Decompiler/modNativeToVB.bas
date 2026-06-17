@@ -150,6 +150,7 @@ Private NVLastCmp As String        'hint expression for the next If condition
 Private NVStrLits As Collection    'pending string literals (e.g. MsgBox arguments)
 Private NVSkipLabels As Collection 'branch targets that belong to dropped error-check guards
 Private NVReg(7) As String         'symbolic value currently held in each GP register (eax..edi)
+Private NVR16Val(7) As String      'compare-only shadow: a 16-bit memory word just loaded into a register (mov ax,word[mem]).  Consumed ONLY by `cmp ax,imm16` so an Integer-field / array-element compare resolves to its operand instead of <cond>; deliberately NOT stored in NVReg, whose 16-bit value is cleared (the low-word partial must not leak into a push/store/arithmetic).  Cleared for an instruction's dest reg at the top of NativeProcessInst and for caller-saved regs on a call.
 Private NVRegIsAddr(7) As Boolean  'True when a register holds &local (from LEA), for by-ref pushes
 Private NVRegAddr(7) As String     'the local name a register's LEA-address points to
 Private NVRegAddrDisp(7) As Long   'the local DISPLACEMENT a register's LEA-address points to (for variant resolution)
@@ -237,7 +238,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     ReDim NVPushImm(31): ReDim NVPushDisp(31): NVPushTop = 0: NVLastPushDisp = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
-    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegAddrDisp(r) = 0: NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": NVRegObjInst(r) = "": NVRegFieldCls(r) = "": NVRegFieldRecv(r) = "": Next
+    For r = 0 To 7: NVReg(r) = "": NVR16Val(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegAddrDisp(r) = 0: NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": NVRegObjInst(r) = "": NVRegFieldCls(r) = "": NVRegFieldRecv(r) = "": Next
     Set NVObjClass = New Collection
     For r = 0 To 7: NVRecentPush(r) = 0: Next
     NVRecentTop = 0
@@ -596,6 +597,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         If (inst.cmdType And C_TYPEMASK) = C_CAL Then
             NVRegObjType(1) = "": NVRegObjVt(1) = "": NVRegObjGuid(1) = "": NVRegObjVtGuid(1) = ""   'ecx
             NVRegObjType(2) = "": NVRegObjVt(2) = "": NVRegObjGuid(2) = "": NVRegObjVtGuid(2) = ""   'edx
+            NVR16Val(0) = "": NVR16Val(1) = "": NVR16Val(2) = ""   'caller-saved 16-bit word shadow invalid after a call
             'eax now holds the call's RETURN value, never a `lea`-captured &local,
             'so drop any stale address-of tag on it - else a later push of eax leaks
             'the by-reference local: a string built after `lea eax,[var_20]` (for
@@ -2935,6 +2937,14 @@ Private Function NativeProcessInst(inst As CInstruction) As String
     mn = NativeMnem(inst)
     ind = NativeIndentStr()
     NVCurVa = inst.va          'so the SIB read/store renderers can look up NVElemIdx
+
+    'A write to a register invalidates the compare-only 16-bit word shadow for that
+    'register (the setter, a 16-bit mov-from-memory, re-populates it below).  This
+    'keeps a captured array-element / Integer-field word from being read by a later,
+    'unrelated `cmp ax,imm16` after the register was clobbered.
+    Dim r16Dest As Long
+    r16Dest = NativeInstDestReg(inst)
+    If r16Dest >= 0 Then NVR16Val(r16Dest) = ""
 
     'TEST/CMP set the flags consumed by the next conditional jump.  Record the
     'operands now (the relational operator is resolved later from the Jcc).
@@ -5479,6 +5489,18 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 'conditions like `SendMessage(...) <> 0` into `0 <> 0`.
                 NVReg(reg) = "": NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
                 NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+                'BUT when the source is MEMORY (not a register low-word partial), the
+                'loaded word IS the whole value of an Integer/Boolean local, parameter,
+                'array element or struct field.  Capture its symbolic value in the
+                'compare-only shadow so a following `cmp ax,imm16` resolves to e.g.
+                '`Item(i).ID >= 1` (a `Select Case ... Case 1 To 20` range check) or
+                '`var_X = 5`, instead of the generic decoder dropping it to <cond>.
+                'Kept OUT of NVReg on purpose (see the shadow's declaration).
+                If md <> 3 Then
+                    Dim w16 As String
+                    w16 = NativeRmVal(dump, md, rm)
+                    If Len(w16) > 0 Then NVR16Val(reg) = w16
+                End If
             ElseIf md = 3 Then
                 NVReg(reg) = NVReg(rm)
                 NVRegIsAddr(reg) = NVRegIsAddr(rm): NVRegAddr(reg) = NVRegAddr(rm): NVRegAddrDisp(reg) = NVRegAddrDisp(rm)   'address propagates on reg->reg
@@ -6875,7 +6897,18 @@ Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
     'Integer/Boolean FIELD compares, e.g. global_X(12) <> 0); otherwise leave <cond>.
     If NativeHas66(dump) Then
         Select Case op
-            Case &H3D, &HA9: GoTo done3                  'cmp/test ax, imm - 16-bit accumulator
+            Case &H3D                                     'cmp ax, imm16 (16-bit accumulator)
+                'A `Select Case <IntegerField> ... Case lo To hi` range check and other
+                'Integer/Boolean compares load the value via `mov ax,word[mem]` then
+                '`cmp ax,imm16`.  The generic decode bails on the 16-bit accumulator, so
+                'use the word captured from the preceding memory load (NVR16Val) -> the
+                'operand resolves (e.g. global_X(12)(2) >= 1) instead of leaving <cond>.
+                If Len(NVR16Val(0)) > 0 Then
+                    NVCmpL = NVR16Val(0): NVCmpR = CStr(NativeDumpInt16(dump, i + 1))
+                    NVCmpIsTest = False: NVCmpIsBool = False: NVCmpSet = True
+                End If
+                GoTo done3
+            Case &HA9: GoTo done3                         'test ax, imm - 16-bit accumulator
             Case Else: If md = 3 Then GoTo done3          'r/m is a register
         End Select
     End If
