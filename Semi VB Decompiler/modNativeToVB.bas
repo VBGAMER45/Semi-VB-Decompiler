@@ -2761,12 +2761,24 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     'one this call is on), so leave the call raw rather than emit a
                     'wrong Form.Control.Prop.  Correct resolutions come only from the
                     'tracked-vtable path (NativeControlProp).
-                    NVPushTop = 0
                     'Drop the COM lifetime/identity plumbing VB6 emits around every
                     'object use - QueryInterface / AddRef / Release at the IUnknown
                     'vtable slots 0 / 4 / 8 - which is pure noise, never user code.
-                    If disp = 0 Or disp = 4 Or disp = 8 Then Exit Function
-                    ann = "call ." & Hex$(disp)
+                    If disp = 0 Or disp = 4 Or disp = 8 Then NVPushTop = 0: Exit Function
+                    'An unresolved object method/property vtable call (the target is not
+                    'in a loaded typelib): render it as `<obj>.UnkVCall_<8hex>h(args)` -
+                    'matching the commercial decompiler - instead of dropping it as an
+                    'annotated-assembly comment, so the call site stays traceable.  The
+                    'COM calling convention pushes the implicit `this` last (the topmost
+                    'push), so it is the receiver and the pushes below it are the
+                    'arguments (a `this` whose register is an untracked deref renders as
+                    'a leading-dot `.UnkVCall`, exactly as the commercial also emits).
+                    'Emitted DIRECTLY (not deferred): a COM call returns via a hidden
+                    'by-ref buffer and leaves an HRESULT in eax that VB immediately
+                    'error-checks, which would otherwise consume a deferred call.
+                    NativeResetValue
+                    NativeProcessInst = ind & NativeUnkVCall(disp) & vbCrLf
+                    Exit Function
                 End If
             Else
                 'A direct (E8) call to a user Sub/Function within the image
@@ -4988,6 +5000,43 @@ End Function
 Private Function NativeArgList() As String
     'All pending pushed values, in source order (drains the stack).
     NativeArgList = NativeArgsN(NVPushTop)
+End Function
+
+Private Function NativeUnkVCall(ByVal disp As Long) As String
+    'Render an unresolved object vtable call as `Call [<obj>.]UnkVCall_<8hex>h(args)`
+    'and drain the push stack.  COM pushes the implicit `this` last (topmost), so it
+    'is the receiver; the pushes below it are the arguments in source order.  Read
+    'NVPushImm directly (not NativeArgList) so an UNTRACKED `this` push - an empty
+    'string - is preserved as the receiver slot (-> a leading-dot `.UnkVCall`) instead
+    'of being collapsed into the first argument.
+    Dim recv As String, args As String, i As Long
+    If NVPushTop >= 1 Then recv = NVPushImm(NVPushTop - 1)
+    For i = NVPushTop - 2 To 0 Step -1
+        If Len(args) > 0 Then args = args & ", "
+        args = args & NVPushImm(i)
+    Next
+    NVPushTop = 0
+    'Only name the receiver when it is a STABLE object identity (a parameter, a
+    'module global, Me, or a dotted Form.Control / App chain).  A bare local var_X
+    'or a raw register is stale-prone - its tracked object can be wrong - so those
+    'render as a leading-dot `.UnkVCall`, exactly as the commercial decompiler does.
+    If Not NativeStableRecv(recv) Then recv = ""
+    Dim nm As String
+    nm = "UnkVCall_" & Right$("00000000" & Hex$(disp), 8) & "h"
+    If Len(recv) > 0 Then nm = recv & "." & nm Else nm = "." & nm
+    NativeUnkVCall = "Call " & nm & "(" & args & ")"
+End Function
+
+Private Function NativeStableRecv(ByVal r As String) As Boolean
+    'A receiver object expression that is a STABLE identity, safe to name as the
+    'method receiver: a parameter (arg_X), a module global (global_X), Me / Me.x, or
+    'a dotted chain (Form.Control / App.Prop).  A bare local (var_X), a raw register,
+    'or a number is rejected (its object identity is stale-prone).
+    If Len(r) = 0 Then Exit Function
+    If Left$(r, 4) = "arg_" Then NativeStableRecv = True: Exit Function
+    If Left$(r, 7) = "global_" Then NativeStableRecv = True: Exit Function
+    If r = "Me" Or Left$(r, 3) = "Me." Then NativeStableRecv = True: Exit Function
+    If InStr(r, ".") > 0 Then NativeStableRecv = True
 End Function
 
 Private Function NativeVariantArgList(ByVal trimZero As Boolean) As String
