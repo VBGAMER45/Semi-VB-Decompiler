@@ -4157,6 +4157,37 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             If Len(aa) = 0 Then aa = "<arg>"
             NativeFpuPush IIf(InStr(nm, "R4Str") > 0, "CSng(", "CDbl(") & aa & ")"
             NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaI4Abs") > 0, InStr(nm, "__vbaI2Abs") > 0
+            'Integer/Long Abs(): the value is passed in ECX (not pushed), result in eax.
+            'Fold to `Abs(<ecx>)` ONLY when ecx holds a freshly-computed arithmetic
+            'expression (a difference like X1-X2) - `modMap_Dist = Abs(X1-X2)` etc.  A
+            'bare/stale register or leftover variable is NOT folded: in Open_Sight_Line
+            'the first Abs's ecx is a control-flow-merged remnant (stale), so folding it
+            'would emit a wrong Abs (verified) - leave those as a visible Call.
+            Dim absArg As String, absInner As String, absSp As Long, absParamDiff As Boolean
+            absArg = NVReg(1)
+            'Skip a difference of two bare PARAMETERS (Abs(arg_8 - arg_10)): that shape is
+            'characteristic of the tiny distance/max helpers (modMap_Dist), where the two
+            'Abs results feed an `If X > Y Then ret = X Else ret = Y` the linear model
+            'can't reconstruct (both branches share eax -> both returns come out identical
+            'and one is wrong).  An Abs of data (global/array/local) feeds a guard condition
+            'instead (frmMain Display) and reconstructs correctly - fold those.
+            absInner = absArg
+            If Left$(absInner, 1) = "(" And Right$(absInner, 1) = ")" Then absInner = Mid$(absInner, 2, Len(absInner) - 2)
+            absSp = InStr(absInner, " - "): If absSp = 0 Then absSp = InStr(absInner, " + ")
+            If absSp > 0 Then
+                absParamDiff = (Left$(Trim$(Left$(absInner, absSp - 1)), 4) = "arg_") _
+                           And (Left$(Trim$(Mid$(absInner, absSp + 3)), 4) = "arg_")
+            End If
+            If Len(absArg) > 0 And Left$(absArg, 1) = "(" _
+               And (InStr(absArg, " - ") > 0 Or InStr(absArg, " + ") > 0) _
+               And Not absParamDiff Then
+                NVReg(0) = "Abs" & absArg
+                NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
+                NativeRuntimeCall = "": Exit Function
+            Else
+                NativeRuntimeCall = "Call " & NativeFriendlyName(nm) & "()": Exit Function
+            End If
         Case InStr(nm, "__vbaR8IntI4") > 0, InStr(nm, "__vbaR4IntI4") > 0
             'Floating value (FPU top) -> Long.  Folds to eax for the store.
             NVReg(0) = NativeNumConvWrap(NativeFpuPopOrEmpty(), "CLng")
