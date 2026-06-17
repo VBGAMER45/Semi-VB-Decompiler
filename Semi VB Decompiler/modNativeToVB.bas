@@ -4678,6 +4678,25 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     If Len(ffcls) > 0 Then NVRegObjType(reg) = ffcls: NVRegObjInst(reg) = ffcls
                 End If
             End If
+        Case &H8A                       'mov r8, r/m8  (byte load)
+            modrm = NativeDumpByte(dump, i + 1)
+            md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+            'A byte deref of a ByRef parameter pointer that was just zero-extended
+            '(`xor ecx,ecx; mov cl,[edx]`) yields the parameter's (small) value - VB6
+            'reads a small Integer ubound this way.  Only the low-byte registers
+            'al/cl/dl/bl (0..3) zero-extend a full register, and only when it already
+            'tracks "0" (the xor), so the loaded byte IS the whole value.
+            If md <> 3 And reg <= 3 And NVReg(reg) = "0" Then
+                If NativeDecodeDisp(dump, disp, isAbs) Then
+                    Dim baseB As Long
+                    baseB = NativeMemBase(dump)
+                    If Not isAbs And disp = 0 And baseB >= 0 And baseB <= 7 And Left$(NVReg(baseB), 4) = "arg_" Then
+                        NVReg(reg) = NVReg(baseB)
+                        NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                        NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+                    End If
+                End If
+            End If
         Case &H8D                       'lea r32, [mem]  (address-of / ptr arithmetic)
             modrm = NativeDumpByte(dump, i + 1)
             reg = (modrm \ 8) And 7
@@ -4842,6 +4861,23 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H83, &H81                 'add/sub r/m32, imm8/imm32 -> fold onto a tracked value
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+            'add <Me>, <fieldOffset> computes the ADDRESS of an instance field (VB6
+            'does this to pass a field's array by reference to __vbaRedim).  Re-tag the
+            'register as that field so the by-ref push renders the field name (the
+            'array variable) instead of the stale Me/arg_8.  Done before the arithmetic
+            'fold so `add esi,0x38` (esi = Me) becomes the field, not `(arg_8 + 56)`.
+            If op = &H83 Or op = &H81 Then
+                If md = 3 And reg = 0 And rm <> 4 And rm <> 5 And NVRegIsMe(rm) Then
+                    Dim fOff As Long
+                    If op = &H83 Then fOff = NativeDumpInt8(dump, n - 1) Else fOff = NativeDumpInt32(dump, n - 4)
+                    If fOff > 0 And fOff < &H2000 Then
+                        NVReg(rm) = NativeFieldName(fOff)
+                        NVRegIsAddr(rm) = False: NVRegIsMe(rm) = False: NVRegIsFormVt(rm) = False
+                        NVRegObjType(rm) = "": NVRegObjVt(rm) = "": NVRegObjGuid(rm) = "": NVRegObjVtGuid(rm) = ""
+                        Exit Function
+                    End If
+                End If
+            End If
             'reg-field 0 = ADD, 5 = SUB; rm = the destination register (md=3).  Extend a
             'meaningful tracked value (a call result like Len(s), or a clean variable)
             'with the immediate so `Right$(s, Len(s) - 4)` keeps the "- 4".  Skip esp/ebp.
