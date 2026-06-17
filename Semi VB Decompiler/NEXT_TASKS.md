@@ -63,13 +63,28 @@ classes, properties, events, file I/O, and the intrinsic-function set. Findings:
   reads `var_X`; the naive global re-tag collapsed legit repeated `var = func()`
   stores, so it needs to be scoped). Also: Width # renders `Call undef(...)` (helper
   not in the API DB - add `__vbaWidthFile`-style name); Print # shows a raw address.
-- **TODO RaiseEvent (#3)**: `RaiseEvent NameChanged(NewValue)` renders
-  `Call RaiseEvent(arg_8, 1, 1)`. __vbaRaiseEvent(this, eventIdx, ?, <inline Variant
-  args>); event name IS recoverable (e.g. "NameChanged" in the binary) but needs the
-  event-index→name map + extracting the inline-built Variant arg values. Deep.
-- **TODO** condition renderer: turn a folded predicate (`test eax/jcc` after
-  `IsNumeric(x)`/EOF/StrComp) into `If <pred> <op> 0` instead of a blank `<cond>` -
-  would let Is*/EOF fold safely (and shrink `<cond>`).
+- Condition renderer for folded predicates — **DONE 9ab06f5** (`<cond>` 66→44).
+  A 16-bit `test ax,ax` of a tracked call expression (NativeIsCallExpr) now resolves
+  to `<expr> <> 0`, so `If SomeFunc(args) Then` / `If IsNumeric(x) Then` reconstruct
+  instead of dropping to `<cond>`.  Is* predicates re-enabled for folding.
+- **TODO RaiseEvent (#3) — investigated, deferred (deep + under-sampled)**:
+  `RaiseEvent NameChanged(NewValue)` renders `Call RaiseEvent(arg_8, 1, 1)`.
+  Findings (LangTest Class1.Name_let @40A600):
+  - ABI: `__vbaRaiseEvent(Me, 1, 1, <inline 16-byte VARIANTARG built on the stack via
+    `sub esp,0x10`>)`.  cdecl, `add esp,0x1C` after.  The two `1`s are presumably
+    (eventIndex, cArgs) but WHICH is which can't be disambiguated from LangTest -
+    every event there is single-event / single-arg.  Need a class with 2+ events and
+    a 2-arg event to nail the encoding.
+  - Event NAME "NameChanged" IS in the binary (~0x4047E0) but in the COM/TLB
+    REGISTRATION name pool (packed flat with the class method names Name/Greet), NOT
+    referenced by any aligned pointer the way method FuncDescs are - so it needs the
+    dispinterface/registration parser (modCOM territory), not the FuncDesc path, to
+    map eventIndex→name.  The event PARAM name ("NewName" @4095A8) IS pointer-referenced
+    (4092C0/4092D0) near the param-name arrays.
+  - Also needs extracting the inline Variant arg values (vt at [esp], BSTR/val at
+    [esp+4]) to render the `(NewValue)` argument list.
+  Do NOT ship a guessed event name (plausible-but-wrong); gather multi-event samples
+  first.
 - **TODO** Class2 `Implements` member `IGreet_Greet` sig (FuncDesc under the IGreet
   iface vtable - different voff mapping than the class default interface).
 
