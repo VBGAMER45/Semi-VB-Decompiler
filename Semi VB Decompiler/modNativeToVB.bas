@@ -128,6 +128,7 @@ Private NVLateDispid As Collection '"L"&callVA -> comma list of candidate DISPID
 'bails on these 16-bit register compares; this map records the resolved operands
 '("<paramTok>|<const>") per cmp VA so the Jcc renders `If KeyCode = 97` not `<cond>`.
 Private NVKeyCmp As Collection     '"K"&cmpVA -> "<paramTok>|<const>"
+Private NVAbsGlobalCmp As Collection '"T"&testVA -> global token: a `mov eax,[abs](0xA1); test eax,eax` condition (the short-form global load isn't register-tracked) -> `If global_X <op> 0`
 'Branchless select-of-two-constants (`If cond Then x=c1 Else x=c2` compiled as
 'xor/cmp/setcc/dec/and mask/add base) -> reconstruct IIf(cond, base, base+mask).
 Private NVSelConst As Collection     '"S"&setccVA -> "<base>|<base+mask>" (true / false value)
@@ -286,6 +287,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVCtlArrGuid = New Collection
     Set NVCtlArrRetbuf = New Collection
     Set NVKeyCmp = New Collection
+    Set NVAbsGlobalCmp = New Collection
     Set NVSelConst = New Collection
     Set NVSelConstSkip = New Collection
     Set NVLocalVtName = New Collection
@@ -420,6 +422,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'conditions render `If KeyCode = 97` instead of `<cond>`.  Strictly scoped (only
     'procs with the `mov di,word[param]` anchor; only the 16-bit case compares).
     NativeDetectKeyCompares col
+    NativeDetectAbsGlobalTests col
 
     'Recognise the branchless select-of-two-constants idiom (setcc/dec/and/add) so a
     'two-constant If/Else (modMap_Direction = 4 / = 1) reconstructs as IIf(cond, c1, c2)
@@ -1987,6 +1990,35 @@ Private Sub NativeDetectKeyCompares(col As Collection)
 done:
 End Sub
 
+Private Sub NativeDetectAbsGlobalTests(col As Collection)
+    'A `mov eax,[abs-global]; test eax,eax; jcc` condition where the load uses the
+    'short-form opcode 0xA1 (mov eax, moffs32).  That form is NOT register-tracked
+    '(broad 0xA1 tracking regressed the SIB array-pointer detection - Gap A, reverted),
+    'so the test leaked as a raw `If eax > 0`.  Record the global token at the
+    '`test eax,eax` VA so the compare renders `global_X <op> 0` (e.g. `If Game.pIndex > 0`,
+    'global_0042304C).  VA-scoped: it touches NO register state, so the Gap-A cascade
+    'cannot recur.
+    On Error GoTo done
+    Dim n As Long, k As Long, arr() As CInstruction, inst As CInstruction
+    n = col.Count
+    If n < 2 Then Exit Sub
+    ReDim arr(n - 1): k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For k = 0 To n - 2
+        Dim d As String, gva As Long
+        d = Replace(arr(k).dump, " ", "")
+        If Len(d) >= 10 And Left$(d, 2) = "A1" Then          'A1 <abs32> = mov eax,[abs32]
+            gva = NativeDumpInt32(d, 1)
+            If NativeIsGlobalAddr(gva) Then
+                If NativeIsTestEaxEax(arr(k + 1)) Then       'immediately tested
+                    NativeColPut NVAbsGlobalCmp, "T" & arr(k + 1).va, NativeGlobalName(gva)
+                End If
+            End If
+        End If
+    Next k
+done:
+End Sub
+
 Private Function NativeIsMovR16FromMem(inst As CInstruction, ByRef destReg As Long, ByRef baseReg As Long) As Boolean
     'Match `mov r16, word[base]` (0x66 prefix + 0x8B + memory operand); set destReg
     '(the loaded 16-bit register) and baseReg (the memory base register).
@@ -3080,6 +3112,16 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             kcBar = InStr(kcRec, "|")
             NVCmpL = Left$(kcRec, kcBar - 1): NVCmpR = Mid$(kcRec, kcBar + 1)
             NVCmpIsTest = False: NVCmpIsBool = False: NVCmpSet = True
+            Exit Function
+        End If
+        'A `mov eax,[abs-global] (0xA1); test eax,eax` condition: the short-form global
+        'load is NOT register-tracked (broad 0xA1 tracking regressed the SIB array-pointer
+        'detection - Gap A, reverted), so a VA-scoped pre-pass binds the global token here
+        '-> `If global_X > 0` instead of a raw `If eax > 0`.
+        Dim agRec As String
+        agRec = NativeColGet(NVAbsGlobalCmp, "T" & inst.va)
+        If Len(agRec) > 0 Then
+            NVCmpL = agRec: NVCmpR = "0": NVCmpIsTest = True: NVCmpIsBool = False: NVCmpSet = True
             Exit Function
         End If
         NativeDecodeCompare inst, mn
