@@ -55,8 +55,29 @@ frmMain.OpenVBExe - just persist it into gControlNameArray); (2) when a form acc
 fetches an array control, tag the register as the array; (3) on `.UnkVCall_0040h(idx)`
 of an array, produce `<ctrl>(idx)` tagged WITH THE ELEMENT'S CONTROL GUID - then the
 existing NativeControlProp path resolves the following 0x54/0x19C puts to
-`.Caption`/`.ToolTipText` automatically.  Substantial/structural; gate strictly on
-is-array + offset 0x40 so non-array controls at 0x40 are untouched.
+`.Caption`/`.ToolTipText` automatically.
+
+ATTEMPTED 2026-06-17 (THREE approaches) and REVERTED each time - live-state
+extraction is fundamentally unreliable for this idiom.  CONFIRMED WORKING: the
+is-array flag (odd-Data1 event-IID: lblSkillName/lblSkillValue/cmdSkillRaise/picCarry
+all detected, lblPlayerName/picLife correctly not) and GUID-tagging the element local
+so `.Caption`/`.ToolTipText` resolve via NativeControlProp.  WHAT FAILED - reliably
+getting, per Item call, (which array control, the index, the retbuf local):
+  1. push stack: the index's `__vbaI4` coercion call sits between the retbuf push and
+     index push and RESETS NVPushTop, so only 2 of 3 args survive and you can't tell
+     index from retbuf -> empty index -> nested garbage `lblSkillValue(lblSkillName(...))`.
+  2. NVReg(0)=index + NVLastLea=retbuf: index was right for SOME calls (`lblSkillName(var_24)`)
+     but eax isn't the index for the FIRST access (it's the array), and NVLastLea points
+     at a REUSED retbuf local that a prior access already tagged -> wrong control name
+     (`lblSkillName(i).Caption` where source is `lblSkillValue(i)`).
+The REAL fix is a PRE-PASS that, for each `call [vt+0x40]`, scans the instruction
+window to deterministically recover (a) the receiver array control - by back-tracing
+the vtable register to its form-accessor `call [vt+0x2F8+idx*4]` and checking is-array;
+(b) the index source (`mov reg,[ebp-Y]` feeding the `__vbaI4`); (c) the retbuf local
+(the `lea reg,[ebp-X]; push reg` out-param) - all from the disasm, NOT live NVPushImm/
+NVReg/NVLastLea.  Record callVA -> (elemExpr, retbufDisp, guid); at render, tag the
+retbuf local.  Gate strictly on is-array + offset 0x40.  Substantial; do as a
+dedicated effort with this Update_Skills case as the test.
 
 ## Dungeon Form_KeyDown / Select-Case-on-Integer (2026-06-17) — partial
 
