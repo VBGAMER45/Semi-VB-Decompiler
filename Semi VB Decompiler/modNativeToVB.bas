@@ -3687,12 +3687,37 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
                 NVPendingCall = "Call " & NVReg(0)
                 NativeRuntimeCall = "": Exit Function
-            Case Else
-                'Emit each intrinsic as its own visible statement.  (Threading the
-                'result into the next op silently dropped calls such as DateAdd /
-                'DateValue / CDate; the __vba* conversions and StrCat still flow,
-                'so the concat/assignment reconstruction is unaffected.)
+            Case "EOF", "FREEFILE", "ISNUMERIC", "ISDATE", "ISEMPTY", "ISNULL", _
+                 "ISARRAY", "ISOBJECT", "ISERROR", "ISMISSING"
+                'These either feed a branch test or get reused in-register, where the
+                'value-fold below would silently lose them or leak a stale expression:
+                '  - Boolean predicates (Is*/EOF) feed `If <pred> Then` / `Do While Not
+                '    EOF` - the result is consumed by `test eax / jcc`, but the condition
+                '    renderer can't yet turn it into a relational, so it would drop the
+                '    call AND still print a blank <cond>.
+                '  - FreeFile's result is the file number, which VB keeps live in eax and
+                '    reuses directly as the `As #<n>` of the next Open WITHOUT a reload,
+                '    so folding leaks `Open ... As #FreeFile(...)` instead of `#var_X`.
+                'Keep them visible Calls (pre-fold output) until the condition renderer /
+                'reused-result-register tracking handles them.
                 NativeRuntimeCall = "Call " & vbName & "(" & NativeArgList() & ")": Exit Function
+            Case Else
+                'Value-returning intrinsic (Environ$/Command$/Now/Timer/Rnd/
+                'QBColor/Format*/financial/date funcs/TypeName/...).  Fold the result
+                'into eax AND defer a "Call X()" - exactly the string-transform path:
+                'if the next instruction consumes eax the value threads into the
+                'consumer (`sTemp = Environ$(...)`, `lColor = QBColor(4)`), otherwise the
+                'deferred call is flushed as a statement, so an unconsumed result is
+                'never silently dropped.  (The old "always emit a Call" lost every such
+                'assignment; the even older "fold into eax with no flush" dropped
+                'unconsumed DateAdd/DateValue/CDate - the NVPendingCall net fixes both.)
+                Dim ceArgs As String
+                ceArgs = NativeArgList()
+                NVReg(0) = vbName & "(" & ceArgs & ")"
+                NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                NVPendingCall = "Call " & NVReg(0)
+                NativeRuntimeCall = "": Exit Function
         End Select
     End If
 
