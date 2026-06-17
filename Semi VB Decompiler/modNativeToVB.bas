@@ -3275,10 +3275,19 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     If NVRegIsFormVt(ocb) Then
                         fmeth = NativeFormMethodByOffset(disp)
                         If Len(fmeth) > 0 Then
+                            'An arg-taking _Form method (PopupMenu <menu>) leads with the
+                            'implicit `this` (Me, pushed topmost) and the real argument just
+                            'below it - the same shape as the _Global Load/Unload statements.
+                            Dim fmArg As String
+                            If NativeFormMethodHasArg(disp) And NVPushTop >= 2 Then fmArg = NVPushImm(NVPushTop - 2)
                             NVPushTop = 0
                             NVReg(0) = "": NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
                             NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
-                            NativeProcessInst = ind & "Me." & fmeth & vbCrLf
+                            If Len(fmArg) > 0 Then
+                                NativeProcessInst = ind & fmeth & " " & fmArg & vbCrLf
+                            Else
+                                NativeProcessInst = ind & "Me." & fmeth & vbCrLf
+                            End If
                             Exit Function
                         End If
                     End If
@@ -6652,10 +6661,21 @@ Private Function NativeFormMethodByOffset(ByVal disp As Long) As String
     'part of the form runtime interface and stable across programs.  Verified by
     'tracing real forms (Dungeon frmMainMenu cmdExit/cmdLoad/cmdNew all
     '`call [Me_vt + 0x2B4]`) and cross-checking the commercial decompiler's Me.Hide.
-    'Only argument-less, value-less methods belong here (rendered as a bare
-    'statement Me.<method>); extend as more offsets are confirmed by tracing.
+    'Argument-less methods (Hide) render as a bare `Me.<method>`; an arg-taking
+    'method (PopupMenu <menu>, see NativeFormMethodHasArg) renders `<method> <arg>`.
+    'Extend as more offsets are confirmed by tracing.
     Select Case disp
         Case &H2B4: NativeFormMethodByOffset = "Hide"
+        Case &H2BC: NativeFormMethodByOffset = "PopupMenu"
+    End Select
+End Function
+
+Private Function NativeFormMethodHasArg(ByVal disp As Long) As Boolean
+    'A _Form method that takes a leading argument (pushed below the implicit `this`),
+    'so the handler renders `<method> <arg>` (e.g. `PopupMenu mnuCarry`) rather than a
+    'bare `Me.<method>`.  PopupMenu's extra optional args (flags/x/y) are not modelled.
+    Select Case disp
+        Case &H2BC: NativeFormMethodHasArg = True   'PopupMenu <menu>
     End Select
 End Function
 
