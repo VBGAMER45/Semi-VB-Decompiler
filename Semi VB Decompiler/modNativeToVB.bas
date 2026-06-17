@@ -167,6 +167,7 @@ Private NVErrHandler As Long       'address of this procedure's On Error handler
 Private NVProcEndWord As String    'closing keyword for this proc: "Sub" / "Function" / "Property"
 Private NVAccumRet As Boolean      'the proc returns a simple value in the accumulator (ax/eax) - a module Function whose kind/type is stripped (recovered from the epilogue return-load)
 Private NVAccumRetType As String   'recovered return type from that load: "Integer" (word/ax) or "Long" (dword/eax)
+Private NVAccumRetSlot As Long      'the return slot's ebp displacement (negative; 0 = none) - so a constant store `mov [ebp-slot],imm` (0xC7) to it renders `FuncName = imm`
 Private NVRetN As Long             'the proc's `ret imm16` operand (callee-popped arg bytes), -1 if none
 Private NVApiStubCache As Collection 'declared-DLL stub address -> resolved API name (global, "" = not a stub)
 Private NVCmpL As String           'pending condition: left operand (symbolic)
@@ -223,7 +224,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVForm = NativeFormOf(addr)
     NVHasMe = NativeProcHasMe(addr)
     NVProcEndWord = "Sub"
-    NVAccumRet = False: NVAccumRetType = ""
+    NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVCmpIsBool = False: NVFpuChk = False
@@ -4769,6 +4770,7 @@ Private Sub NativeDetectAccumReturn(b() As Byte, ByVal addr As Long)
                     retDisp = ret8: If retDisp >= 128 Then retDisp = retDisp - 256   'signed disp8
                     If retDisp < 0 Then
                         NVAccumRet = True
+                        NVAccumRetSlot = retDisp
                         If isWord Then NVAccumRetType = "Integer" Else NVAccumRetType = "Long"
                         Dim funcName As String, fp As Long
                         funcName = NativeProcName(addr)
@@ -5653,6 +5655,19 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     If c7imm >= OptHeader.ImageBase Then c7s = NativeStringAt(c7imm)
                     If Len(c7s) = 0 Then c7s = NativeNumFromBits(c7imm)
                     NativeTrackReg = NativeGlobalName(disp) & " = " & c7s
+                ElseIf Not isAbs And disp < 0 And disp = NVAccumRetSlot Then
+                    'A constant stored to the FUNCTION RETURN slot: `mov [ebp-retSlot],
+                    'imm` (e.g. modMap_Direction = 7).  Render `var_<slot> = imm` (the
+                    'return-slot rename then makes it `FuncName = imm`).  Gated to the
+                    'return slot so the SEH-frame / Variant-VT 0xC7 stores to other
+                    'locals stay suppressed (they are not user assignments).
+                    Dim rcImm As Long, rcs As String
+                    If NativeHas66(dump) Then rcImm = NativeDumpInt16(dump, n - 2) Else rcImm = NativeDumpInt32(dump, n - 4)
+                    rcs = ""
+                    If rcImm >= OptHeader.ImageBase Then rcs = NativeStringAt(rcImm)
+                    If Len(rcs) = 0 Then rcs = NativeNumFromBits(rcImm)
+                    NativeTrackReg = "var_" & Hex$(Abs(disp)) & " = " & rcs
+                    NativeSetLocalExpr disp, rcs
                 ElseIf Not isAbs And disp > 0 And disp < &H2000 Then
                     'Store an immediate to a struct FIELD: mov [base + off], imm.
                     'A 0x66-prefixed store writes a word (Boolean True = 0xFFFF -> -1).
