@@ -2974,11 +2974,38 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                     'it and the trailing retbuf, keeping the real parameters (count from
                     'the method's typeinfo signature) - so `Update_Status()` no longer
                     'renders as frmMain.Update_Status(arg_8).
-                    Dim fpname As String, fargs As String, fRetbuf As String
+                    Dim fpname As String, fargs As String, fRetbuf As String, fkind As String, fIsVal As Boolean, fVal As String
                     fargs = NativeDropThisArgs(NativeArgList(), ftgt, fRetbuf)
                     fpname = NativeCallTargetName(ftgt)
-                    NVReg(0) = NVForm & "." & fpname & "(" & fargs & ")"
-                    NVPendingCall = "Call " & NVForm & "." & fpname & "(" & fargs & ")"
+                    NVPushTop = 0
+                    'Emit DIRECTLY (not deferred), exactly like the class-vtable path
+                    'below: a COM/form method returns its result through a hidden retbuf
+                    'and leaves an HRESULT in eax that VB error-checks (cmp/test eax)
+                    'on the very next instruction.  A deferred call would be folded into
+                    'that check and LOST - which left Timer2_Timer / vsCarry_Change with
+                    'empty bodies (their only statements are such form-method calls).
+                    'A value-returning method (retbuf present, or a Property Get) folds
+                    'recv.method(args) into the retbuf local + eax so the value flows to
+                    'its consumer; a void method emits a `Call` statement.
+                    fIsVal = (Len(fRetbuf) > 0)
+                    If Not fIsVal Then
+                        If NativeTryMethodKind(ftgt, fkind) Then fIsVal = (InStr(fkind, "Get") > 0)
+                    End If
+                    If fIsVal Then
+                        fVal = NVForm & "." & fpname
+                        If Len(fargs) > 0 Then fVal = fVal & "(" & fargs & ")"
+                        NativeResetValue
+                        NVReg(0) = fVal
+                        NVRegObjType(0) = "": NVRegObjVt(0) = ""
+                        If Left$(fRetbuf, 4) = "var_" Then
+                            On Error Resume Next
+                            NativeSetLocalExpr -CLng("&H" & Mid$(fRetbuf, 5)), fVal
+                            On Error GoTo 0
+                        End If
+                        Exit Function
+                    End If
+                    NativeResetValue
+                    NativeProcessInst = ind & "Call " & NVForm & "." & fpname & "(" & fargs & ")" & vbCrLf
                     Exit Function
                 End If
                 'A class calling its OWN method: call [Me_vtable + off] where off is a
@@ -6236,6 +6263,12 @@ Private Function NativeEaxUse(inst As CInstruction) As Long
             Case &H8B                          'mov r, r/m
                 If reg = 0 Then NativeEaxUse = 2: Exit Function          'eax is dest
                 If md = 3 And rm = 0 Then NativeEaxUse = 1: Exit Function 'eax is source
+            Case &H8D                          'lea r, [mem]
+                'lea into eax CLOBBERS the call result (the address overwrites it).
+                'Without this a deferred call before `lea eax,[ebp-X]; push eax` was
+                'wrongly kept until the push folded it as if push consumed the result
+                '(dropping the call - e.g. the user call in Timer2_Timer).
+                If reg = 0 Then NativeEaxUse = 2: Exit Function
             Case &H85, &H3B, &H39              'test/cmp involving a register
                 If reg = 0 Or (md = 3 And rm = 0) Then NativeEaxUse = 1: Exit Function
             Case &H83, &H81                    'grp1 r/m, imm (cmp eax, imm reads)
