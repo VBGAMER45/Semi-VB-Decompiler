@@ -3102,6 +3102,37 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         End If
                     End If
                 End If
+                'A VB6 global STATEMENT routed through the _Global object's vtable
+                '(e.g. `Unload <form>` = call [_GlobalVt + 0x10]).  Render the global
+                'statement with its argument (the object being acted on), taken from the
+                'push below the implicit `this` (the _Global object, pushed topmost).
+                Dim gmeth As String
+                If ocb >= 0 And ocb <= 7 Then
+                    If NVRegObjVt(ocb) = "_Global" Then
+                        gmeth = NativeGlobalMethodByOffset(disp)
+                        If Len(gmeth) > 0 Then
+                            Dim gmArg As String, gmFm As String
+                            If NVPushTop >= 2 Then gmArg = NVPushImm(NVPushTop - 2)
+                            'The masked event-source param (arg_8) is Me; a form-instance
+                            'access renders `New frmX` - strip the New for the Unload arg.
+                            If gmArg = "arg_8" Then gmArg = "Me"
+                            If Left$(gmArg, 4) = "New " Then gmArg = Mid$(gmArg, 5)
+                            'A predeclared form-instance global -> the form name
+                            '(Unload frmMainMenu, not Unload global_00423108).
+                            If Left$(gmArg, 7) = "global_" Then
+                                gmFm = FormNameByInstGlobal(NativeGlobalTokVa(gmArg))
+                                If Len(gmFm) > 0 Then gmArg = gmFm
+                            End If
+                            NVPushTop = 0: NativeResetValue
+                            If Len(gmArg) > 0 Then
+                                NativeProcessInst = ind & gmeth & " " & gmArg & vbCrLf
+                            Else
+                                NativeProcessInst = ind & gmeth & vbCrLf
+                            End If
+                            Exit Function
+                        End If
+                    End If
+                End If
                 'A built-in Form method on Me's OWN vtable: call [Me_vt + off] where
                 'off is a fixed _Form-interface slot (e.g. Hide = 0x2B4).  Gated to a
                 'tracked Me vtable and checked BEFORE the control heuristic because
@@ -3856,12 +3887,18 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 NVRegObjVt(0) = "": NVRegObjVtGuid(0) = ""
                 NativeRuntimeCall = "": Exit Function
             End If
-            Dim osGuid As String, osName As String
+            Dim osGuid As String, osName As String, osSrc As String
             osGuid = NVRegObjGuid(0): osName = NVRegObjType(0)
             'The source control's identity is often cleared off eax by a `lea eax,
             '[dest]` placed just before the call; fall back to the last control
             'accessor (the __vbaObjSet source is always the just-fetched control).
             If Len(osGuid) = 0 And Len(NVLastGuid) > 0 Then osGuid = NVLastGuid: osName = NVLastControl
+            '__vbaObjSet(ppDest, pSrc) RETURNS pSrc.  pSrc is the source object - the
+            'bottom (first-pushed) argument; ppDest (the &local) is pushed last.  Capture
+            'it so eax becomes the real source even when no control identity is on eax
+            '(e.g. `Unload <form>`: the form was pushed from a register, leaving a stale
+            'tag on eax that otherwise leaked as the Unload argument).
+            If NVPushTop >= 1 Then osSrc = NVPushImm(0)
             NVPushTop = 0
             'Re-tag eax with the control identity: __vbaObjSet returns the same
             'object, so a following `mov [tempLocal], eax` (the property LET target)
@@ -3869,6 +3906,11 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             If Len(osGuid) > 0 Then
                 NVReg(0) = osName: NVRegObjType(0) = osName: NVRegObjGuid(0) = osGuid
                 NVRegObjVt(0) = "": NVRegObjVtGuid(0) = ""
+            ElseIf Len(osSrc) > 0 Then
+                'No control identity: eax is simply the source object the helper returns.
+                NVReg(0) = osSrc
+                NVRegObjType(0) = "": NVRegObjGuid(0) = "": NVRegObjVt(0) = "": NVRegObjVtGuid(0) = ""
+                NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
             End If
             If NVLastLeaSet And Len(osGuid) > 0 Then
                 NativeSetLocalGuid NVLastLea, osGuid
@@ -5289,14 +5331,15 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     Dim lguid As String
                     lguid = NativeGetLocalGuid(disp)
                     If Len(lguid) > 0 Then NVRegObjGuid(reg) = lguid: NVRegObjType(reg) = NVReg(reg)
-                    'Reloading a control object's cached VTABLE (stored by the 0x89
-                    'handler): restore its control identity so a deferred property put
-                    '`call [reg + off]` through it resolves.
-                    Dim lvtg As String
-                    lvtg = NativeColGet(NVLocalVtGuid, "L" & disp)
-                    If Len(lvtg) > 0 Then
-                        NVRegObjVt(reg) = NativeColGet(NVLocalVtName, "L" & disp)
-                        NVRegObjVtGuid(reg) = lvtg
+                    'Reloading an object's cached VTABLE (stored by the 0x89 handler):
+                    'restore its identity (control name+GUID, or an intrinsic vtable name
+                    'like _Global) so a deferred call `call [reg + off]` through it
+                    'resolves (e.g. the cached _Global vtable for `Unload Me`).
+                    Dim lvn As String
+                    lvn = NativeColGet(NVLocalVtName, "L" & disp)
+                    If Len(lvn) > 0 Then
+                        NVRegObjVt(reg) = lvn
+                        NVRegObjVtGuid(reg) = NativeColGet(NVLocalVtGuid, "L" & disp)
                     End If
                 ElseIf isAbs And NativeIsGlobalAddr(disp) Then
                     'Loading a module-global that holds a user-class instance (typed
@@ -5418,16 +5461,17 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     '__vbaObjSet) - remember its GUID so a later property access
                     'through that local resolves (e.g. the LET target temp).
                     If Len(NVRegObjGuid(reg)) > 0 Then NativeSetLocalGuid disp, NVRegObjGuid(reg)
-                    'Storing a control object's VTABLE to a local (VB caches it before a
-                    'property put when intervening string helpers would clobber the
-                    'register - e.g. the first lblSkillName(i).Caption put).  Thread the
-                    'vtable's control identity through the slot so the reload resolves.
+                    'Storing an object's VTABLE to a local (VB caches it before a call
+                    'when intervening helpers would clobber the register - e.g. the first
+                    'lblSkillName(i).Caption put, or the _Global vtable before `Unload`).
+                    'Thread the vtable's identity (name, and GUID when a control) through
+                    'the slot so the reload resolves.
                     On Error Resume Next
                     NVLocalVtName.Remove "L" & disp: NVLocalVtGuid.Remove "L" & disp
                     On Error GoTo 0
-                    If Len(NVRegObjVtGuid(reg)) > 0 Then
+                    If Len(NVRegObjVt(reg)) > 0 Then
                         NVLocalVtName.Add NVRegObjVt(reg), "L" & disp
-                        NVLocalVtGuid.Add NVRegObjVtGuid(reg), "L" & disp
+                        If Len(NVRegObjVtGuid(reg)) > 0 Then NVLocalVtGuid.Add NVRegObjVtGuid(reg), "L" & disp
                     End If
                     'If the register held NO symbolic value, it now MIRRORS this local
                     '(after `mov [var_X], reg` the register equals var_X).  Name it so
@@ -6321,6 +6365,18 @@ Private Function NativeGlobalObjByOffset(ByVal disp As Long) As String
         Case &H14: NativeGlobalObjByOffset = "App"
         Case &H18: NativeGlobalObjByOffset = "Screen"
         Case &H1C: NativeGlobalObjByOffset = "Clipboard"
+    End Select
+End Function
+
+Private Function NativeGlobalMethodByOffset(ByVal disp As Long) As String
+    'VB6 global STATEMENTS routed through the standalone _Global object's vtable
+    '(the lazily-New'd intrinsic-objects holder).  Verified: `Unload <form>` compiles
+    'to `call [_GlobalVt + 0x10]` with the form as the argument.  Extend as more global
+    'routines are confirmed by tracing.  Verified against Dungeon Form_Load:
+    'Load frmMainMenu = [+0xC], Unload <form> = [+0x10] (adjacent _Global slots).
+    Select Case disp
+        Case &HC: NativeGlobalMethodByOffset = "Load"
+        Case &H10: NativeGlobalMethodByOffset = "Unload"
     End Select
 End Function
 

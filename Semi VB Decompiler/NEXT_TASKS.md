@@ -27,6 +27,29 @@ benchmarked against the Dungeon test program. Written to survive a context reset
 - **Key structure reference:** `C:\Users\Owner\Downloads\Alex_Ionescu_vb_structures(2).pdf`
   (VB image internal format — Object Info §8, Public Object Descriptor §7, etc.). Use it instead of guessing struct layouts.
 
+## _Global statements: Load / Unload (2026-06-17) — DONE
+
+`Load <form>` and `Unload <form>` (and `Unload Me`) compile to calls through the
+standalone VB `_Global` object's vtable: `Load` = `call [_GlobalVt + 0xC]`,
+`Unload` = `call [_GlobalVt + 0x10]`, with the form pushed as the argument (via
+`__vbaObjSetAddref`).  We rendered them as `Call global_XXXX.UnkVCall_000Ch/0010h(<garbage arg>)`.
+Now resolved to `Load frmMainMenu` / `Unload Me` / `Unload frmMainMenu` (matching the
+source EXACTLY; beats the commercial, which leaves `global_XXXX.Unload Me` / UnkVCall).
+Three pieces:
+- `NativeGlobalMethodByOffset` (0xC=Load, 0x10=Unload) + a handler in the C_CAL path
+  gated to `NVRegObjVt = "_Global"`; renders `<stmt> <arg>` (arg = the push below the
+  implicit _Global `this`).  arg_8 (masked event source) -> `Me`; a `New frmX` instance
+  access -> `frmX`; a form-instance global -> its form name (FormNameByInstGlobal).
+- **__vbaObjSet/__vbaObjSetAddref now returns its SOURCE object** (the bottom/first
+  push) when eax carries no control identity - previously eax kept a stale tag
+  (App / _Global / 0) that leaked as the Unload argument.  Scoped to the
+  no-control-identity case (the control-LET path is unchanged).
+- **Vtable-name threading through a local** generalised: the 0x89 store / 0x8B reload
+  now thread the vtable's NAME (not only a control GUID), so a cached `_Global` vtable
+  (`mov [ebp-X],vt; mov reg,[ebp-X]; call [reg+0x10]`) still resolves (mnuFileExit_Click).
+Dungeon: UnkVCall 42->37; only frmMain.frm changed, all other metrics/files identical,
+no new dangling GoTos.  Extend NativeGlobalMethodByOffset as more _Global slots are seen.
+
 ## Hard limits — UNRECOVERABLE (do not attempt; verified stripped from native EXEs)
 
 - Module-level **global variable names** (rendered `global_XXXXXXXX`).
