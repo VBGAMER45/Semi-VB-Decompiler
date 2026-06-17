@@ -4198,6 +4198,11 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
     If Len(nm) = 0 Then Exit Function
     NVCallHandled = True
 
+    'Record (UDT) helpers carry the record-layout descriptor address as one of their
+    'arguments.  Harvest it (decode -> gUDTDesc) so the Type block is reconstructed.
+    'Non-destructive: the call still renders normally below (type recovery only).
+    If InStr(nm, "__vbaRec") > 0 Then NativeHarvestUDTArgs
+
     'Internal __vba* helpers handled specially
     Select Case True
         Case InStr(nm, "__vbaHresultCheckObj") > 0
@@ -7685,6 +7690,159 @@ Private Function NativeStringAt(ByVal va As Long) As String
 done:
     On Error Resume Next
     Close #fp
+End Function
+
+'---------------------------------------------------------------------------
+' UDT (record) recovery from VB6 record-layout descriptors
+'
+' __vbaRecAssign / __vbaRecDestruct / __vbaRec*ToUni take the address of a
+' record-layout descriptor (emitted for any UDT containing reference-type fields -
+' String/Variant/Object - that the runtime must deep-copy or free).  The descriptor
+' encodes the struct SIZE and the OFFSET+TYPE of each reference field.  Field NAMES
+' are stripped, so fields render field_<hexOffset> with their recovered type and the
+' numeric gaps are filled with Long/Integer/Byte so the byte layout is exact.  This
+' BEATS the commercial decompiler, which punts to a single `bStruc(N) As Byte`.
+'
+' Descriptor format (verified across 5 records: Dungeon MapType/MessageType + the
+' UDT sample TOneString/TMixed/TVariant):
+'   +2  WORD cbStruct   (total struct size)
+'   +6  WORD cFields    (count of reference-type fields)
+'   +11 BYTE kind       (0x2C = simple BSTR/Variant field table)
+'   +12.. cFields * { WORD fieldOffset, WORD typecode }   (typecode 0x0001 = String)
+' Object/array/nested records use other kinds (0x0C/0x3C) with longer, variable-size
+' entries; those are not fully decoded (we bail rather than emit a wrong layout).
+'---------------------------------------------------------------------------
+
+Private Sub NativeHarvestUDTArgs()
+    'Scan the pending call arguments for a record-layout descriptor address and
+    'register any that decode.  Safe to call on any record-helper call; non-numeric
+    'or out-of-range args are ignored, and the decode itself validates the structure.
+    Dim i As Long, s As String, v As Long
+    On Error Resume Next
+    For i = 0 To NVPushTop - 1
+        s = Trim$(NVPushImm(i))
+        If Len(s) > 0 And IsNumeric(s) Then
+            v = CLng(s)
+            If v > OptHeader.ImageBase Then NativeRegisterUDT v
+        End If
+    Next
+End Sub
+
+Public Sub NativeRegisterUDT(ByVal va As Long)
+    'Decode the descriptor at va once and store its full `Public Type ... End Type`
+    'block in gUDTDesc, keyed by VA for dedup.  No-op if va is not a clean descriptor.
+    Dim key As String, body As String, tmp As String, typeName As String
+    If va < OptHeader.ImageBase Then Exit Sub
+    If gUDTDesc Is Nothing Then Set gUDTDesc = New Collection
+    key = "H" & Right$("00000000" & Hex$(va), 8)
+    On Error Resume Next
+    tmp = "": tmp = gUDTDesc.Item(key)
+    On Error GoTo 0
+    If Len(tmp) > 0 Then Exit Sub                     'already registered
+    body = NativeDecodeRecordDescriptor(va)
+    If Len(body) = 0 Then Exit Sub
+    typeName = "UDT_" & Right$("00000000" & Hex$(va), 8)
+    body = "Public Type " & typeName & vbCrLf & body & "End Type" & vbCrLf & vbCrLf
+    On Error Resume Next
+    gUDTDesc.Add body, key
+    On Error GoTo 0
+End Sub
+
+Public Function GetUDTBlock() As String
+    'Concatenate every recovered UDT Type block (insertion order).  Emitted once in
+    'the first standard module (the EXE does not record which module owned each Type).
+    Dim s As String, v As Variant
+    On Error Resume Next
+    If gUDTDesc Is Nothing Then Exit Function
+    For Each v In gUDTDesc
+        s = s & CStr(v)
+    Next
+    GetUDTBlock = s
+End Function
+
+Private Function NativeDecodeRecordDescriptor(ByVal va As Long) As String
+    'Parse a simple-table (kind 0x2C) record descriptor at va and render its field
+    'body (the lines between `Type` and `End Type`).  Returns "" if va is not a clean
+    'all-String simple-table descriptor (so unknown/exotic layouts are left alone).
+    Dim fp As Integer, rva As Long
+    Dim cbStruct As Long, cFields As Long, kind As Long
+    Dim i As Long, off As Long, tc As Long
+    Dim offs() As Long, nf As Long
+    On Error GoTo bad
+    rva = va - OptHeader.ImageBase
+    If rva < 5 Then Exit Function
+    fp = FreeFile
+    Open SFilePath For Binary Access Read As #fp
+    cbStruct = NativeGetWord(fp, rva + 2)
+    cFields = NativeGetWord(fp, rva + 6)
+    kind = NativeGetByte(fp, rva + 11)
+    If cbStruct < 1 Or cbStruct > 8192 Then GoTo bad
+    If cFields < 1 Or cFields > 256 Then GoTo bad      'must have >=1 reference field
+    If kind <> &H2C Then GoTo bad                       'only the simple BSTR/Variant table
+    ReDim offs(cFields - 1)
+    nf = 0
+    For i = 0 To cFields - 1
+        off = NativeGetWord(fp, rva + 12 + i * 4)
+        tc = NativeGetWord(fp, rva + 12 + i * 4 + 2)
+        If off < 0 Or off >= cbStruct Then GoTo bad
+        If tc <> 1 Then GoTo bad                         'String only; Variant entries are longer - bail
+        offs(nf) = off: nf = nf + 1
+    Next
+    Close fp
+    'Walk 0..cbStruct emitting each String at its offset and Long/Integer/Byte filler
+    'for the numeric gaps, so every field offset is byte-accurate.
+    Dim res As String, pos As Long, j As Long, isStr As Boolean, nextStr As Long, gap As Long
+    pos = 0
+    Do While pos < cbStruct
+        isStr = False
+        For j = 0 To nf - 1
+            If offs(j) = pos Then isStr = True: Exit For
+        Next
+        If isStr Then
+            res = res & "    field_" & Hex$(pos) & " As String" & vbCrLf
+            pos = pos + 4
+        Else
+            nextStr = cbStruct
+            For j = 0 To nf - 1
+                If offs(j) > pos And offs(j) < nextStr Then nextStr = offs(j)
+            Next
+            gap = nextStr - pos
+            Do While gap >= 4
+                res = res & "    field_" & Hex$(pos) & " As Long" & vbCrLf
+                pos = pos + 4: gap = gap - 4
+            Loop
+            If gap = 2 Then
+                res = res & "    field_" & Hex$(pos) & " As Integer" & vbCrLf
+                pos = pos + 2
+            ElseIf gap = 1 Then
+                res = res & "    field_" & Hex$(pos) & " As Byte" & vbCrLf
+                pos = pos + 1
+            ElseIf gap = 3 Then
+                res = res & "    field_" & Hex$(pos) & "(2) As Byte" & vbCrLf
+                pos = pos + 3
+            End If
+        End If
+    Loop
+    NativeDecodeRecordDescriptor = res
+    Exit Function
+bad:
+    On Error Resume Next
+    Close fp
+End Function
+
+Private Function NativeGetWord(ByVal fp As Integer, ByVal rva As Long) As Long
+    'Read a little-endian unsigned WORD at file offset rva (0-based RVA; raw==RVA for
+    'VB6 EXEs, as NativeStringAt relies on).  Binary Get positions are 1-based.
+    Dim w As Integer, v As Long
+    Get #fp, rva + 1, w
+    v = w: If v < 0 Then v = v + 65536
+    NativeGetWord = v
+End Function
+
+Private Function NativeGetByte(ByVal fp As Integer, ByVal rva As Long) As Long
+    Dim b As Byte
+    Get #fp, rva + 1, b
+    NativeGetByte = b
 End Function
 
 Private Function NativeStrLitArgs() As String

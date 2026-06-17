@@ -826,6 +826,7 @@ Public Sub BuildNativeCodeCache()
     Set gNativeCodeCache = New Collection
     Set gNativeDismCache = New Collection
     Set gUsedWin32Const = New Collection            'reset the recognised-constant set for this run
+    Set gUDTDesc = New Collection                   'reset recovered UDT record descriptors (harvested during this decompile pass)
     Dim objDism() As String
     Dim ub As Long
     ub = -1

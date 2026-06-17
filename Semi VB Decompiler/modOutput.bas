@@ -840,6 +840,9 @@ Public Function GetCodeHeaderDecls(ByVal objectName As String) As String
     host = ApiDeclareHost(hostMod)
     If Len(host) > 0 And UCase$(host) = UCase$(objectName) Then
         s = GetApiDeclareBlock(IIf(hostMod, "Public", "Private"))
+        'The recovered UDT Type blocks share the API-declare host (first standard
+        'module) so the Code tab matches the file output.
+        If hostMod Then s = s & modNativeToVB.GetUDTBlock()
     End If
     s = s & GetModuleGlobalDeclBlock(objectName)
     s = s & GetFieldDeclBlock(objectName)
@@ -1177,6 +1180,16 @@ Sub WriteModules(Filename As String, ObjectName As String, index As Integer)
             sConst = modNativeToVB.GetWin32ConstBlock("Public")
             If Len(sConst) > 0 Then Print #F, sConst;
             gWin32ConstEmitted = True
+        End If
+        'User-Defined Types recovered from the VB6 record-layout descriptors that the
+        '__vbaRec* helpers reference.  Emitted once, as Public Type, in the first
+        'standard module (same rationale as the Declare/Const blocks - the EXE does not
+        'record which module owned each Type, and Public there is project-wide).
+        If Not gUDTEmitted Then
+            Dim sUDT As String
+            sUDT = modNativeToVB.GetUDTBlock()
+            If Len(sUDT) > 0 Then Print #F, sUDT;
+            gUDTEmitted = True
         End If
         'Reconstruct this module's Public global variable declarations (synthetic
         'global_X names - module var names are stripped in native compilation).

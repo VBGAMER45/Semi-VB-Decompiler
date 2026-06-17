@@ -682,6 +682,17 @@ Global gHasStandardModule As Boolean
 Global gUsedWin32Const As Collection
 Global gWin32ConstEmitted As Boolean
 
+'User-Defined Types (records) recovered from the VB6 record-layout descriptors that
+'__vbaRecAssign / __vbaRecDestruct / __vbaRec*ToUni reference (the descriptor address
+'is one of the helper's arguments).  The descriptor encodes the struct SIZE and the
+'OFFSET+TYPE of every reference-type field (String/Variant) - field NAMES are stripped,
+'so fields are rendered field_<hexOffset> with their recovered type, numeric gaps as
+'Long/Integer/Byte filler (byte-accurate so field offsets line up).  Keyed by the
+'descriptor VA ("Hxxxxxxxx") for dedup; item = the rendered field-list body.  Emitted
+'ONCE as `Public Type UDT_<va>` in the first standard module (like the Declare block).
+Global gUDTDesc As Collection
+Global gUDTEmitted As Boolean
+
 
 'For Controls
 Public Type typeStandardControlSize

@@ -1285,6 +1285,7 @@ Public Sub GenerateProject(ByVal sPath As String)
         'standard module exists it hosts the block (Public); otherwise a form does.
         gApiDeclEmitted = False
         gWin32ConstEmitted = False
+        gUDTEmitted = False
         gHasStandardModule = False
         For i = 0 To UBound(gObject)
             For g = 0 To UBound(gObjectTypeList)
