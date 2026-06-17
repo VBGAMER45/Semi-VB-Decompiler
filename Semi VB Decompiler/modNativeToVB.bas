@@ -4659,6 +4659,10 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             'arrayPtr, saFlags, nDims, (ub,lb) per dimension].
             Dim rdA() As String, rdN As Long
             NativeArgsSnapshot rdA, rdN
+            'A dynamic array of a user RECORD has an element size (arg index 1) larger
+            'than any primitive; recover a byte-buffer UDT from it (descriptor-less UDTs
+            'have no __vbaRec* descriptor - this is the only size signal for them).
+            If rdN > 1 Then NativeRegisterUDTBySize rdA(1)
             NativeRuntimeCall = NativeRedimStmt(rdA, rdN, (InStr(nm, "Preserve") > 0))
             Exit Function
         Case InStr(nm, "__vbaEraseKeepData") > 0
@@ -7828,20 +7832,49 @@ Public Sub NativeRegisterUDT(ByVal va As Long)
     body = NativeDecodeRecordDescriptor(va)
     If Len(body) = 0 Then Exit Sub
     typeName = "UDT_" & Right$("00000000" & Hex$(va), 8)
-    body = "Public Type " & typeName & vbCrLf & body & "End Type" & vbCrLf & vbCrLf
+    'Stored WITHOUT the scope keyword - GetUDTBlock prepends Public (module) or
+    'Private (form) at emit time.
+    body = "Type " & typeName & vbCrLf & body & "End Type" & vbCrLf & vbCrLf
     On Error Resume Next
     gUDTDesc.Add body, key
     On Error GoTo 0
 End Sub
 
-Public Function GetUDTBlock() As String
-    'Concatenate every recovered UDT Type block (insertion order).  Emitted once in
-    'the first standard module (the EXE does not record which module owned each Type).
+Public Sub NativeRegisterUDTBySize(ByVal sizeStr As String)
+    'Fallback for a DESCRIPTOR-LESS UDT (all fixed-string/numeric fields - nothing for
+    'the runtime to deep-copy, so no __vbaRec* descriptor): recover only the SIZE (e.g.
+    'a dynamic UDT array's element size from __vbaRedim) and emit a byte-buffer Type
+    '`bStruc(1 To N) As Byte` - the commercial decompiler's ceiling (no field types/names
+    'without a descriptor).  Gated to UDT-plausible sizes (>16 excludes every primitive
+    'incl. Variant) and keyed by size for dedup.
+    Dim n As Long, key As String, typeName As String, body As String, tmp As String
+    If Not IsNumeric(Trim$(sizeStr)) Then Exit Sub
+    n = CLng(Trim$(sizeStr))
+    If n <= 16 Or n > 65535 Then Exit Sub
+    If gUDTDesc Is Nothing Then Set gUDTDesc = New Collection
+    key = "S" & n
+    On Error Resume Next
+    tmp = "": tmp = gUDTDesc.Item(key)
+    On Error GoTo 0
+    If Len(tmp) > 0 Then Exit Sub
+    typeName = "UDT_" & n & "Bytes"
+    body = "Type " & typeName & vbCrLf & _
+           "    bStruc(1 To " & n & ") As Byte" & vbCrLf & _
+           "End Type" & vbCrLf & vbCrLf
+    On Error Resume Next
+    gUDTDesc.Add body, key
+    On Error GoTo 0
+End Sub
+
+Public Function GetUDTBlock(Optional ByVal scope As String = "Public") As String
+    'Concatenate every recovered UDT Type block (insertion order), prefixing each with
+    'the requested scope - Public in a standard module, Private in a form (forms cannot
+    'host Public Types).  Emitted once (the EXE does not record the owning module).
     Dim s As String, v As Variant
     On Error Resume Next
     If gUDTDesc Is Nothing Then Exit Function
     For Each v In gUDTDesc
-        s = s & CStr(v)
+        s = s & scope & " " & CStr(v)
     Next
     GetUDTBlock = s
 End Function

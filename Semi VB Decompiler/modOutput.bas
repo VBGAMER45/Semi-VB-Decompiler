@@ -841,8 +841,9 @@ Public Function GetCodeHeaderDecls(ByVal objectName As String) As String
     If Len(host) > 0 And UCase$(host) = UCase$(objectName) Then
         s = GetApiDeclareBlock(IIf(hostMod, "Public", "Private"))
         'The recovered UDT Type blocks share the API-declare host (first standard
-        'module) so the Code tab matches the file output.
-        If hostMod Then s = s & modNativeToVB.GetUDTBlock()
+        'module, else the first form) so the Code tab matches the file output;
+        'Public in a module, Private in a form.
+        s = s & modNativeToVB.GetUDTBlock(IIf(hostMod, "Public", "Private"))
     End If
     s = s & GetModuleGlobalDeclBlock(objectName)
     s = s & GetFieldDeclBlock(objectName)
@@ -1091,6 +1092,14 @@ On Error GoTo nofile:
                 If Len(sApiDecl) > 0 Then Print #F, sApiDecl;
                 gApiDeclEmitted = True
             End If
+            'Recovered UDT Type blocks: when there is no standard module to host them,
+            'emit once as Private Type in the first form (same home as the Declares).
+            If Not gHasStandardModule And Not gUDTEmitted Then
+                Dim sUDTf As String
+                sUDTf = modNativeToVB.GetUDTBlock("Private")
+                If Len(sUDTf) > 0 Then Print #F, sUDTf;
+                gUDTEmitted = True
+            End If
             'Reconstruct this object's module-level Public variable declarations
             '(from the typeinfo VarDesc), scoped to this form by name.
             Dim sVarDecl As String
@@ -1187,7 +1196,7 @@ Sub WriteModules(Filename As String, ObjectName As String, index As Integer)
         'record which module owned each Type, and Public there is project-wide).
         If Not gUDTEmitted Then
             Dim sUDT As String
-            sUDT = modNativeToVB.GetUDTBlock()
+            sUDT = modNativeToVB.GetUDTBlock("Public")
             If Len(sUDT) > 0 Then Print #F, sUDT;
             gUDTEmitted = True
         End If
