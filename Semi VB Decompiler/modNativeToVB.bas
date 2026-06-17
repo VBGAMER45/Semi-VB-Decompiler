@@ -635,6 +635,7 @@ nextInst:
     NativeCloseIfs output, &H7FFFFFFF
     output = output & "End " & NVProcEndWord & vbCrLf
     output = NativeStripOrphanLabels(NativeSubstituteConstants(NativeSubstituteArgNames(NativeStripVarBuild(output))))
+    output = NativeMergeElseIf(output)
     DecompileNativeProcToVB = NativeInsertLocalDims(output)
     Exit Function
 fail:
@@ -668,6 +669,67 @@ Private Function NativeStripOrphanLabels(ByVal src As String) As String
 skipLine:
     Next
     NativeStripOrphanLabels = out
+End Function
+
+Private Function NativeMergeElseIf(ByVal src As String) As String
+    'Merge a chain of sibling If-blocks into If / ElseIf.  When an `If <c> Then ... End If`
+    'block's body ends in an UNCONDITIONAL transfer (GoTo / Exit Sub|Function|Property|Do|
+    'For / End), the IMMEDIATELY-following sibling `If` at the same indent is reachable
+    'ONLY when <c> was false - i.e. it is logically the Else.  Rewriting `End If` + the
+    'next `If <c2> Then` to `ElseIf <c2> Then` is therefore SEMANTICS-PRESERVING (the
+    'control flow is identical), and If/End-If counts stay balanced (both drop by 1).
+    'STRICTLY gated so it never changes behaviour:
+    '  - the End If trims to exactly "End If",
+    '  - the very next line (no label / blank / statement between) is a BLOCK `If <c> Then`
+    '    (ends in "Then") at the SAME indent,
+    '  - the line before the End If is at indent+4 and is an unconditional transfer
+    '    (so the block cannot fall through to the next If).
+    'Anything off leaves the blocks exactly as they were.
+    On Error GoTo done
+    Dim lines() As String, i As Long, n As Long, ind As Long
+    lines = Split(src, vbCrLf)
+    n = UBound(lines)
+    If n < 2 Then Exit Function
+    Dim skip() As Boolean
+    ReDim skip(n)
+    For i = 1 To n - 1
+        If Trim$(lines(i)) = "End If" Then
+            ind = NativeLineIndent(lines(i))
+            Dim nxtT As String
+            nxtT = Trim$(lines(i + 1))
+            If NativeLineIndent(lines(i + 1)) = ind _
+               And Left$(nxtT, 3) = "If " And Right$(nxtT, 5) = " Then" _
+               And NativeLineIndent(lines(i - 1)) = ind + 4 _
+               And NativeIsUncondTransfer(Trim$(lines(i - 1))) Then
+                'Drop this End If; rewrite the following If as ElseIf (in place, so a
+                'longer chain keeps collapsing on later iterations of this same pass).
+                lines(i + 1) = Space$(ind) & "Else" & nxtT
+                skip(i) = True
+            End If
+        End If
+    Next i
+    'Rejoin, dropping the merged-away End If lines (Join preserves the exact format).
+    Dim res() As String, rc As Long
+    ReDim res(n): rc = 0
+    For i = 0 To n
+        If Not skip(i) Then res(rc) = lines(i): rc = rc + 1
+    Next i
+    ReDim Preserve res(rc - 1)
+    NativeMergeElseIf = Join(res, vbCrLf)
+    Exit Function
+done:
+    NativeMergeElseIf = src
+End Function
+
+Private Function NativeLineIndent(ByVal s As String) As Long
+    NativeLineIndent = Len(s) - Len(LTrim$(s))
+End Function
+
+Private Function NativeIsUncondTransfer(ByVal t As String) As Boolean
+    'An unconditional control transfer that prevents falling through to the next line.
+    NativeIsUncondTransfer = (Left$(t, 5) = "GoTo ") _
+        Or t = "Exit Sub" Or t = "Exit Function" Or t = "Exit Property" _
+        Or t = "Exit Do" Or t = "Exit For" Or t = "End"
 End Function
 
 Private Function NativeInsertLocalDims(ByVal body As String) As String
