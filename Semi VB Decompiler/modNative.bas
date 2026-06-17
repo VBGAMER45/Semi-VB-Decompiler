@@ -582,6 +582,21 @@ Private Function NativeVarTypeName(ByVal tc As Long, ByVal byteSize As Long) As 
     End Select
 End Function
 
+Private Function NativeArrayHasFuncDesc(ByVal F As Integer, ByVal base As Long) As Boolean
+    'True when `base` points to a method-FuncDesc pointer array - i.e. one of its first
+    'few slots holds a valid FuncDesc.  Tolerates LEADING NULL slots (the array is
+    'parallel to the name array, which begins with the object's private methods that
+    'have no public FuncDesc), so element[0] being 0 is normal, not a miss.
+    If base < OptHeader.ImageBase Then Exit Function
+    Dim k As Long, elem As Long
+    For k = 0 To 15
+        elem = NativeFileDword(F, base + k * 4)
+        If elem <> 0 And elem <> &HFFFFFFFF Then
+            If NativeIsFuncDesc(F, elem) Then NativeArrayHasFuncDesc = True: Exit Function
+        End If
+    Next k
+End Function
+
 Public Sub LinkNativePublicParams(ByVal F As Integer)
     On Error GoTo done
     Dim oi As Long, aoi As Long, hdr As Long, owner As String
@@ -669,26 +684,45 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
             If nMethods = 0 Then GoTo nextO
         End If
 
-        'Locate the FuncDesc pointer array.
+        'Locate the FuncDesc pointer array.  hdr+0x18 holds the array BASE pointer.
+        'The array is parallel to the method-name array, so it can start with LEADING
+        'NULL slots for the object's PRIVATE methods (e.g. Class_Initialize/Terminate)
+        'that have no public FuncDesc - element[0] is then 0, not a FuncDesc.  Treat
+        'a18 as the base when ANY of its first slots holds a real FuncDesc (skipping the
+        'leading nulls); only if a18 fails entirely, scan the other header slots for a
+        'pointer to such an array (double-deref, matching the a18 test).
         a18 = NativeFileDword(F, hdr + &H18)
-        If NativeIsFuncDesc(F, NativeFileDword(F, a18)) Then
+        If NativeArrayHasFuncDesc(F, a18) Then
             arr = a18
         Else
             arr = 0
-            For j = &H18 To &H140 Step 4
-                If NativeIsFuncDesc(F, NativeFileDword(F, hdr + j)) Then arr = hdr + j: Exit For
+            For j = &H1C To &H140 Step 4
+                If NativeArrayHasFuncDesc(F, NativeFileDword(F, hdr + j)) Then arr = NativeFileDword(F, hdr + j): Exit For
             Next j
         End If
         If arr = 0 Then GoTo nextO
 
-        If isClass Then maxJ = nMethods - 1 Else maxJ = 255
+        'A class array spans pc slots (parallel to the name array): leading nulls for
+        'private methods, then the public-method FuncDescs, then a terminator.  A form
+        'array is sparse (gaps for private event-handler slots), read to a fixed bound.
+        Dim started As Boolean
+        started = False
+        If isClass Then maxJ = pc - 1 Else maxJ = 255
         For j = 0 To maxJ
             p = NativeFileDword(F, arr + j * 4)
             If p = 0 Then
-                If isClass Then Exit For   'class array is contiguous - a 0 ends it
+                If isClass Then
+                    If started Then Exit For Else GoTo contJ   'leading null phantom -> skip; trailing -> stop
+                End If
                 GoTo contJ                 'form array is sparse - skip the gap
             End If
-            If Not NativeIsFuncDesc(F, p) Then Exit For   'non-FuncDesc -> end of array
+            If Not NativeIsFuncDesc(F, p) Then
+                If isClass Then
+                    If started Then Exit For Else GoTo contJ   'leading private (non-FuncDesc) -> skip
+                End If
+                Exit For                   'non-FuncDesc -> end of (form) array
+            End If
+            started = True
             f00 = NativeFileDword(F, p)
             voff = (f00 \ &H10000) And &HFFFC             '&HFFFC: form offsets are 0x6F8+
             b0 = f00 And &HFF
