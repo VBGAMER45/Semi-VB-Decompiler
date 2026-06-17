@@ -3498,8 +3498,12 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
         Case InStr(nm, "__vbaI2I4") > 0, InStr(nm, "__vbaUI1I2") > 0, _
              InStr(nm, "__vbaUI1I4") > 0, InStr(nm, "__vbaI4UI1") > 0, _
              InStr(nm, "__vbaI2UI1") > 0
-            'Implicit integer widening/narrowing.  Register-based (arg and result in
-            'eax), so the value already sits in NVReg(0) - just suppress the Call.
+            'Implicit integer widening/narrowing.  Usually the value already sits in
+            'eax (NVReg(0)) and we just suppress the Call.  But VB6 also passes the
+            'value in ECX (`mov ecx,1; call __vbaI2I4`, e.g. setting a small Integer
+            'field); there eax is untracked, so fold the clean ecx value into eax -
+            'else the consuming store leaks a raw `field = eax`.
+            If Len(NVReg(0)) = 0 And (NativeIsCleanNamedVal(NVReg(1)) Or NativeIsNumLit(NVReg(1))) Then NVReg(0) = NVReg(1)
             'Do NOT touch the push stack: it belongs to the FOLLOWING consumer call
             '(clearing it dropped EOF/Close/UBound arguments).
             NativeRuntimeCall = "": Exit Function
