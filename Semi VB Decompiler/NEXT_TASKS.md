@@ -8,6 +8,23 @@ benchmarked against the Dungeon test program. Written to survive a context reset
 > constants, more loop coverage, SEH-tail return rename, recompile-ability triage).
 > This file is the detailed history (what's done, what's unrecoverable).
 
+## UDT recovery from __vbaRec* record descriptors (2026-06-17) — DONE
+
+`__vbaRecAssign`/`RecDestruct`/`Rec*ToUni` pass the address of a VB6 record-layout
+descriptor (emitted for any UDT with reference-type fields so the runtime can deep-
+copy/free embedded BSTRs). We now harvest those addresses and reconstruct a typed
+`Public Type UDT_<va>` block (size + per-field offset/type; field NAMES are stripped,
+so `field_<hexOffset>`, numeric gaps filled Long/Integer/Byte for an exact layout).
+Descriptor format: +2 WORD size, +6 WORD refFieldCount, +11 BYTE kind (0x2C=simple
+table), +12.. count*{WORD off, WORD type}(1=String). Emitted once in the first std
+module (like the Declare block); whole-UDT locals Dim'd `As UDT_<va>`. Dungeon:
+UDT_00405710==MapType, UDT_00405D4C==MessageType — **beats commercial** (it recovers
+neither; punts to `bStruc(N) As Byte`). Commits 216a075 + 3dafcae. Detail + the
+descriptor format live in memory `udt-record-descriptors.md`. **DEFERRED**: render
+`RecAssign` as `Message(i) = EmptyMessage` / derefs as `var.field_8` — blocked on UDT
+element-address resolution (dst renders as bare index `(i-1)`, not the lvalue), the
+regression-prone deref path. Safe next step: drop `RecDestruct` cleanup calls.
+
 ## Test setup (how to build & verify)
 
 - **Source under test:** `C:\Users\Owner\Desktop\forummods\rpgwo\DungeonFateSource\Dungeon.exe`
