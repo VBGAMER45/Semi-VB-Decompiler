@@ -3288,7 +3288,15 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 'otherwise be mis-read as a control property call.
                 Dim fmeth As String
                 If ocb >= 0 And ocb <= 7 Then
-                    If NVRegIsFormVt(ocb) Then
+                    'Require the receiver to be the GENUINE Me: the NVRegIsMe heuristic also
+                    'tags an abs-global form instance (`mov esi,[0x423108]` = frmMainMenu),
+                    'so a method ALSO callable on another form (Show) would mis-render as
+                    '`Me.Show` for `frmMainMenu.Show vbModal,Me` (wrong receiver + dropped
+                    'args).  The `this` is the topmost push; only fire when it is Me (arg_8),
+                    'otherwise fall through to the UnkVCall path (honest, correct receiver).
+                    Dim fmThis As String
+                    If NVPushTop >= 1 Then fmThis = NVPushImm(NVPushTop - 1)
+                    If NVRegIsFormVt(ocb) And (fmThis = "arg_8" Or fmThis = "Me") Then
                         fmeth = NativeFormMethodByOffset(disp)
                         If Len(fmeth) > 0 Then
                             'An arg-taking _Form method (PopupMenu <menu>) leads with the
@@ -6723,6 +6731,7 @@ Private Function NativeFormMethodByOffset(ByVal disp As Long) As String
     'method (PopupMenu <menu>, see NativeFormMethodHasArg) renders `<method> <arg>`.
     'Extend as more offsets are confirmed by tracing.
     Select Case disp
+        Case &H2B0: NativeFormMethodByOffset = "Show"
         Case &H2B4: NativeFormMethodByOffset = "Hide"
         Case &H2BC: NativeFormMethodByOffset = "PopupMenu"
     End Select
