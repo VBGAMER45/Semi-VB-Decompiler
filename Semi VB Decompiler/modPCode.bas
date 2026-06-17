@@ -3153,7 +3153,7 @@ Public Function GetProperty(ByVal strGuid As String, ByVal lCode As Long) As Str
                        If .SelectFunction(g) Then
                           If .FunctionVTOffset = lCode Then
                               fnm = .FunctionName
-                              If fnm = "_Default" Or fnm = "Default" Or fnm = "_Value" Or fnm = "Value" Then
+                              If fnm = "_Default" Or fnm = "Default" Or fnm = "_Value" Then
                                   If Len(defProp) = 0 Then defProp = GetProperty & fnm & " (" & .InvKind2String(.FunctionInvKind, True) & ")"
                               Else
                                   realProp = GetProperty & fnm & " (" & .InvKind2String(.FunctionInvKind, True) & ")"
