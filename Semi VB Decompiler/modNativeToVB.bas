@@ -3916,9 +3916,34 @@ Private Function NativeSolveControlBase(col As Collection) As Long
     Const FORM_CONTROL_BASE As Long = &H2F8
     If NativeBaseHits(col, FORM_CONTROL_BASE) > 0 Then
         NativeSolveControlBase = FORM_CONTROL_BASE
+    ElseIf NativeOwnerIsStdForm(NVForm) Then
+        'A standard FORM always lays its control accessors at 0x2F8 (verified across
+        'binaries).  If 0x2F8 maps NOTHING in this proc, the proc only touches controls
+        'missing from our list (e.g. an OCX like CommonDialog1 whose tControl is not in
+        'the parsed control array, ControlCount undercounts it) - the per-proc solver
+        'would then fabricate a base that maps the unknown offset onto a REAL control,
+        'mis-naming it (CommonDialog1 -> cmdSkillRaise).  Keep 0x2F8 so the unknown
+        'control stays unresolved rather than wrong.  Per-proc solving is reserved for
+        'genuinely non-standard layouts (UserControls), handled below.
+        NativeSolveControlBase = FORM_CONTROL_BASE
     Else
         NativeSolveControlBase = NativeSolveControlBasePerProc(col)
     End If
+End Function
+
+Private Function NativeOwnerIsStdForm(ByVal owner As String) As Boolean
+    'True when `owner` is a standard VB Form (not a class / UserControl / module),
+    'so its control vtable base is the fixed 0x2F8.  Object-type values match the
+    'form-detection set used when the control array is parsed (frmMain.OpenVBExe).
+    Dim i As Long, ot As Long
+    On Error Resume Next
+    For i = 0 To UBound(gObjectNameArray)
+        If gObjectNameArray(i) = owner Then
+            ot = gObject(i).ObjectType
+            NativeOwnerIsStdForm = (ot = 98435 Or ot = 17926147 Or ot = 98467 Or ot = 98499)
+            Exit Function
+        End If
+    Next
 End Function
 
 Private Function NativeBaseHits(col As Collection, ByVal base As Long) As Long
