@@ -36,48 +36,50 @@ benchmarked against the Dungeon test program. Written to survive a context reset
 - Commercial decompiler hits the same walls. Form/control names, class method names,
   Declare names, and event-handler names ARE recoverable (and already are).
 
-## Control arrays — `lblSkillName(i)` (Update_Skills, 2026-06-17) — TODO, decoded
+## Control arrays — `lblSkillName(i)` / `picCarry(i)` — DONE 2026-06-17
 
-`Update_Skills` (40E730) source is control arrays:
-`lblSkillName(i) = " " & SkillDef(sIndex).Name` / `lblSkillName(i).ToolTipText = ...`
-/ `If i > lblSkillName.Count`.  We render the array indexing + element property puts
-as unresolved vtable calls.  Decoded the control-array-object vtable offsets (Label
-array, verified in this proc):
-- **0x40** = the array Item / element accessor: `<arrayCtrl>.UnkVCall_0040h(i)` IS
-  `<arrayCtrl>(i)`.  The form accessor (vtable 0x2F8+idx*4) returns the ARRAY object;
-  0x40 on THAT object returns element i.
-- **0x54** = the element's DEFAULT property put (Label Caption): `... = value`.
-- **0x19C** = the element's ToolTipText put.
-- `lblSkillName.Count` is also an unresolved member on the array object.
-To reconstruct `lblSkillName(i).Caption = ...`: (1) store an is-control-array flag
-per control (the parse already computes `bCtlArray` via NormalizeCtlArrayGuid in
-frmMain.OpenVBExe - just persist it into gControlNameArray); (2) when a form accessor
-fetches an array control, tag the register as the array; (3) on `.UnkVCall_0040h(idx)`
-of an array, produce `<ctrl>(idx)` tagged WITH THE ELEMENT'S CONTROL GUID - then the
-existing NativeControlProp path resolves the following 0x54/0x19C puts to
-`.Caption`/`.ToolTipText` automatically.
+`Update_Skills` (40E730) and `Update_Carry` (40F2F0) reconstruct their control-array
+element accesses now (`lblSkillName(i).Caption`, `lblSkillName(i).ToolTipText`,
+`picCarry(i).Cls`, `picCarry(i).hDC`, `picCarry(i).Refresh`) - **beating commercial**,
+which leaves these as `UnkVCall`/`.Default`.  Dungeon UnkVCall 62 -> 42; 18 element
+`Set var_X = Form.ctrl(idx)` statements recovered.  No regressions (proc counts /
+`<cond>` / `<arg>` / GoTo unchanged, only frmMain.frm changed, all sentinels identical).
 
-ATTEMPTED 2026-06-17 (THREE approaches) and REVERTED each time - live-state
-extraction is fundamentally unreliable for this idiom.  CONFIRMED WORKING: the
-is-array flag (odd-Data1 event-IID: lblSkillName/lblSkillValue/cmdSkillRaise/picCarry
-all detected, lblPlayerName/picLife correctly not) and GUID-tagging the element local
-so `.Caption`/`.ToolTipText` resolve via NativeControlProp.  WHAT FAILED - reliably
-getting, per Item call, (which array control, the index, the retbuf local):
-  1. push stack: the index's `__vbaI4` coercion call sits between the retbuf push and
-     index push and RESETS NVPushTop, so only 2 of 3 args survive and you can't tell
-     index from retbuf -> empty index -> nested garbage `lblSkillValue(lblSkillName(...))`.
-  2. NVReg(0)=index + NVLastLea=retbuf: index was right for SOME calls (`lblSkillName(var_24)`)
-     but eax isn't the index for the FIRST access (it's the array), and NVLastLea points
-     at a REUSED retbuf local that a prior access already tagged -> wrong control name
-     (`lblSkillName(i).Caption` where source is `lblSkillValue(i)`).
-The REAL fix is a PRE-PASS that, for each `call [vt+0x40]`, scans the instruction
-window to deterministically recover (a) the receiver array control - by back-tracing
-the vtable register to its form-accessor `call [vt+0x2F8+idx*4]` and checking is-array;
-(b) the index source (`mov reg,[ebp-Y]` feeding the `__vbaI4`); (c) the retbuf local
-(the `lea reg,[ebp-X]; push reg` out-param) - all from the disasm, NOT live NVPushImm/
-NVReg/NVLastLea.  Record callVA -> (elemExpr, retbufDisp, guid); at render, tag the
-retbuf local.  Gate strictly on is-array + offset 0x40.  Substantial; do as a
-dedicated effort with this Update_Skills case as the test.
+Decoded control-array-object vtable offsets (verified): **0x40** = the array Item /
+element accessor (`<arrayCtrl>.UnkVCall_0040h(i)` IS `<arrayCtrl>(i)`); the form
+accessor (vtable 0x2F8+idx*4) returns the ARRAY object, 0x40 on it returns element i.
+**0x54** = element DEFAULT property put (Label Caption); **0x19C** = ToolTipText put.
+`lblSkillName.Count` (0x4C on the array object) is still an unresolved member.
+
+**How it works (the deterministic pre-pass the prior live-state attempts needed):**
+1. **is-array flag** persisted into `gControlNameArray.bIsArray` (set in
+   frmMain.ProccessControls from `bCtlArray`).  But the robust gate is by NAME:
+   `NativeNameIsControlArray` = the (form,name) appears MORE THAN ONCE (one entry per
+   defined element - e.g. 8 `picCarry` entries) OR any entry has the IID flag.  This
+   matters because each element has its own form-accessor offset and only SOME carry
+   the array-member IID+1 (the first element's offset 0x314 did not, 0x310 did).
+2. **`NativeDetectControlArrays(col)`** pre-pass: for each `call [reg+0x40]`, recover
+   ENTIRELY from the disasm (not live NVPushImm/NVReg): (a) the array control - the
+   nearest preceding indirect `call [reg+offN]` form accessor (the __vbaObjSet/__vbaI4
+   between them are `call [abs]`, skipped) whose offset is an is-array control; (b) the
+   element retbuf local - the `lea reg,[ebp-X]` feeding the bottom-of-3 push; (c) the
+   index - `NativeArrIndexTok` finds the `mov ecx,SRC` feeding the __vbaI4 coerce, where
+   SRC is `[ebp-Y]` (-> var_Y) or a register mirroring a spill local
+   (`NativeRegSpillLocal`, a wide back-scan: the loop counter is spilled at the loop top,
+   often >16 instrs back).  Records `K&callVA -> (elemExpr, guid, retbufDisp)`.  Also
+   marks the redundant array-obj `__vbaObjSet` for suppression (NVSuppressObjSet).
+3. **Render**: the 0x40 call emits `Set var_<rb> = Form.ctrl(idx)`, sets
+   `NVLocal(rb)=var_<rb>` + `NVLocalGuid(rb)=arrayGuid`.  The following
+   `mov reg,[ebp-rb]; mov vt,[reg]; call [vt+0x54/0x19C]` then resolves to
+   `var_<rb>.Caption` / `.ToolTipText` via the existing NativeControlProp path.
+4. **Cached-vtable threading** (`NVLocalVtName`/`NVLocalVtGuid`): the FIRST Caption put
+   caches its vtable in a local (string helpers clobber the register in between); the
+   0x89 store records the slot's vtable identity and the 0x8B reload restores it, so the
+   deferred put still resolves.
+
+Still unresolved (separate, pre-existing gaps): the first ToolTipText VALUE renders
+`<value>` (a SIB array-element source push, not control-array-specific); `.Count`
+(0x4C on the array object); the `If i > lblSkillName.Count` condition.
 
 ## Dungeon Form_KeyDown / Select-Case-on-Integer (2026-06-17) — partial
 

@@ -613,6 +613,9 @@ Private Type typeControlName
     strGuid As String
     bControlImage As Byte
     lControlIndex As Long   'tControl.index - used to map P-Code VCallAd offsets to controls
+    bIsArray As Byte        'True when this control is a control ARRAY (its event IID was the
+                            'single-control IID + 1; the native code accesses elements via the
+                            'array object's Item accessor, vtable offset 0x40)
 End Type
 Global gControlNameArray() As typeControlName
 'Maps "<form>.<control>" -> the control's external class (e.g. "TabDlg.SSTab"), so a

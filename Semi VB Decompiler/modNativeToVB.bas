@@ -118,6 +118,20 @@ Private NVWhileLoop As Collection  '"W"&backedgeVA -> "1" - emit `Loop` here (th
 Private NVElemIdx As Collection    '"E"&accessVA -> recovered logical array index expr (e.g. arg_8) for a SAFEARRAY element access at that VA; injected by the SIB read/store renderers
 Private NVCurVa As Long            'VA of the instruction currently being rendered (so the SIB renderers can look up NVElemIdx)
 Private NVLateDispid As Collection '"L"&callVA -> comma list of candidate DISPIDs pushed to a __vbaLateIdCall (resolve to the OCX member name at render)
+'--- Control-array element accessor reconstruction (lblSkillName(i).Caption) ---
+'A control array's element accessor is `call [arrayVt + 0x40]` (the array object's
+'Item property).  A deterministic pre-pass (NativeDetectControlArrays) recovers, per
+'such call VA, the array control + index + the element retbuf local, so the call
+'renders `Set var_X = Form.ctrl(idx)` and the following property put through var_X
+'resolves (.Caption / .ToolTipText) via the normal control-property path.
+Private NVCtlArrElem As Collection   '"K"&callVA -> the element expression (e.g. "frmMain.lblSkillName(var_20)")
+Private NVCtlArrGuid As Collection   '"K"&callVA -> the array control's GUID (for element property resolution)
+Private NVCtlArrRetbuf As Collection '"K"&callVA -> the element retbuf local displacement (negative), as a string
+'A control object's vtable cached in a local then reloaded (`mov [ebp-X],vt; ...; mov
+'reg,[ebp-X]; call [reg+off]`) - thread the vtable's control identity through the slot
+'so the deferred property put still resolves (the first Caption put caches its vtable).
+Private NVLocalVtName As Collection  '"L"&disp -> control NAME whose vtable that slot holds
+Private NVLocalVtGuid As Collection  '"L"&disp -> control GUID whose vtable that slot holds
 Private NVSuppressObjSet As Collection '"O"&objSetVA -> "1" - a __vbaObjSet whose only purpose is to pass the control into the very next late call; drop the redundant `Set temp = control`
 Private NVArgTok() As String       'per-proc: generic tokens (arg_<offset>) to replace with...
 Private NVArgNm() As String        '...their recovered parameter names, at proc finalisation
@@ -240,6 +254,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVElemIdx = New Collection
     Set NVLateDispid = New Collection
     Set NVSuppressObjSet = New Collection
+    Set NVCtlArrElem = New Collection
+    Set NVCtlArrGuid = New Collection
+    Set NVCtlArrRetbuf = New Collection
+    Set NVLocalVtName = New Collection
+    Set NVLocalVtGuid = New Collection
     NVCurVa = 0
     NVArgN = 0
     ReDim NVSelStkBase(31): NVSelTop = 0
@@ -358,6 +377,12 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'Decode late-bound dispatch calls (__vbaLateIdCall): collect each call's DISPID
     'so it can resolve to obj.Member via the control's OCX typelib at render time.
     NativeDetectLateCalls col
+
+    'Reconstruct control-array element accesses (lblSkillName(i)): for each element
+    'accessor `call [arrayVt + 0x40]` whose receiver back-traces to an is-array form
+    'control, recover the index + the element retbuf local so it renders as
+    'Set var_X = Form.ctrl(idx) and the following .Caption/.ToolTipText puts resolve.
+    NativeDetectControlArrays col
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -1680,6 +1705,265 @@ nextk:
 done:
 End Sub
 
+Private Sub NativeDetectControlArrays(col As Collection)
+    'VB6 control-array element access `ctrl(i)` compiles to the array object's Item
+    'accessor at vtable offset 0x40:
+    '    call [meVt + 0xNNN]          ; form accessor -> the ARRAY control object (eax)
+    '    push eax / lea ecx,[arrLoc] / push ecx / call __vbaObjSet  ; store array obj
+    '    mov esi,eax / mov edi,[esi]                                ; esi=array, edi=arrVt
+    '    lea  REG_RB, [ebp-DISP_RB]   ; element retbuf (out-param)
+    '    push REG_RB
+    '    mov  ecx, [ebp-DISP_IDX]     ; the index
+    '    call [IAT]                   ; __vbaI4 (coerce index)
+    '    push eax                     ; index
+    '    push esi                     ; this (array obj)
+    '    call [edi + 0x40]            ; element accessor -> element returned in [ebp-DISP_RB]
+    'We recover (array control name+GUID, index local, element retbuf local) ENTIRELY
+    'from the disassembly - not from the live push/register state, which the nested
+    '__vbaI4 / __vbaObjSet calls corrupt - and record it by the 0x40 call's VA.  At
+    'render the call becomes `Set var_<rb> = Form.ctrl(var_<idx>)` (var_<rb> tagged with
+    'the array's control GUID), so the following `mov reg,[ebp-DISP_RB]; mov vt,[reg];
+    'call [vt+0x54/0x19C]` resolves to var_<rb>.Caption / .ToolTipText via NativeControlProp.
+    'Gated strictly (is-array control + offset 0x40 + a fully recovered index & retbuf);
+    'a miss leaves the raw UnkVCall form rather than risk a wrong control name.
+    On Error GoTo done
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    If n < 4 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+
+    Dim baseReg As Long, disp As Long
+    For k = 3 To n - 1
+        If (arr(k).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nextk
+        If Not NativeIsIndirectMemCall(arr(k), baseReg, disp) Then GoTo nextk
+        If disp <> &H40 Then GoTo nextk          'the element Item accessor offset
+
+        'Collect the 3 stack args scanning back: pushReg(0)=this (closest to the call),
+        '(1)=index, (2)=retbuf (pushed first / bottom of stack).
+        Dim pushIdx(2) As Long, pushReg(2) As Long, pc As Long, j As Long, lo As Long
+        pc = 0
+        lo = k - 16: If lo < 0 Then lo = 0
+        Dim preg As Long
+        For j = k - 1 To lo Step -1
+            If NativePushReg(arr(j), preg) Then
+                If pc <= 2 Then pushReg(pc) = preg: pushIdx(pc) = j
+                pc = pc + 1
+                If pc >= 3 Then Exit For
+            End If
+        Next j
+        If pc < 3 Then GoTo nextk
+
+        'Retbuf local: the lea that set the bottom-push register.
+        Dim rbDisp As Long, rbReg As Long, found As Boolean, ldReg As Long, ldDisp As Long
+        rbReg = pushReg(2): found = False
+        For j = pushIdx(2) - 1 To pushIdx(2) - 4 Step -1
+            If j < 0 Then Exit For
+            If NativeLeaLocal(arr(j), ldReg, ldDisp) Then
+                If ldReg = rbReg And ldDisp < 0 Then rbDisp = ldDisp: found = True: Exit For
+            End If
+            If NativeInstDestReg(arr(j)) = rbReg Then Exit For   'register reused for something else
+        Next j
+        If Not found Then GoTo nextk
+
+        'Index token: the local feeding the index coerce (__vbaI4).  The coerce input
+        'is loaded into ecx as `mov ecx,[ebp-Y]` (-> var_Y) or `mov ecx,REG` where REG
+        'is the loop counter mirroring a spill local (-> that var_Y).
+        Dim idxTok As String
+        idxTok = NativeArrIndexTok(arr, k, lo)
+        If Len(idxTok) = 0 Then GoTo nextk
+
+        'Array control: the nearest preceding indirect form-control accessor
+        '`call [reg+offN]` (the __vbaObjSet / __vbaI4 calls are `call [abs]`, skipped).
+        'It must resolve to a control that is a control ARRAY.
+        Dim accDisp As Long, accReg As Long, ctlName As String, ctlGuid As String, gotArr As Boolean, accJ As Long
+        gotArr = False: accJ = -1
+        For j = k - 1 To lo Step -1
+            If (arr(j).cmdType And C_TYPEMASK) = C_CAL Then
+                If NativeIsIndirectMemCall(arr(j), accReg, accDisp) Then
+                    If NVBase >= 0 And accDisp >= NVBase Then
+                        ctlName = NativeControlByOffset(accDisp)
+                        If Len(ctlName) > 0 And NativeControlIsArrayByOffset(accDisp) Then
+                            ctlGuid = NativeGuidByOffset(accDisp): gotArr = True: accJ = j
+                        End If
+                    End If
+                    Exit For        'nearest indirect-reg call is the form accessor; stop either way
+                End If
+            End If
+        Next j
+        If Not gotArr Then GoTo nextk
+        If Len(ctlGuid) = 0 Then GoTo nextk
+
+        'Record the reconstruction for the render pass.
+        Dim elemExpr As String
+        elemExpr = NVForm & "." & ctlName & "(" & idxTok & ")"
+        NativeColPut NVCtlArrElem, "K" & arr(k).va, elemExpr
+        NativeColPut NVCtlArrGuid, "K" & arr(k).va, ctlGuid
+        NativeColPut NVCtlArrRetbuf, "K" & arr(k).va, CStr(rbDisp)
+
+        'Drop the redundant `Set <arrTemp> = Form.ctrl` that stores the array object:
+        'the __vbaObjSet just after the form accessor exists only to feed this element
+        'call (we reconstruct the element directly).  Mark it for the ObjSet handler.
+        Dim jf As Long, fhi As Long
+        fhi = accJ + 5: If fhi > k - 1 Then fhi = k - 1
+        For jf = accJ + 1 To fhi
+            If (arr(jf).cmdType And C_TYPEMASK) = C_CAL Then
+                If InStr(NativeApiName(arr(jf)), "__vbaObjSet") > 0 Then
+                    NativeColPut NVSuppressObjSet, "O" & arr(jf).va, "1": Exit For
+                End If
+            End If
+        Next jf
+nextk:
+    Next k
+done:
+End Sub
+
+Private Function NativeIsIndirectMemCall(inst As CInstruction, ByRef baseReg As Long, ByRef disp As Long) As Boolean
+    'True when inst is `call [reg + disp]` (FF /2, memory via a base register, NOT an
+    'absolute [disp32] nor `call reg`).  Returns the base register (0..7) and disp.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, regf As Long, isAbs As Boolean
+    baseReg = -1: disp = 0
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &HFF Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    regf = (modrm \ 8) And 7
+    If regf <> 2 Then GoTo no                 'call r/m is /2
+    If (modrm \ &H40) = 3 Then GoTo no        'call reg (register-direct), not memory
+    baseReg = NativeMemBase(dump)
+    If baseReg < 0 Then GoTo no               'absolute / no-base SIB
+    If Not NativeDecodeDisp(dump, disp, isAbs) Then GoTo no
+    If isAbs Then GoTo no
+    NativeIsIndirectMemCall = True
+    Exit Function
+no:
+    baseReg = -1: NativeIsIndirectMemCall = False
+End Function
+
+Private Function NativePushReg(inst As CInstruction, ByRef reg As Long) As Boolean
+    'Match a single-byte `push r32` (0x50..0x57); set reg to the pushed register index.
+    Dim dump As String, nn As Long, i As Long, op As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op >= &H50 And op <= &H57 Then reg = op - &H50: NativePushReg = True
+End Function
+
+Private Function NativeLeaLocal(inst As CInstruction, ByRef reg As Long, ByRef disp As Long) As Boolean
+    'Match `lea r32, [ebp + disp]` (8D /r, base ebp, no SIB index); set reg and disp.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, isAbs As Boolean
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &H8D Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) = 3 Then GoTo no
+    reg = (modrm \ 8) And 7
+    If NativeMemIndex(dump) >= 0 Then GoTo no
+    If NativeMemBase(dump) <> 5 Then GoTo no       'base must be ebp
+    If Not NativeDecodeDisp(dump, disp, isAbs) Then GoTo no
+    If isAbs Then GoTo no
+    NativeLeaLocal = True
+    Exit Function
+no:
+    NativeLeaLocal = False
+End Function
+
+Private Function NativeArrIndexTok(arr() As CInstruction, ByVal callIdx As Long, ByVal loBound As Long) As String
+    'Recover the array index token for a control-array element accessor `call
+    '[arrVt+0x40]` at callIdx.  VB coerces the index with __vbaI4 (a `call [abs]`) just
+    'before pushing it: `mov ecx,SRC ; call [__vbaI4] ; push eax`.  Resolve SRC (the ecx
+    'load feeding the coerce) to a local token - either a direct local [ebp-Y] or a
+    'register holding the loop counter that mirrors a spill local.  "" on any miss.
+    Dim j As Long, cc As Long, dd As Long, ab As Boolean
+    cc = -1
+    For j = callIdx - 1 To loBound Step -1
+        If (arr(j).cmdType And C_TYPEMASK) = C_CAL Then
+            If NativeDecodeDisp(arr(j).dump, dd, ab) Then
+                If ab Then cc = j               'absolute call = the index coerce
+            End If
+            Exit For                            'first call back is the coerce (abs) or the form accessor; stop
+        End If
+    Next j
+    If cc < 0 Then Exit Function
+    Dim sd As Long, sr As Long, kind As Long, yd As Long
+    For j = cc - 1 To loBound Step -1
+        kind = NativeMovEcxSrc(arr(j), sd, sr)
+        If kind = 1 Then
+            If sd < 0 Then NativeArrIndexTok = "var_" & Hex$(Abs(sd))
+            Exit Function
+        ElseIf kind = 2 Then
+            'The index register mirrors the loop counter, spilled at the loop top -
+            'often well before the tight element-access window - so search a wider
+            'backward range for its nearest spill/fill local.
+            Dim wlo As Long
+            wlo = j - 80: If wlo < 0 Then wlo = 0
+            If NativeRegSpillLocal(arr, j, sr, wlo, yd) Then NativeArrIndexTok = "var_" & Hex$(Abs(yd))
+            Exit Function
+        End If
+    Next j
+End Function
+
+Private Function NativeMovEcxSrc(inst As CInstruction, ByRef localDisp As Long, ByRef srcReg As Long) As Long
+    'Classify a `mov ecx, SRC` instruction: 1 = ecx <- [ebp+disp] (sets localDisp),
+    '2 = ecx <- register (sets srcReg), 0 = not a mov-into-ecx.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, md As Long, reg As Long, isAbs As Boolean
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &H8B Then GoTo no               'mov r32, r/m32
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7
+    If reg <> 1 Then GoTo no                  'dest must be ecx
+    If md = 3 Then
+        srcReg = modrm And 7
+        NativeMovEcxSrc = 2
+        Exit Function
+    End If
+    If NativeMemIndex(dump) >= 0 Then GoTo no
+    If NativeMemBase(dump) <> 5 Then GoTo no   'base must be ebp
+    If Not NativeDecodeDisp(dump, localDisp, isAbs) Then GoTo no
+    If isAbs Then GoTo no
+    NativeMovEcxSrc = 1
+    Exit Function
+no:
+    NativeMovEcxSrc = 0
+End Function
+
+Private Function NativeRegSpillLocal(arr() As CInstruction, ByVal fromIdx As Long, ByVal reg As Long, ByVal loBound As Long, ByRef disp As Long) As Boolean
+    'Resolve a register to the stack local it mirrors, by finding the nearest preceding
+    'spill `mov [ebp-Y], reg` (store) or fill `mov reg, [ebp-Y]` (load).  Used to map a
+    'register-held loop counter back to its var_Y for a control-array index.
+    Dim j As Long, dmp As String, nn As Long, i As Long, op As Long, modrm As Long
+    Dim md As Long, rf As Long, rm As Long, dd As Long, ab As Boolean
+    For j = fromIdx - 1 To loBound Step -1
+        dmp = Replace(arr(j).dump, " ", "")
+        nn = Len(dmp) \ 2
+        i = NativeOpStart(dmp, nn)
+        op = NativeDumpByte(dmp, i)
+        If op = &H89 Or op = &H8B Then          '89=store reg->r/m, 8B=load r/m->reg
+            modrm = NativeDumpByte(dmp, i + 1)
+            md = (modrm \ &H40) And 3: rf = (modrm \ 8) And 7: rm = modrm And 7
+            If md <> 3 And rf = reg And NativeMemIndex(dmp) < 0 And NativeMemBase(dmp) = 5 Then
+                If NativeDecodeDisp(arr(j).dump, dd, ab) Then
+                    If Not ab And dd < 0 Then disp = dd: NativeRegSpillLocal = True: Exit Function
+                End If
+            End If
+        End If
+    Next j
+End Function
+
 Private Function NativeCallReg(inst As CInstruction) As Long
     'Register index of an indirect `call reg` (FF /2, mod=3), else -1.
     Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
@@ -2460,6 +2744,28 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 End If
                 ann = "call " & dsmNative.GetApiByIatVa(disp)
             ElseIf hasMem Then
+                'Control-array element accessor: a deterministic pre-pass
+                '(NativeDetectControlArrays) recovered the array control, index and
+                'element retbuf for this `call [arrayVt + 0x40]`.  Emit
+                'Set var_<rb> = Form.ctrl(idx) and tag the retbuf local with the array's
+                'control GUID, so the following `mov reg,[ebp-rb]; mov vt,[reg];
+                'call [vt+0x54/0x19C]` resolves to var_<rb>.Caption / .ToolTipText.  The
+                'COM HRESULT left in eax is error-checked next, so reset it like UnkVCall.
+                Dim caKey As String
+                caKey = "K" & inst.va
+                If Len(NativeColGet(NVCtlArrElem, caKey)) > 0 Then
+                    Dim caElem As String, caGuid As String, caRb As Long, caName As String
+                    caElem = NativeColGet(NVCtlArrElem, caKey)
+                    caGuid = NativeColGet(NVCtlArrGuid, caKey)
+                    caRb = CLng(NativeColGet(NVCtlArrRetbuf, caKey))
+                    caName = "var_" & Hex$(Abs(caRb))
+                    NVPushTop = 0
+                    NativeResetValue
+                    NativeSetLocalExpr caRb, caName
+                    NativeSetLocalGuid caRb, caGuid
+                    NativeProcessInst = ind & "Set " & caName & " = " & caElem & vbCrLf
+                    Exit Function
+                End If
                 'Property access on a resolved intrinsic object (e.g. App.Path):
                 'when the call's base register holds an intrinsic object's vtable
                 '(tagged by the getter chain `mov reg,[App_local]; mov vt,[reg]`),
@@ -4450,6 +4756,36 @@ Private Function NativeControlIndexName(ByVal idx As Long) As String
     Next
 End Function
 
+Private Function NativeControlIsArrayByOffset(ByVal offset As Long) As Boolean
+    'True when the control accessed at form-vtable `offset` is a control ARRAY (its
+    'element accessor, vtable 0x40, returns element i).  Used to gate the control-array
+    'element reconstruction strictly so a non-array control call never misfires.
+    'A control array surfaces in gControlNameArray either as MULTIPLE entries sharing
+    'the same (form, name) - one per defined element - or, for a single-element array,
+    'as one entry with the is-array IID flag set.  Resolve the name at this offset and
+    'test both signals (so any element accessor of the array qualifies, not only those
+    'whose own IID happened to be the array-member IID+1).
+    Dim nm As String
+    nm = NativeControlByOffset(offset)
+    If Len(nm) = 0 Then Exit Function
+    NativeControlIsArrayByOffset = NativeNameIsControlArray(nm)
+End Function
+
+Private Function NativeNameIsControlArray(ByVal nm As String) As Boolean
+    'True when control `nm` on the current form is a control array: more than one
+    'gControlNameArray entry shares its name (one per element), or any such entry
+    'carries the array-member IID flag.
+    Dim k As Long, cnt As Long
+    On Error Resume Next
+    For k = 0 To UBound(gControlNameArray)
+        If gControlNameArray(k).strParentForm = NVForm And gControlNameArray(k).strControlName = nm Then
+            cnt = cnt + 1
+            If gControlNameArray(k).bIsArray <> 0 Then NativeNameIsControlArray = True: Exit Function
+            If cnt > 1 Then NativeNameIsControlArray = True: Exit Function
+        End If
+    Next
+End Function
+
 '---------------------------------------------------------------------------
 ' Small utilities
 '---------------------------------------------------------------------------
@@ -4768,6 +5104,15 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     Dim lguid As String
                     lguid = NativeGetLocalGuid(disp)
                     If Len(lguid) > 0 Then NVRegObjGuid(reg) = lguid: NVRegObjType(reg) = NVReg(reg)
+                    'Reloading a control object's cached VTABLE (stored by the 0x89
+                    'handler): restore its control identity so a deferred property put
+                    '`call [reg + off]` through it resolves.
+                    Dim lvtg As String
+                    lvtg = NativeColGet(NVLocalVtGuid, "L" & disp)
+                    If Len(lvtg) > 0 Then
+                        NVRegObjVt(reg) = NativeColGet(NVLocalVtName, "L" & disp)
+                        NVRegObjVtGuid(reg) = lvtg
+                    End If
                 ElseIf isAbs And NativeIsGlobalAddr(disp) Then
                     'Loading a module-global that holds a user-class instance (typed
                     'at its __vbaNew auto-instantiation) tags the register as that
@@ -4888,6 +5233,17 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     '__vbaObjSet) - remember its GUID so a later property access
                     'through that local resolves (e.g. the LET target temp).
                     If Len(NVRegObjGuid(reg)) > 0 Then NativeSetLocalGuid disp, NVRegObjGuid(reg)
+                    'Storing a control object's VTABLE to a local (VB caches it before a
+                    'property put when intervening string helpers would clobber the
+                    'register - e.g. the first lblSkillName(i).Caption put).  Thread the
+                    'vtable's control identity through the slot so the reload resolves.
+                    On Error Resume Next
+                    NVLocalVtName.Remove "L" & disp: NVLocalVtGuid.Remove "L" & disp
+                    On Error GoTo 0
+                    If Len(NVRegObjVtGuid(reg)) > 0 Then
+                        NVLocalVtName.Add NVRegObjVt(reg), "L" & disp
+                        NVLocalVtGuid.Add NVRegObjVtGuid(reg), "L" & disp
+                    End If
                     'If the register held NO symbolic value, it now MIRRORS this local
                     '(after `mov [var_X], reg` the register equals var_X).  Name it so
                     'a following read/compare shows var_X instead of a raw register -

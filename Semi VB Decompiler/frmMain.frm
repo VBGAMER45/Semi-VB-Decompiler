@@ -2049,6 +2049,7 @@ Sub OpenVBExe(ByVal FilePath As String, ByVal FileTitle As String, Optional bAdv
                  gControlNameArray(UBound(gControlNameArray)).strParentForm = gObjectNameArray(loopC)
                  gControlNameArray(UBound(gControlNameArray)).strGuid = strGuid
                  gControlNameArray(UBound(gControlNameArray)).lControlIndex = gControl(i).index
+                 gControlNameArray(UBound(gControlNameArray)).bIsArray = Abs(CInt(bCtlArray))
                 End If
             Next
             End If
