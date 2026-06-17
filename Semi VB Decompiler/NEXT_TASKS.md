@@ -130,12 +130,23 @@ tracking then emits `<field> = CInt(var_30)`. Dungeon: `iNumber = Int(Trim$(Righ
 reconstructs as `var_24 = CInt(var_30)`; ItemDef array fields recover too. All bare conversion
 Calls gone; no regressions (known-good identical, no new `<arg>`/`CInt(<arg>)`/dangling GoTo).
 
-### C. Register-resident loop induction variables (high value, high effort, regression-prone)  ← NEXT UP
-The counter-naming pass (`NativeDetectCounterSlots`) only binds STACK-slot counters; a loop whose
-counter lives purely in a REGISTER shows a blank `<cond>` (or a stale first-iteration value) and
-isn't reconstructed as `For`.
+### C. Register-resident loop induction variables — DONE (ef139aa)
+The simplest register-counter case is reconstructed. VB6 keeps a small For loop's counter AND limit
+in registers and RELOADS the limit register at the loop top, so the back-edge targets a `mov
+limitReg, imm` (not the cmp) and the compare is a 16-bit `cmp di,cx` (0x66 + 3B). NativeDetectForLoops
+now: scans past leading limit-setup `mov reg,imm` to find the cmp (NativeIsMovRegImm gate);
+NativeForCounterReg accepts `cmp r16,r16` (66+3B/39, md=3) + the 0x39 counter form; captures start
+(NativeForStartIsConst returns the init const) and limit (new NativeForLimitVal: immediate, or the
+const a limit register was loaded with via a backward mov-imm scan) into NVForStart/NVForLimit since
+render-time decode can't read the cmp; suppresses the header..exit-Jcc run; binds the counter reg to
+the loop var name so the body resolves `x` not its stale init. Result: customocx Winsock1_DataArrival
+→ `For i = 0 To 1000 / ... CStr(i) ... / Next i` (was `Do While <cond>` / `CStr(0)`). Dungeon: For/Next
+15→16, Do/Loop 35→34 (modMap `Do While var_20<=100` → `For i = 0 To 100`), garbage 25→24; <cond>/<arg>/
+GoTo/proc-counts unchanged, sentinels identical. STILL DEFERRED below: the nested draw-loop case
+(`For i = -radius To radius`) where the counter mirror + FPU coords couple with D; and memory/variable
+register-limits (only constant register-limits resolve so far — variable limits fall back to Do While).
 
-**Concrete reproducer (do this first — simplest case): customocx `Project1.exe` `Winsock1_DataArrival`.**
+**Original concrete reproducer (now passing): customocx `Project1.exe` `Winsock1_DataArrival`.**
 `C:\Users\Owner\Desktop\websites\customocx\Project1.exe` (source alongside; the proc decompiles now,
 just the loop cond is blank). Source = `For x = 0 To 1000 / RichTextBox1.Text = RichTextBox1.Text & x & vbCrLf / Next x`.
 We emit `Do While <cond>` with `x` shown as `CStr(0)` (stale init). Disasm of the header:
