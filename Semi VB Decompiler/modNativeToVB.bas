@@ -2617,7 +2617,10 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 If Len(gobj) > 0 Then
                     gcb = NativeMemBase(inst.dump)
                     If gcb >= 0 And gcb <= 7 Then
-                        If NVRegIsFormVt(gcb) Then
+                        'Resolve on the form's own vtable (Me) OR on the standalone VB
+                        '_Global object held in a module global (tagged at __vbaNew2) -
+                        'both expose the App/Screen/Clipboard accessors at these offsets.
+                        If NVRegIsFormVt(gcb) Or NVRegObjVt(gcb) = "_Global" Then
                             NVPushTop = 0
                             NVReg(0) = gobj
                             NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
@@ -3591,16 +3594,25 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             'chain (ObjectInfo+0x18 -> Public Object Descriptor +0x18 -> name) and,
             'for the auto-instantiation, remember that the global is of that class so
             'its later method calls resolve.
-            Dim ncls As String, ngObj As Long, rp As Long, rv As Long
+            Dim ncls As String, ngObj As Long, rp As Long, rv As Long, isGlobalObj As Boolean
             For rp = 0 To 7
                 rv = NVRecentPush(rp)
                 If rv <> 0 And Len(ncls) = 0 Then ncls = NativeClassFromObjInfo(rv)
+                If rv <> 0 And Not isGlobalObj Then isGlobalObj = NativeIsVBGlobalDesc(rv)
                 If rv <> 0 And NativeIsGlobalAddr(rv) Then ngObj = rv
             Next
             NVPushTop = 0
             If Len(ncls) > 0 Then
                 If ngObj <> 0 Then NativeColPut NVObjClass, "G" & ngObj, ncls
                 NVReg(0) = "New " & ncls: NVRegObjType(0) = ncls
+            ElseIf isGlobalObj Then
+                'The VB6 _Global intrinsic-objects holder, lazily New'd into a module
+                'global.  Tag the global as "_Global" so a following `[global+0x14]`
+                'deref-call resolves to .App / .Screen / .Clipboard exactly like the
+                'form's own vtable does (NativeGlobalObjByOffset), and App.Path & co.
+                'then resolve via the existing intrinsic-property path.
+                If ngObj <> 0 Then NativeColPut NVObjClass, "G" & ngObj, "_Global"
+                NVReg(0) = "_Global": NVRegObjType(0) = "_Global"
             Else
                 NVReg(0) = "New (object)"
             End If
@@ -5742,6 +5754,24 @@ Private Function NativeIsDerefBase(ByVal s As String) As Boolean
     'rendered as the misleading (arg_C - global_X(20))(16).
     NativeIsDerefBase = (Left$(s, 7) = "global_") Or (Left$(s, 4) = "arg_") _
                      Or (Left$(s, 4) = "var_") Or (Left$(s, 4) = "loc_")
+End Function
+
+Private Function NativeIsVBGlobalDesc(ByVal descVA As Long) As Boolean
+    'True when a __vbaNew2 object descriptor creates the VB6 _Global intrinsic-objects
+    'holder (the thing whose vtable carries .App/.Screen/.Clipboard at 0x14/0x18/0x1C).
+    'The descriptor's CLSID/IID pointers (at +4 / +8) are the VB OLB family
+    '{FCFB3D2x-A0FA-1068-A738-08002B3371B5}: FCFB3D23 = Global coclass, FCFB3D22 =
+    '_Global interface.  Check the GUID Data1 at either pointer.
+    Dim p As Long, d1 As Long, off As Long
+    On Error Resume Next
+    If descVA < OptHeader.ImageBase Then Exit Function
+    For off = 4 To 8 Step 4
+        p = NativeFileDword(descVA + off)
+        If p >= OptHeader.ImageBase Then
+            d1 = NativeFileDword(p)
+            If d1 = &HFCFB3D22 Or d1 = &HFCFB3D23 Then NativeIsVBGlobalDesc = True: Exit Function
+        End If
+    Next
 End Function
 
 Private Function NativeGlobalObjByOffset(ByVal disp As Long) As String
