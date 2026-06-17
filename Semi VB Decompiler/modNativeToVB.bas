@@ -165,6 +165,8 @@ Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge t
 Private NVCallHandled As Boolean   'set by NativeRuntimeCall: True when the call was recognised
 Private NVErrHandler As Long       'address of this procedure's On Error handler block (0 = none)
 Private NVProcEndWord As String    'closing keyword for this proc: "Sub" / "Function" / "Property"
+Private NVAccumRet As Boolean      'the proc returns a simple value in the accumulator (ax/eax) - a module Function whose kind/type is stripped (recovered from the epilogue return-load)
+Private NVAccumRetType As String   'recovered return type from that load: "Integer" (word/ax) or "Long" (dword/eax)
 Private NVRetN As Long             'the proc's `ret imm16` operand (callee-popped arg bytes), -1 if none
 Private NVApiStubCache As Collection 'declared-DLL stub address -> resolved API name (global, "" = not a stub)
 Private NVCmpL As String           'pending condition: left operand (symbolic)
@@ -221,6 +223,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVForm = NativeFormOf(addr)
     NVHasMe = NativeProcHasMe(addr)
     NVProcEndWord = "Sub"
+    NVAccumRet = False: NVAccumRetType = ""
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVCmpIsBool = False: NVFpuChk = False
@@ -398,6 +401,13 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'conditions render `If KeyCode = 97` instead of `<cond>`.  Strictly scoped (only
     'procs with the `mov di,word[param]` anchor; only the 16-bit case compares).
     NativeDetectKeyCompares col
+
+    'Detect an unclassified module Function: a simple value returned in the accumulator
+    '(`mov ax/eax,[ebp-retSlot]` right before the SEH restore).  Marks the proc a
+    'Function, recovers its return TYPE (Integer/Long), and renames the return slot to
+    'the proc name so `FuncName = value` reads as VB's implicit return.  MUST run before
+    'NativeProcHeader (which reads NVAccumRet to emit `Function ... As <type>`).
+    NativeDetectAccumReturn b, addr
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -4697,6 +4707,87 @@ Private Sub NativeDetectReturnSlot(col As Collection, ByVal addr As Long)
 done:
 End Sub
 
+Private Sub NativeDetectAccumReturn(b() As Byte, ByVal addr As Long)
+    'A standard-module (or otherwise unclassified) Function returns a SIMPLE value in the
+    'accumulator: the epilogue copies it from the return local into ax/eax right before
+    'the SEH teardown:  mov ax/eax,[ebp-retSlot] ; mov reg,[ebp-Z] ; mov fs:[0],reg.
+    'Detect that to (a) mark the proc a Function, (b) recover its return TYPE - word=ax=
+    'Integer, dword=eax=Long, (c) rename the return slot var_X to the proc name so its
+    'assignments read `FuncName = value` (VB's implicit return) instead of var_X = value.
+    'Unlike NativeDetectReturnSlot (a CLASS method's hidden [out,retval] retbuf) this is
+    'the plain accumulator return modules use - so there is NO hidden return-slot param.
+    'Scans the RAW bytes (not the instruction collection): this epilogue lives in the
+    'SEH tail PAST the proc`s `ret`, which proc-bounding excludes from the collection.
+    On Error GoTo done
+    NVAccumRet = False: NVAccumRetType = ""
+    'Skip anything already classified by typeinfo / the proc list (class Function /
+    'Property / a known Sub) - those are handled by the existing header path.
+    Dim kind As String, mi As Long
+    If NativeTryMethodKind(addr, kind) Then
+        If InStr(kind, "Function") > 0 Or InStr(kind, "Get") > 0 Or InStr(kind, "Property") > 0 Or InStr(kind, "Sub") > 0 Then Exit Sub
+    End If
+    mi = NativeProcMatchIdx(addr)
+    If mi >= 0 Then
+        If InStr(SubNamelist(mi).kind, "Function") > 0 Or InStr(SubNamelist(mi).kind, "Property") > 0 Then Exit Sub
+    End If
+
+    'Bound the scan to this proc - the 8KB buffer overruns into the next procedure.
+    Dim hi As Long, pp As Long
+    hi = 8190
+    For pp = 0 To UBound(gNativeProcArray) - 1
+        If gNativeProcArray(pp).offset > addr Then
+            Dim dd As Long: dd = gNativeProcArray(pp).offset - addr
+            If dd > 0 And dd < hi Then hi = dd
+        End If
+    Next
+
+    'Find the SEH-frame RESTORE `mov fs:[0],reg` (64 89 <m> 00 00 00 00) where reg is a
+    'GP register (the setup writes esp = reg field 4, so skip that).  The 3 bytes before
+    'it are `mov reg,[ebp-Z]` (8b <m2> <disp8>, m2 = md1/rm5); before THAT, for a
+    'Function, is the return-value load `mov ax/eax,[ebp-retSlot]`.  Take the FIRST such
+    'restore: it is this proc's epilogue (a Sub has no return load before its restore).
+    Dim j As Long, ret8 As Long, isWord As Boolean
+    For j = 8 To hi - 7
+        If b(j) = &H64 And b(j + 1) = &H89 And (b(j + 2) And &HC7) = 5 _
+           And ((b(j + 2) \ 8) And 7) <> 4 _
+           And b(j + 3) = 0 And b(j + 4) = 0 And b(j + 5) = 0 And b(j + 6) = 0 Then
+            'SEH-ptr load `mov reg,[ebp-Z]` (8b <m2:md1,rm5> <disp8>) immediately before.
+            If j >= 3 Then
+                If b(j - 3) = &H8B And (b(j - 2) And &HC7) = &H45 Then
+                    'Return-value load ending at j-3.  Three encodings:
+                    isWord = False: ret8 = 0
+                    If j >= 7 And b(j - 7) = &H66 And b(j - 6) = &H8B And b(j - 5) = &H45 Then
+                        isWord = True: ret8 = b(j - 4)                 'mov ax, word[ebp-d8]
+                    ElseIf j >= 7 And b(j - 7) = &HF And (b(j - 6) = &HBF Or b(j - 6) = &HB7) And b(j - 5) = &H45 Then
+                        isWord = True: ret8 = b(j - 4)                 'movsx/movzx eax, word[ebp-d8]
+                    ElseIf j >= 6 And b(j - 6) = &H8B And b(j - 5) = &H45 And b(j - 7) <> &H66 Then
+                        isWord = False: ret8 = b(j - 4)                'mov eax, dword[ebp-d8]
+                    Else
+                        Exit Sub        'no return load -> a Sub (don't scan into the next proc)
+                    End If
+                    Dim retDisp As Long
+                    retDisp = ret8: If retDisp >= 128 Then retDisp = retDisp - 256   'signed disp8
+                    If retDisp < 0 Then
+                        NVAccumRet = True
+                        If isWord Then NVAccumRetType = "Integer" Else NVAccumRetType = "Long"
+                        Dim funcName As String, fp As Long
+                        funcName = NativeProcName(addr)
+                        fp = InStr(funcName, "("): If fp > 0 Then funcName = Trim$(Left$(funcName, fp - 1))
+                        If NativeIsIdent(funcName) Then
+                            ReDim Preserve NVArgTok(NVArgN): ReDim Preserve NVArgNm(NVArgN)
+                            NVArgTok(NVArgN) = "var_" & Hex$(Abs(retDisp))
+                            NVArgNm(NVArgN) = funcName
+                            NVArgN = NVArgN + 1
+                        End If
+                    End If
+                End If
+            End If
+            Exit Sub                    'first restore decides this proc
+        End If
+    Next
+done:
+End Sub
+
 Private Function NativeMovRegEbp(inst As CInstruction, ByRef reg As Long, ByRef disp As Long) As Boolean
     'Match `mov r(16/32), [ebp + disp]` (8B /r, base ebp): dest reg + signed disp.
     Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, isAbs As Boolean
@@ -7235,6 +7326,9 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
         kindStr = mkind
         If InStr(kindStr, "Property") > 0 Then NVProcEndWord = "Property" Else NVProcEndWord = kindStr
     End If
+    'An unclassified module Function recovered from its accumulator-return epilogue
+    '(NativeDetectAccumReturn): promote Sub -> Function and remember the return type.
+    If kindStr = "Sub" And NVAccumRet Then kindStr = "Function": NVProcEndWord = "Function"
     'Add the parameter list when the name carries no signature yet (event handlers
     'already get a typed one from getEventComplete).  Parameters are named generically
     'arg_<ebp offset> with the count from the proc's `ret N`.
@@ -7261,7 +7355,10 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
             If Len(eParams) > 0 Then NativeBuildArgNameMap addr, eParams
         End If
     End If
-    NativeProcHeader = vis & " " & kindStr & " " & nm & "   '" & Hex$(addr)
+    'Append the recovered return type for an accumulator-return module Function.
+    Dim asType As String
+    If NVAccumRet And Len(NVAccumRetType) > 0 And InStr(kindStr, "Function") > 0 Then asType = " As " & NVAccumRetType
+    NativeProcHeader = vis & " " & kindStr & " " & nm & asType & "   '" & Hex$(addr)
 End Function
 
 Private Function NativeProcParams(ByVal kindStr As String, ByVal hasMe As Boolean) As String
@@ -7275,7 +7372,10 @@ Private Function NativeProcParams(ByVal kindStr As String, ByVal hasMe As Boolea
     If NVRetN < 4 Then Exit Function           '-1 (plain ret) or ret 0 -> no stack args
     slots = NVRetN \ 4
     If hasMe Then nParams = slots - 1 Else nParams = slots    'drop the hidden Me/this slot
-    If InStr(kindStr, "Function") > 0 Then nParams = nParams - 1   'drop the return-value slot
+    'A CLASS Function returns via a hidden [out,retval] retbuf param - drop it.  An
+    'accumulator-return module Function (NVAccumRet) returns in ax/eax with NO stack
+    'retslot, so keep every parameter (else a real argument is wrongly dropped).
+    If InStr(kindStr, "Function") > 0 And Not NVAccumRet Then nParams = nParams - 1
     If nParams < 0 Then nParams = 0
     base = IIf(hasMe, &HC, &H8)                 'first user parameter's ebp offset
     For i = 0 To nParams - 1

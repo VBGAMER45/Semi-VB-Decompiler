@@ -27,6 +27,38 @@ benchmarked against the Dungeon test program. Written to survive a context reset
 - **Key structure reference:** `C:\Users\Owner\Downloads\Alex_Ionescu_vb_structures(2).pdf`
   (VB image internal format — Object Info §8, Public Object Descriptor §7, etc.). Use it instead of guessing struct layouts.
 
+## Module Function detection + return type via accumulator epilogue (2026-06-17) — DONE
+
+Standard-module functions (modMap_Direction, modItem_ID, modSkill_Value, ...) rendered
+as `Private Sub proc_XXXX(...)` with `var_X = value` returns - their kind+type are
+stripped (not in any typeinfo).  Now: `Private Function proc_4139C0(arg_8, arg_C,
+arg_10, arg_14) As Integer` with `proc_4139C0 = <value>` (VB's implicit return).  Beats
+the commercial decompiler (which mis-typed the args - dropped arg_8 as a phantom Me).
+
+A module Function returns a SIMPLE value in the ACCUMULATOR; the epilogue copies it from
+the return local into ax/eax right before the SEH teardown:
+`mov ax/eax,[ebp-retSlot] ; mov reg,[ebp-Z] ; mov fs:[0],reg ; pop.. ; ret N`.  KEY: this
+epilogue lives in the SEH tail PAST the proc's `ret`, which proc-bounding EXCLUDES from
+the instruction collection (the old "SEH-tail return rename" gap) - so NativeDetectAccumReturn
+**byte-scans the raw proc bytes** (not col) for the first SEH-restore `64 89 <m> 00000000`
+(reg != esp) and decodes the 3 bytes before (the SEH-ptr load) + the return load before
+THAT.  Sets: kind=Function, return type (word/ax=Integer, dword/eax=Long; Boolean is
+16-bit so it renders As Integer - honest, indistinguishable), and renames var_retSlot ->
+the proc name.  NativeProcHeader emits `Function ... As <type>`; NativeProcParams does NOT
+drop a param for an accumulator return (NVAccumRet) - there is no hidden retslot (unlike a
+CLASS [out,retval] Function, NativeDetectReturnSlot).  Gated: skips anything already typed
+by typeinfo/proc-list (class methods, known Subs).
+
+Dungeon: 26 module Subs -> Functions with return types; per-module counts MATCH the source
+(modItem 4/4, modPlayer 3/3, modSkill 2/2) or are conservative (modMap 8/12 - the missed 4
+stay Sub, no false positives - count never exceeds source).  No regressions: total proc
+counts / `<cond>` / `<arg>` / `<value>` / UnkVCall / GoTo unchanged, If/EndIf+Do/Loop+For/Next
+balanced, headers=ends, no new dangling GoTos, class-method files (frmMain/clsBitmap/
+clsDirectSound) untouched.  Follow-up: `mov [ebp-X],imm32` (0xC7) to a LOCAL isn't rendered,
+so direct-constant returns (`modMap_Direction = 7`) are still dropped (pre-existing; the
+computed/edx-stored returns DO show); and the setge/dec/and/add boolean-arithmetic formula
+renders as the bare `(a >= b)` not the full `((a>=b)-1 And -3)+N`.
+
 ## As-New clsBitmap field methods via lea+deref (2026-06-17) — DONE
 
 `picBackBmp.LoadBitmap App.Path & "..."` and `BitBlt(.., picItemBmp.MaskDC, ..)` are
