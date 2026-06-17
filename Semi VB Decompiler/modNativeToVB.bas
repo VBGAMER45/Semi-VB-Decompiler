@@ -124,6 +124,10 @@ Private NVLateDispid As Collection '"L"&callVA -> comma list of candidate DISPID
 'bails on these 16-bit register compares; this map records the resolved operands
 '("<paramTok>|<const>") per cmp VA so the Jcc renders `If KeyCode = 97` not `<cond>`.
 Private NVKeyCmp As Collection     '"K"&cmpVA -> "<paramTok>|<const>"
+'Branchless select-of-two-constants (`If cond Then x=c1 Else x=c2` compiled as
+'xor/cmp/setcc/dec/and mask/add base) -> reconstruct IIf(cond, base, base+mask).
+Private NVSelConst As Collection     '"S"&setccVA -> "<base>|<base+mask>" (true / false value)
+Private NVSelConstSkip As Collection '"S"&va -> "1" - the dec/and/add tail to suppress
 '--- Control-array element accessor reconstruction (lblSkillName(i).Caption) ---
 'A control array's element accessor is `call [arrayVt + 0x40]` (the array object's
 'Item property).  A deterministic pre-pass (NativeDetectControlArrays) recovers, per
@@ -270,6 +274,8 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVCtlArrGuid = New Collection
     Set NVCtlArrRetbuf = New Collection
     Set NVKeyCmp = New Collection
+    Set NVSelConst = New Collection
+    Set NVSelConstSkip = New Collection
     Set NVLocalVtName = New Collection
     Set NVLocalVtGuid = New Collection
     NVCurVa = 0
@@ -403,6 +409,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'procs with the `mov di,word[param]` anchor; only the 16-bit case compares).
     NativeDetectKeyCompares col
 
+    'Recognise the branchless select-of-two-constants idiom (setcc/dec/and/add) so a
+    'two-constant If/Else (modMap_Direction = 4 / = 1) reconstructs as IIf(cond, c1, c2)
+    'rather than the misleading bare relational.
+    NativeDetectSelectConst col
+
     'Detect an unclassified module Function: a simple value returned in the accumulator
     '(`mov ax/eax,[ebp-retSlot]` right before the SEH restore).  Marks the proc a
     'Function, recovers its return TYPE (Integer/Long), and renames the return slot to
@@ -502,6 +513,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
             End If
             GoTo nextInst
         End If
+
+        'Suppress the dec/and/add tail of a branchless select-of-two-constants idiom -
+        'its value is reconstructed as IIf(cond, base, base+mask) at the setcc, so these
+        'must not fold onto (and corrupt) the bound IIf expression.
+        If Len(NativeColGet(NVSelConstSkip, "S" & inst.va)) > 0 Then GoTo nextInst
 
         '--- For loop transitions ---
         'Suppress a recognised For loop's exit Jcc (the For header below replaces it).
@@ -2703,6 +2719,70 @@ Private Function NativeIsSetcc(inst As CInstruction, ByRef op As String, ByRef r
     NativeIsSetcc = True
 End Function
 
+Private Sub NativeDetectSelectConst(col As Collection)
+    'VB compiles a two-constant select `If cond Then x=c1 Else x=c2` BRANCHLESSLY:
+    '   xor r,r ; cmp.. ; setcc r8 ; dec r ; and r,mask ; add r,base
+    'whose result is base (cond true) or base+mask (cond false).  Record (base, base+mask)
+    'at the setcc VA so the renderer binds IIf(cond, base, base+mask), and mark the
+    'dec/and/add tail to skip.  The literal `((cond)-1 And mask)+base` is both cryptic and
+    'WRONG in VB (setcc is 0/1 but a VB Boolean is -1/0); IIf is correct and readable.
+    On Error GoTo done
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    If n < 4 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    Dim ccOp As String, ccReg As Long, mask As Long, base As Long
+    For k = 0 To n - 4
+        If NativeIsSetcc(arr(k), ccOp, ccReg) Then
+            If NativeIsDecReg(arr(k + 1), ccReg) _
+               And NativeIsAluRegImm(arr(k + 2), 4, ccReg, mask) _
+               And NativeIsAluRegImm(arr(k + 3), 0, ccReg, base) Then
+                NativeColPut NVSelConst, "S" & arr(k).va, CStr(base) & "|" & CStr(base + mask)
+                NativeColPut NVSelConstSkip, "S" & arr(k + 1).va, "1"
+                NativeColPut NVSelConstSkip, "S" & arr(k + 2).va, "1"
+                NativeColPut NVSelConstSkip, "S" & arr(k + 3).va, "1"
+            End If
+        End If
+    Next
+done:
+End Sub
+
+Private Function NativeIsDecReg(inst As CInstruction, ByVal reg As Long) As Boolean
+    'Match `dec r32` (single-byte 0x48+reg, or FF /1 md=3 rm=reg).
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op = &H48 + reg Then NativeIsDecReg = True: Exit Function
+    If op = &HFF Then
+        modrm = NativeDumpByte(dump, i + 1)
+        If (modrm \ &H40) = 3 And (((modrm \ 8) And 7) = 1) And ((modrm And 7) = reg) Then NativeIsDecReg = True
+    End If
+End Function
+
+Private Function NativeIsAluRegImm(inst As CInstruction, ByVal grp As Long, ByVal reg As Long, ByRef imm As Long) As Boolean
+    'Match a grp1 ALU op `<grp> r32, imm8/imm32` (0x83 sign-extended imm8, or 0x81 imm32),
+    'register-direct, where grp is the /digit (0=add, 4=and, 5=sub).  Returns imm (signed).
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &H83 And op <> &H81 Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    If (modrm \ &H40) <> 3 Then Exit Function            'register-direct
+    If ((modrm \ 8) And 7) <> grp Then Exit Function     'the /digit selects the ALU op
+    If (modrm And 7) <> reg Then Exit Function
+    If op = &H83 Then imm = NativeDumpInt8(dump, i + 2) Else imm = NativeDumpInt32(dump, i + 2)
+    NativeIsAluRegImm = True
+End Function
+
 Private Function NativeIsBoolOrAnd(inst As CInstruction, ByRef op As String, ByRef dst As Long, ByRef src As Long) As Boolean
     'Match `or/and r32, r32` (reg-direct).  Returns "Or"/"And" and the dest + source
     'register indices (dest is the register read by the following test/Jcc).
@@ -2870,9 +2950,20 @@ Private Function NativeProcessInst(inst As CInstruction) As String
     Dim ccOp As String, ccReg As Long
     If NativeIsSetcc(inst, ccOp, ccReg) Then
         If NVCmpSet And Len(NVCmpL) > 0 Then
-            Dim ccR As String
+            Dim ccR As String, scRec As String
             If NVCmpIsTest Then ccR = "0" Else ccR = NVCmpR
-            If Len(ccR) > 0 Then NVReg(ccReg) = "(" & NVCmpL & " " & ccOp & " " & ccR & ")" Else NVReg(ccReg) = ""
+            scRec = NativeColGet(NVSelConst, "S" & inst.va)
+            If Len(ccR) = 0 Then
+                NVReg(ccReg) = ""
+            ElseIf Len(scRec) > 0 Then
+                'Branchless select-of-two-constants: this setcc heads a dec/and/add tail
+                'that yields base (cond true) or base+mask (cond false) - render IIf.
+                Dim scBar As Long
+                scBar = InStr(scRec, "|")
+                NVReg(ccReg) = "IIf(" & NVCmpL & " " & ccOp & " " & ccR & ", " & Left$(scRec, scBar - 1) & ", " & Mid$(scRec, scBar + 1) & ")"
+            Else
+                NVReg(ccReg) = "(" & NVCmpL & " " & ccOp & " " & ccR & ")"
+            End If
         Else
             NVReg(ccReg) = ""
         End If

@@ -54,10 +54,20 @@ Dungeon: 26 module Subs -> Functions with return types; per-module counts MATCH 
 stay Sub, no false positives - count never exceeds source).  No regressions: total proc
 counts / `<cond>` / `<arg>` / `<value>` / UnkVCall / GoTo unchanged, If/EndIf+Do/Loop+For/Next
 balanced, headers=ends, no new dangling GoTos, class-method files (frmMain/clsBitmap/
-clsDirectSound) untouched.  Follow-up: `mov [ebp-X],imm32` (0xC7) to a LOCAL isn't rendered,
-so direct-constant returns (`modMap_Direction = 7`) are still dropped (pre-existing; the
-computed/edx-stored returns DO show); and the setge/dec/and/add boolean-arithmetic formula
-renders as the bare `(a >= b)` not the full `((a>=b)-1 And -3)+N`.
+clsDirectSound) untouched.
+
+Follow-ups — BOTH DONE (c01ed0b):
+- **Constant returns**: `mov [ebp-retSlot],imm32` (0xC7) to the return slot now renders
+  `FuncName = imm` (modMap_Direction = 7/9/8; Boolean `= -1` etc. across many procs).
+  Gated to the return slot so SEH-frame / Variant-VT 0xC7-to-local stores stay suppressed.
+- **Branchless select-of-two-constants**: `If cond Then x=c1 Else x=c2` compiled as
+  `xor r,r ; cmp ; setcc r8 ; dec r ; and r,mask ; add r,base` now reconstructs as
+  `IIf(cond, base, base+mask)` (modMap_Direction = IIf(arg_C >= arg_14, 4, 1) / 6,3 / 5,2 -
+  every value verified against source).  CORRECT, unlike our previous bare `(a>=b)` and
+  unlike the commercial's literal `((a>=b)-1 And mask)+base` (VB-wrong: setcc is 0/1, a VB
+  Boolean is -1/0).  New pre-pass NativeDetectSelectConst records (base, base+mask) at the
+  setcc VA + skips the dec/and/add tail; the setcc handler binds the IIf.  Only modMap.bas
+  changed (3 conversions), no regressions.
 
 ## As-New clsBitmap field methods via lea+deref (2026-06-17) — DONE
 
