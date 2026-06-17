@@ -2522,6 +2522,20 @@ Private Function NativeInstDestReg(inst As CInstruction) As Long
     End Select
 End Function
 
+Private Function NativeIs16BitAddSub(inst As CInstruction) As Boolean
+    'True for a 16-bit (0x66) `add r16,r/m16` / `sub r16,r/m16` (reg-form, opcode
+    '0x03 / 0x2B).  These fold their dest's word shadow (NVR16Val) in place, so the
+    'per-instruction shadow-clear must skip them.
+    Dim dump As String, n As Long, i As Long, op As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If Not NativeHas66(dump) Then Exit Function
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    NativeIs16BitAddSub = (op = &H3 Or op = &H2B)
+End Function
+
 Private Function NativeBerrStubFromIdx(arr() As CInstruction, ByVal n As Long, isBerr() As Boolean, ByVal idx As Long) As Boolean
     'True when a bounds-error call begins at idx, allowing the `mov REG,[iat]` helper
     'load(s) VB places just before an indirect `call REG` (only movs may precede).
@@ -2938,13 +2952,15 @@ Private Function NativeProcessInst(inst As CInstruction) As String
     ind = NativeIndentStr()
     NVCurVa = inst.va          'so the SIB read/store renderers can look up NVElemIdx
 
-    'A write to a register invalidates the compare-only 16-bit word shadow for that
-    'register (the setter, a 16-bit mov-from-memory, re-populates it below).  This
-    'keeps a captured array-element / Integer-field word from being read by a later,
-    'unrelated `cmp ax,imm16` after the register was clobbered.
+    'A write to a register invalidates the 16-bit word shadow for that register (the
+    'setter, a 16-bit mov-from-memory, re-populates it below).  This keeps a captured
+    'array-element / Integer-field word from being read by a later, unrelated
+    '`cmp ax,imm16` after the register was clobbered.  EXCEPTION: a 16-bit add/sub
+    'reads-then-writes its dest's shadow (the fold in NativeTrackReg updates it in
+    'place to `(a + b)`), so it must not be pre-cleared.
     Dim r16Dest As Long
     r16Dest = NativeInstDestReg(inst)
-    If r16Dest >= 0 Then NVR16Val(r16Dest) = ""
+    If r16Dest >= 0 And Not NativeIs16BitAddSub(inst) Then NVR16Val(r16Dest) = ""
 
     'TEST/CMP set the flags consumed by the next conditional jump.  Record the
     'operands now (the relational operator is resolved later from the Jcc).
@@ -5758,6 +5774,11 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     lhs89 = NativeFieldStoreLHS(NativeMemBase(dump), disp)
                     If Len(lhs89) > 0 Then
                         fv89 = NVReg(reg)
+                        'Prefer the 16-bit word shadow when set: the stored register was
+                        'sign-extended from a tracked 16-bit expression (movsx of a folded
+                        '`(Index + vsCarry.Value)`), which NVReg does not carry.  Only set
+                        'on a fresh 16-bit chain, so a normal 32-bit store is unaffected.
+                        If Len(NVR16Val(reg)) > 0 Then fv89 = NVR16Val(reg)
                         If Len(fv89) = 0 Then fv89 = NativeRegName(reg)
                         'A tracked RHS identical to the LHS is a same-element
                         'read-modify-write whose intervening arithmetic did NOT fold
@@ -5818,6 +5839,23 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     End If
                 End If
             End If
+        Case &HF                        'two-byte opcode: movsx / movzx r32, r/m16
+            Dim mxop2 As Long
+            mxop2 = NativeDumpByte(dump, i + 1)
+            If mxop2 = &HBF Or mxop2 = &HBE Or mxop2 = &HB7 Or mxop2 = &HB6 Then
+                modrm = NativeDumpByte(dump, i + 2)
+                md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+                'Sign/zero-extend of a register whose 16-bit word shadow we tracked (e.g.
+                'the folded `(arg_C + frmMain.vsCarry.Value)` in cx) - carry that
+                'expression into the DEST's word shadow (NOT NVReg: putting it in NVReg
+                'leaked the 16-bit expr into unrelated 32-bit arithmetic folds and
+                'corrupted them).  The field store below prefers NVR16Val, so
+                'FocusCarryIndex = Index + vsCarry.Value still reconstructs.  Only reg->reg
+                'with a live word shadow; otherwise leave everything as-is.
+                If md = 3 And rm >= 0 And rm <= 7 And Len(NVR16Val(rm)) > 0 Then
+                    NVR16Val(reg) = NVR16Val(rm)
+                End If
+            End If
         Case &H33                       'xor r32, r/m32 (xor reg,reg -> 0)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
@@ -5870,6 +5908,26 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H03, &H2B                 'add / sub  r32, r/m32  -> fold into reg dest
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+            If NativeHas66(dump) And Len(NVR16Val(reg)) > 0 Then
+                '16-bit add/sub onto a value tracked in the WORD shadow (e.g. arg_C from
+                '`mov cx,word[arg_C]`): the 32-bit value is unknown, so fold ONLY NVR16Val,
+                'never NVReg.  R = the source operand (a local/field/element, not a bare
+                'register).  Lets `FocusCarryIndex = Index + vsCarry.Value` reconstruct: a
+                'following `movsx edx,cx` carries the folded word forward and the field
+                'store renders it.  When the shadow is empty the value lives in NVReg, so
+                'fall through to the 32-bit fold below (unchanged) - e.g. `mov ax,1;
+                'add ax,[var_20]` still builds `(1 + var_20)` for a loop counter.
+                Dim w16R As String, w16op As String
+                w16R = NativeRmVal(dump, md, rm)
+                If Len(w16R) > 0 And NativeIsCleanIndex(w16R) _
+                   And (Len(NVR16Val(reg)) + Len(w16R)) <= 60 Then
+                    If op = &H2B Then w16op = " - " Else w16op = " + "
+                    NVR16Val(reg) = "(" & NVR16Val(reg) & w16op & w16R & ")"
+                Else
+                    NVR16Val(reg) = ""
+                End If
+                Exit Function
+            End If
             Dim rhsv As String, oprt As String, lhsv As String
             lhsv = NVReg(reg)
             rhsv = NativeRmVal(dump, md, rm)
