@@ -36,6 +36,28 @@ benchmarked against the Dungeon test program. Written to survive a context reset
 - Commercial decompiler hits the same walls. Form/control names, class method names,
   Declare names, and event-handler names ARE recoverable (and already are).
 
+## Control arrays — `lblSkillName(i)` (Update_Skills, 2026-06-17) — TODO, decoded
+
+`Update_Skills` (40E730) source is control arrays:
+`lblSkillName(i) = " " & SkillDef(sIndex).Name` / `lblSkillName(i).ToolTipText = ...`
+/ `If i > lblSkillName.Count`.  We render the array indexing + element property puts
+as unresolved vtable calls.  Decoded the control-array-object vtable offsets (Label
+array, verified in this proc):
+- **0x40** = the array Item / element accessor: `<arrayCtrl>.UnkVCall_0040h(i)` IS
+  `<arrayCtrl>(i)`.  The form accessor (vtable 0x2F8+idx*4) returns the ARRAY object;
+  0x40 on THAT object returns element i.
+- **0x54** = the element's DEFAULT property put (Label Caption): `... = value`.
+- **0x19C** = the element's ToolTipText put.
+- `lblSkillName.Count` is also an unresolved member on the array object.
+To reconstruct `lblSkillName(i).Caption = ...`: (1) store an is-control-array flag
+per control (the parse already computes `bCtlArray` via NormalizeCtlArrayGuid in
+frmMain.OpenVBExe - just persist it into gControlNameArray); (2) when a form accessor
+fetches an array control, tag the register as the array; (3) on `.UnkVCall_0040h(idx)`
+of an array, produce `<ctrl>(idx)` tagged WITH THE ELEMENT'S CONTROL GUID - then the
+existing NativeControlProp path resolves the following 0x54/0x19C puts to
+`.Caption`/`.ToolTipText` automatically.  Substantial/structural; gate strictly on
+is-array + offset 0x40 so non-array controls at 0x40 are untouched.
+
 ## Dungeon Form_KeyDown / Select-Case-on-Integer (2026-06-17) — partial
 
 `frmMain.Form_KeyDown` (408DE0) is `Select Case KeyCode` rendered as a deep
