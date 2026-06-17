@@ -783,6 +783,9 @@ Private Function NativeInsertLocalDims(ByVal body As String) As String
         End If
 nextLine:
     Next
+    'A lone var_X passed to a record helper (RecAssign/RecDestruct/Rec*ToUni) is a
+    'whole UDT record of that descriptor's type - authoritative over the usage guess.
+    NativeTypeUDTLocals lines, typ, seen
     If seen.Count = 0 Then GoTo done
     'Order the locals by their ebp offset (the hex in var_XX) ascending.
     Dim names() As String, offs() As Long, c As Long, v As Variant, j As Long
@@ -817,6 +820,89 @@ nextLine:
     Exit Function
 done:
     NativeInsertLocalDims = body
+End Function
+
+Private Sub NativeTypeUDTLocals(ByRef lines() As String, typ As Collection, seen As Collection)
+    'Force the type of any lone var_X local passed to a record (__vbaRec*) helper to
+    'the UDT recovered from that call's descriptor argument.  A record helper only
+    'takes whole-record pointers, so such a local is definitively that UDT - this is
+    'authoritative (the usage inference otherwise mis-types it As String/Variant, and
+    'an element-address operand like (i - 1) is not a lone var so it never matches).
+    Dim i As Long, ln As String, p As Long, k As Long
+    Dim kws As Variant, kw As Variant
+    kws = Array("RecAssign(", "RecDestruct(", "RecAnsiToUni(", "RecUniToAnsi(", "RecDestructAnsi(")
+    On Error Resume Next
+    For i = 0 To UBound(lines)
+        ln = lines(i)
+        For Each kw In kws
+            p = InStr(ln, CStr(kw))
+            Do While p > 0
+                Dim argStr As String
+                argStr = NativeParenArgs(ln, p + Len(CStr(kw)) - 1)   'text inside the call parens
+                If Len(argStr) > 0 Then NativeTypeUDTArgList argStr, typ, seen
+                p = InStr(p + 1, ln, CStr(kw))
+            Loop
+        Next
+    Next
+End Sub
+
+Private Sub NativeTypeUDTArgList(ByVal argStr As String, typ As Collection, seen As Collection)
+    Dim parts() As String, k As Long, a As String, descVa As Long, udtName As String, udtKey As String
+    parts = NativeSplitTopComma(argStr)
+    If UBound(parts) < 1 Then Exit Sub
+    a = Trim$(parts(0))
+    If Not IsNumeric(a) Then Exit Sub                       'first arg = descriptor address (decimal)
+    descVa = CLng(a)
+    udtKey = "H" & Right$("00000000" & Hex$(descVa), 8)
+    If gUDTDesc Is Nothing Then Exit Sub
+    If Len(NativeColGet(gUDTDesc, udtKey)) = 0 Then Exit Sub  'only when the Type was actually emitted
+    udtName = "UDT_" & Right$("00000000" & Hex$(descVa), 8)
+    For k = 1 To UBound(parts)
+        a = Trim$(parts(k))
+        If NativeIsLoneVarTok(a) Then
+            NativeColPut typ, a, udtName
+            NativeColPut seen, a, a
+        End If
+    Next
+End Sub
+
+Private Function NativeParenArgs(ByVal s As String, ByVal openPos As Long) As String
+    'Return the text between the '(' at openPos and its matching ')'.
+    Dim i As Long, depth As Long, n As Long, ch As String
+    n = Len(s)
+    If openPos < 1 Or openPos > n Then Exit Function
+    If Mid$(s, openPos, 1) <> "(" Then Exit Function
+    depth = 0
+    For i = openPos To n
+        ch = Mid$(s, i, 1)
+        If ch = "(" Then
+            depth = depth + 1
+        ElseIf ch = ")" Then
+            depth = depth - 1
+            If depth = 0 Then NativeParenArgs = Mid$(s, openPos + 1, i - openPos - 1): Exit Function
+        End If
+    Next
+End Function
+
+Private Function NativeSplitTopComma(ByVal s As String) As String()
+    'Split s on top-level ", " (depth-0 commas), so a nested arg like (i - 1) stays whole.
+    Dim res() As String, n As Long, i As Long, depth As Long, ch As String, cur As String, ln As Long
+    ReDim res(64): n = 0: cur = "": depth = 0: ln = Len(s)
+    For i = 1 To ln
+        ch = Mid$(s, i, 1)
+        If ch = "(" Then
+            depth = depth + 1: cur = cur & ch
+        ElseIf ch = ")" Then
+            depth = depth - 1: cur = cur & ch
+        ElseIf ch = "," And depth = 0 Then
+            res(n) = Trim$(cur): n = n + 1: cur = ""
+        Else
+            cur = cur & ch
+        End If
+    Next
+    res(n) = Trim$(cur): n = n + 1
+    ReDim Preserve res(n - 1)
+    NativeSplitTopComma = res
 End Function
 
 Private Function NativeIsProcHeaderLine(ByVal ln As String) As Boolean
