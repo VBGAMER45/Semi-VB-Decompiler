@@ -118,6 +118,12 @@ Private NVWhileLoop As Collection  '"W"&backedgeVA -> "1" - emit `Loop` here (th
 Private NVElemIdx As Collection    '"E"&accessVA -> recovered logical array index expr (e.g. arg_8) for a SAFEARRAY element access at that VA; injected by the SIB read/store renderers
 Private NVCurVa As Long            'VA of the instruction currently being rendered (so the SIB renderers can look up NVElemIdx)
 Private NVLateDispid As Collection '"L"&callVA -> comma list of candidate DISPIDs pushed to a __vbaLateIdCall (resolve to the OCX member name at render)
+'Select-Case-on-Integer-parameter compares: a ByRef Integer param (e.g. KeyCode) is
+'loaded ONCE into a callee-saved 16-bit register and tested per case via
+'`mov ecx,const; call __vbaI2I4; cmp di,ax` or `cmp di,imm16`.  Our generic decoder
+'bails on these 16-bit register compares; this map records the resolved operands
+'("<paramTok>|<const>") per cmp VA so the Jcc renders `If KeyCode = 97` not `<cond>`.
+Private NVKeyCmp As Collection     '"K"&cmpVA -> "<paramTok>|<const>"
 '--- Control-array element accessor reconstruction (lblSkillName(i).Caption) ---
 'A control array's element accessor is `call [arrayVt + 0x40]` (the array object's
 'Item property).  A deterministic pre-pass (NativeDetectControlArrays) recovers, per
@@ -257,6 +263,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVCtlArrElem = New Collection
     Set NVCtlArrGuid = New Collection
     Set NVCtlArrRetbuf = New Collection
+    Set NVKeyCmp = New Collection
     Set NVLocalVtName = New Collection
     Set NVLocalVtGuid = New Collection
     NVCurVa = 0
@@ -383,6 +390,12 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'control, recover the index + the element retbuf local so it renders as
     'Set var_X = Form.ctrl(idx) and the following .Caption/.ToolTipText puts resolve.
     NativeDetectControlArrays col
+
+    'Resolve Select-Case-on-Integer-parameter compares (e.g. Form_KeyDown's KeyCode
+    'cases): bind the per-case `cmp di,<const>` to `<param> = <const>` by VA so the
+    'conditions render `If KeyCode = 97` instead of `<cond>`.  Strictly scoped (only
+    'procs with the `mov di,word[param]` anchor; only the 16-bit case compares).
+    NativeDetectKeyCompares col
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -1820,6 +1833,140 @@ nextk:
 done:
 End Sub
 
+Private Sub NativeDetectKeyCompares(col As Collection)
+    'VB6 `Select Case <IntegerByRefParam>` (e.g. Form_KeyDown's KeyCode) loads the param
+    'ONCE into a callee-saved 16-bit register (`mov base,[ebp+P]; mov di,word[base]`),
+    'then tests each case via `mov ecx,const; call __vbaI2I4; cmp di,ax` or
+    '`cmp di,imm16`.  The generic decoder bails on these 16-bit register compares (the
+    'boolean-juggling guard), leaving `<cond>`.  This pre-pass recognises ONLY this shape
+    'and records, per cmp VA, the resolved operands (paramTok | const) so the Jcc renders
+    '`If KeyCode = 97`.  It changes NO global register state (the earlier whole-proc
+    '16-bit-deref tracking bled wrong values into other procs - reverted); the 16-bit
+    'compares are EXCLUSIVE to the case chain (the 32-bit `cmp edi,eax` SAFEARRAY
+    'bounds-checks in the case bodies are a different opcode and never match).
+    On Error GoTo done
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    If n < 3 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+
+    'Anchor: mov <r16>, word[base] where base <- mov base,[ebp+P] (a ByRef param).
+    Dim keyReg As Long, keyParam As String, baseReg As Long, foundAnchor As Boolean
+    Dim j As Long, P As Long, gotP As Boolean
+    foundAnchor = False
+    For k = 1 To n - 1
+        If NativeIsMovR16FromMem(arr(k), keyReg, baseReg) Then
+            gotP = False
+            For j = k - 1 To 0 Step -1
+                If NativeIsMovRegFromParam(arr(j), baseReg, P) Then gotP = True: Exit For
+                If NativeInstDestReg(arr(j)) = baseReg Then Exit For   'base reused for something else
+            Next j
+            If gotP Then keyParam = "arg_" & Hex$(P): foundAnchor = True: Exit For
+        End If
+    Next k
+    If Not foundAnchor Then Exit Sub
+
+    'Record every 16-bit case compare of the key register.
+    Dim rhs As String
+    For k = 0 To n - 1
+        If NativeKeyCaseRhs(arr, k, keyReg, rhs) Then
+            NativeColPut NVKeyCmp, "K" & arr(k).va, keyParam & "|" & rhs
+        End If
+    Next k
+done:
+End Sub
+
+Private Function NativeIsMovR16FromMem(inst As CInstruction, ByRef destReg As Long, ByRef baseReg As Long) As Boolean
+    'Match `mov r16, word[base]` (0x66 prefix + 0x8B + memory operand); set destReg
+    '(the loaded 16-bit register) and baseReg (the memory base register).
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long, md As Long
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If Not NativeHas66(dump) Then GoTo no
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op <> &H8B Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3
+    If md = 3 Then GoTo no
+    destReg = (modrm \ 8) And 7
+    baseReg = NativeMemBase(dump)
+    If baseReg < 0 Then GoTo no
+    NativeIsMovR16FromMem = True
+    Exit Function
+no:
+    NativeIsMovR16FromMem = False
+End Function
+
+Private Function NativeIsMovRegFromParam(inst As CInstruction, ByVal reg As Long, ByRef P As Long) As Boolean
+    'Match `mov <reg>, [ebp + P]` with P > 0 (a procedure parameter slot); set P.
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long, md As Long, rf As Long, disp As Long, isAbs As Boolean
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If NativeHas66(dump) Then GoTo no
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op <> &H8B Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3: rf = (modrm \ 8) And 7
+    If md = 3 Or rf <> reg Then GoTo no
+    If NativeMemIndex(dump) >= 0 Then GoTo no
+    If NativeMemBase(dump) <> 5 Then GoTo no          'base must be ebp
+    If Not NativeDecodeDisp(dump, disp, isAbs) Then GoTo no
+    If isAbs Or disp <= 0 Then GoTo no
+    P = disp
+    NativeIsMovRegFromParam = True
+    Exit Function
+no:
+    NativeIsMovRegFromParam = False
+End Function
+
+Private Function NativeKeyCaseRhs(arr() As CInstruction, ByVal k As Long, ByVal keyReg As Long, ByRef rhs As String) As Boolean
+    'A 16-bit case compare of the key register: `cmp keyReg,ax` (const from the preceding
+    '`mov ecx,imm` feeding __vbaI2I4) or `cmp keyReg,imm16` (const inline).  Sets rhs.
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long, md As Long, reg As Long, rm As Long
+    On Error GoTo no
+    dump = Replace(arr(k).dump, " ", "")
+    n = Len(dump) \ 2
+    If Not NativeHas66(dump) Then GoTo no             'only the 16-bit case compares
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+    If op = &H3B Then                                  'cmp reg, r/m  -> cmp keyReg, ax
+        If reg = keyReg And md = 3 And rm = 0 Then
+            Dim jj As Long, c As Long
+            For jj = k - 1 To k - 4 Step -1
+                If jj < 0 Then Exit For
+                If NativeIsMovEcxImm(arr(jj), c) Then rhs = CStr(c And &HFFFF&): NativeKeyCaseRhs = True: Exit Function
+            Next jj
+        End If
+    ElseIf op = &H81 Then                              'grp1 r/m, imm16 ; /7 = cmp
+        If md = 3 And rm = keyReg And reg = 7 Then
+            rhs = CStr(NativeDumpInt16(dump, n - 2) And &HFFFF&)
+            NativeKeyCaseRhs = True
+        End If
+    End If
+    Exit Function
+no:
+    NativeKeyCaseRhs = False
+End Function
+
+Private Function NativeIsMovEcxImm(inst As CInstruction, ByRef val As Long) As Boolean
+    'Match `mov ecx, imm32` (0xB9 id); set val.
+    Dim dump As String, n As Long, i As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    If NativeDumpByte(dump, i) = &HB9 Then val = NativeDumpInt32(dump, i + 1): NativeIsMovEcxImm = True
+End Function
+
 Private Function NativeIsIndirectMemCall(inst As CInstruction, ByRef baseReg As Long, ByRef disp As Long) As Boolean
     'True when inst is `call [reg + disp]` (FF /2, memory via a base register, NOT an
     'absolute [disp32] nor `call reg`).  Returns the base register (0..7) and disp.
@@ -2690,6 +2837,17 @@ Private Function NativeProcessInst(inst As CInstruction) As String
     'TEST/CMP set the flags consumed by the next conditional jump.  Record the
     'operands now (the relational operator is resolved later from the Jcc).
     If mn = "TEST" Or mn = "CMP" Then
+        'A recognised Select-Case-on-Integer-parameter case compare (`cmp di,<const>`):
+        'use the pre-pass-recovered operands (<param> = <const>) instead of the generic
+        'decode, which bails on the 16-bit register compare and leaves <cond>.
+        Dim kcRec As String, kcBar As Long
+        kcRec = NativeColGet(NVKeyCmp, "K" & inst.va)
+        If Len(kcRec) > 0 Then
+            kcBar = InStr(kcRec, "|")
+            NVCmpL = Left$(kcRec, kcBar - 1): NVCmpR = Mid$(kcRec, kcBar + 1)
+            NVCmpIsTest = False: NVCmpIsBool = False: NVCmpSet = True
+            Exit Function
+        End If
         NativeDecodeCompare inst, mn
         Exit Function
     End If

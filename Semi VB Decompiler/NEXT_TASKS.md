@@ -110,27 +110,32 @@ NativeDetectControlArrays to also catch offset 0x4C on an is-array receiver and 
 compare reads the folded value -> `If i > frmMain.lblSkillName.Count`.  Shares the movsx
 tracking dependency with Gap A.
 
-## Dungeon Form_KeyDown / Select-Case-on-Integer (2026-06-17) — partial
+## Dungeon Form_KeyDown / Select-Case-on-Integer (2026-06-17) — DONE (conditions)
 
 `frmMain.Form_KeyDown` (408DE0) is `Select Case KeyCode` rendered as a deep
 `If <cond>` cascade.  Each arm compiles to
-`mov ecx,imm ; call __vbaI2I4 ; cmp di, ax ; je` where `di` = KeyCode (a ByRef
-Integer param `mov di,[edx]`, loaded ONCE - edi is callee-saved - and reused).
-- **DONE 3de82ae**: `__vbaI2I4` now threads the numeric-literal ECX even when eax
-  is stale (fixed `picLife.ScaleMode = 1` = vbTwips elsewhere).  So `ax` = the case
-  constant is now available.
-- **REVERTED (too risky)**: tracking the 16-bit ByRef-Integer deref (`mov di,[KeyCode]`
-  → param name) + relaxing the 0x66 `cmp r16,r16` bail.  These DID resolve
-  `If KeyCode = 97` (case 1 only - later arms reuse edi for `Game.pIndex` so they
-  bail), BUT the di-tracking changed register resolution in OTHER procs, rewriting
-  already-correct conditions into plausible-but-wrong ones (proc_4177D0:
-  `If (var_24 - global_X(20)) > global_X(16)` → `If arg_8 > 0`; modItem field
-  `= ecx` → `= arg_8`).  proc_X names are stripped so correctness is unverifiable.
-  Reverted per the no-plausible-but-wrong rule.  To finish safely: scope the
-  16-bit-deref tracking to ONLY the Select-Case `cmp di,ax` shape (a pre-pass that
-  recognises the `mov di,[param] ; {mov ecx,imm; call I2I4; cmp di,ax; jcc}+` chain
-  and binds di to the param for that run only), then reconstruct the if-chain as a
-  real `Select Case`.  Big, structural; do with a dedicated mini-test.
+`mov ecx,imm ; call __vbaI2I4 ; cmp di, ax ; jcc` (or `cmp di,imm16 ; jcc`) where
+`di` = KeyCode (a ByRef Integer param `mov edx,[ebp+P]; mov di,word[edx]`, loaded
+ONCE - edi is callee-saved - and reused).
+- **DONE 3de82ae**: `__vbaI2I4` threads the numeric-literal ECX even when eax is stale.
+- **DONE (this change)**: the `<cond>` cascade now resolves to `If KeyCode = 97`,
+  `If KeyCode <> 38`, ... matching the commercial (and cleaner - no `CLng()` wrapper).
+  New pre-pass **NativeDetectKeyCompares**: finds the anchor `mov di,word[base]` /
+  `mov base,[ebp+P]` (binds the 16-bit key register to the param), then records per
+  `cmp di,<const>` VA the resolved operands (`<paramTok>|<const>`) into NVKeyCmp; the
+  CMP handler uses that record instead of the generic decode (which bails on 16-bit
+  register compares).  The const comes from the preceding `mov ecx,imm` (ax form) or
+  the inline imm16.  **Fully VA-scoped - changes NO global register state**, so the
+  earlier bleeding (the whole-proc 16-bit-deref tracking rewrote conditions in
+  proc_4177D0/modItem into plausible-but-wrong ones) cannot recur: only frmMain.frm
+  changed, `<cond>` 44->27, all other metrics/files identical, structure balanced, no
+  new dangling GoTos.  KEY: the 16-bit `cmp di,X` (0x66) case compares are EXCLUSIVE to
+  the chain; the 32-bit `cmp edi,eax` SAFEARRAY bounds-checks in the case bodies are a
+  different opcode and never match.  Helpers: NativeIsMovR16FromMem,
+  NativeIsMovRegFromParam, NativeKeyCaseRhs, NativeIsMovEcxImm.
+- **NOT done (deferred, optional)**: reconstruct the if-chain as a real `Select Case`
+  (the commercial also leaves it as If/ElseIf).  Conditions are resolved, which was the
+  goal; the structural Select-Case rebuild is a separate, riskier change.
 
 ## mnuFileLoad CommonDialog1 → cmdSkillRaise (2026-06-17)
 
