@@ -120,10 +120,17 @@ Integer param `mov di,[edx]`, loaded ONCE - edi is callee-saved - and reused).
   IS its vtable index (CommonDialog1 cId=33 → accessor 0x37C); paired with the property
   GUID from the matching gOcxList entry (strLibname == external class).  Skips controls
   already in gControlNameArray (customocx Winsock has a tControl - no duplicate).
-- **TODO OCX late-bound property VALUES**: `CommonDialog1.DialogTitle = "..."` etc. are
-  `__vbaLateIdSt` (late-bound DISPID) puts - still `Call LateIdSt()`.  NativeLateIdCall
-  must resolve the DISPID via the OCX typelib (GetControlClass → "MSComDlg.CommonDialog")
-  AND track the receiver through a local (`Set var_1C = CommonDialog1; var_1C.X = ...`).
+- **OCX late-bound property VALUES — DONE 249eccd**: `CommonDialog1.DialogTitle = "..."`
+  etc. now resolve.  Root cause was NOT the receiver (that resolved once the control was
+  named) but the late-call PRE-PASS: it identified the helper via NativeApiName, which
+  only decodes a DIRECT `call [iat]`.  VB caches the helper IAT in a callee-saved reg
+  and calls it indirectly (`mov edi,[__vbaLateIdSt]; call edi`), so the pre-pass never
+  saw it and its DISPID was never collected → bare `Call LateIdSt()`.  New
+  NativeResolveCallApi traces `call reg` back to the reg's IAT load.  mnuFileLoad now
+  matches commercial (DialogTitle/InitDir/FileName/DefaultExt/Flags=4100/Filter/ShowOpen);
+  unresolved `Call LateId*()` program-wide: several → 0.  Minor remaining: InitDir loses
+  the `App.Path &` prefix (concat not folded); one `FileName = ""` put at vtable 0x50
+  still UnkVCall (a different put encoding).
 
 ## New test bench: VB6LangTest (2026-06-16)
 
