@@ -5957,19 +5957,47 @@ End Function
 
 Private Function NativeCallTargetName(ByVal tgt As Long) As String
     'Resolve a call target address to a procedure name, qualified by module
-    'unless it is in the current form (then unqualified).
+    'unless it is in the current form/module (then unqualified).
     Dim nm As String
     nm = NativeLookupName(tgt)
     If Len(nm) = 0 Then nm = NativeLookupName(NativeSnapEntry(tgt))
     If Len(nm) = 0 Then
-        'Not a user procedure - it may be a declared-DLL (Win32 API) call thunk.
-        nm = NativeApiStubName(tgt)
-        If Len(nm) > 0 Then NativeCallTargetName = nm: Exit Function
-        NativeCallTargetName = "proc_" & Hex$(tgt)
-        Exit Function
+        'Not a real (linked) name - prefer a declared-DLL (Win32 API) call thunk.
+        Dim apinm As String
+        apinm = NativeApiStubName(tgt)
+        If Len(apinm) > 0 Then NativeCallTargetName = apinm: Exit Function
+        'A discovered user procedure with no linked name (e.g. a frameless private
+        'module Function): use its owner-qualified synthetic name from
+        'gNativeProcArray (Module1.proc_403100) so a cross-module call is traceable
+        'to the file the procedure lives in.
+        nm = NativeProcArrayName(tgt)
+        If Len(nm) = 0 Then nm = NativeProcArrayName(NativeSnapEntry(tgt))
+        If Len(nm) = 0 Then
+            NativeCallTargetName = "proc_" & Hex$(tgt)
+            Exit Function
+        End If
     End If
     If Len(NVForm) > 0 And Left$(nm, Len(NVForm) + 1) = NVForm & "." Then nm = Mid$(nm, Len(NVForm) + 2)
     NativeCallTargetName = nm
+End Function
+
+Private Function NativeProcArrayName(ByVal tgt As Long) As String
+    'Owner-qualified synthetic name (e.g. "Module1.proc_403100") of the discovered
+    'procedure whose entry is at or just before tgt, from gNativeProcArray - which
+    'records the owning module for every procedure including those that have no
+    'linked real name in SubNamelist.  Empty when tgt is not a known proc entry.
+    Dim i As Long, d As Long, bestDelta As Long
+    On Error Resume Next
+    bestDelta = 99999
+    For i = 0 To UBound(gNativeProcArray) - 1
+        If gNativeProcArray(i).offset <> 0 Then
+            d = tgt - gNativeProcArray(i).offset
+            If d >= 0 And d <= 24 And d < bestDelta Then
+                bestDelta = d
+                NativeProcArrayName = gNativeProcArray(i).sName
+            End If
+        End If
+    Next
 End Function
 
 Private Function NativeApiStubName(ByVal addr As Long) As String
