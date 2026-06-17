@@ -488,6 +488,25 @@ boolean-idiom neg as `-(handle)` in 19 places — reverted).
 (commercial also drops them). The flag byte (e.g. 0x2E) encodes Step/B/F; reverse the bit mapping
 to emit `-Step(...)`, `, B`, `, BF`. Would beat commercial. (Code: NativeControlProp `Line` case.)
 
+### 16-bit word-compare conditions — three forms DONE (2026-06-17, modMap focus)
+- `cmp ax,imm16` after `mov ax,word[mem]` (`Select Case <IntField> / Case lo To hi`):
+  new compare-only shadow `NVR16Val` captures the loaded word (ceiling form
+  `global_X(12)(2)` when the SIB index is untracked) without polluting NVReg. 0ad51af.
+- `cmp ax,imm16` of an Integer-Function result (`If Dist(...) <= 1`): consume the folded
+  call expr in NVReg(0). `cmp r16,r16` of two clean named/const regs (`XXrun = 0`):
+  resolve like the `test si,si` case (89c7762), gated to both operands clean. 1275b0d.
+- Dungeon modMap `<cond>` 12→8, whole-program 27→23. Gate clean (only modMap changed).
+
+### Abs() compares — CONFIRMED HARD CEILING (do not attempt)
+`If Abs(XXrun) > Abs(YYrise)` (Open_Sight_Line, 3 sites) = `__vbaI2Abs` (arg in **ecx**,
+result **ax**) ×2 with the first result threaded ax→dx→`word[local]`→cx then `cmp cx,ax`.
+The SECOND `Abs(var_50)` is recoverable; the FIRST is NOT — control reaches the block via
+the `YYrise=0` guard (`cmp word[ebp-0x50],ax; jne <abs>`) which never loads ecx, so ecx is
+a stale control-flow-merged register at call#1. A naive fold yields garbage
+`Abs(var_50) > Abs(var_50)`; the commercial decompiler mis-identifies it too
+(`Abs(var_24)`). Needs full CFG data-flow, out of scope. The other modMap residual is the
+5 boolean-AND materialization `<cond>` in Get_Wall_Connector_ID (Task A, regression-prone).
+
 ### F. FPU compare `st0` operand recovery (low value, medium effort)
 `If (st0 > (var_C + 5))` — the left operand is lost because a value-preserving fp helper `call`
 between the `fld` and the `fcom` resets the NVFpu stack model (NVFpuTop=0). Let such helper calls
