@@ -1644,7 +1644,7 @@ Private Sub NativeDetectLateCalls(col As Collection)
     For Each inst In col: Set arr(k) = inst: k = k + 1: Next
     For k = 0 To n - 1
         If (arr(k).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nextk
-        Dim an As String: an = NativeApiName(arr(k))
+        Dim an As String: an = NativeResolveCallApi(arr, k)
         'Id family (member by DISPID): __vbaLateIdCall/CallLd/CallSt/St/StAd/NamedCall.
         'Mem family (member by NAME string): __vbaLateMem*.
         If InStr(an, "__vbaLateId") = 0 And InStr(an, "__vbaLateMem") = 0 Then GoTo nextk
@@ -1656,7 +1656,7 @@ Private Sub NativeDetectLateCalls(col As Collection)
             lim = k - 30: If lim < 0 Then lim = 0
             For j = k - 1 To lim Step -1
                 If (arr(j).cmdType And C_TYPEMASK) = C_CAL Then
-                    If InStr(NativeApiName(arr(j)), "__vbaLateId") > 0 Then Exit For   'previous late call -> stop
+                    If InStr(NativeResolveCallApi(arr, j), "__vbaLateId") > 0 Then Exit For   'previous late call -> stop
                 End If
                 If NativeIsPushImm(arr(j), pv) Then
                     If pv <> 0 Then cand = cand & CStr(pv) & ","     '0 is the flags arg, never a member id
@@ -1692,6 +1692,25 @@ Private Function NativeCallReg(inst As CInstruction) As Long
     If op <> &HFF Then Exit Function
     modrm = NativeDumpByte(dump, i + 1)
     If (modrm \ &H40) = 3 And ((modrm \ 8) And 7) = 2 Then NativeCallReg = modrm And 7
+End Function
+
+Private Function NativeResolveCallApi(arr() As CInstruction, ByVal callIdx As Long) As String
+    'API name of a call, resolving an INDIRECT `call reg` to the IAT the register was
+    'loaded from (VB caches a helper IAT into a callee-saved reg, then calls it many
+    'times - e.g. `mov edi,[__vbaLateIdSt]; ...; call edi`).  Without this, the
+    'late-call pre-pass misses every register-cached helper call (its DISPID is never
+    'collected), so the property put renders as a bare `Call LateIdSt()`.
+    NativeResolveCallApi = NativeApiName(arr(callIdx))
+    If Len(NativeResolveCallApi) > 0 Then Exit Function
+    Dim rg As Long, j As Long
+    rg = NativeCallReg(arr(callIdx))
+    If rg < 0 Then Exit Function
+    For j = callIdx - 1 To 0 Step -1
+        If NativeInstDestReg(arr(j)) = rg Then
+            NativeResolveCallApi = NativeApiName(arr(j))
+            Exit Function
+        End If
+    Next j
 End Function
 
 Private Function NativeBackCallIsObjSet(arr() As CInstruction, ByVal callIdx As Long) As Boolean
