@@ -2290,6 +2290,20 @@ Private Function NativeLooksRelational(ByVal s As String) As Boolean
         Or (InStr(s, " Is ") > 0)
 End Function
 
+Private Function NativeIsCallExpr(ByVal s As String) As Boolean
+    'True when s is a tracked function/value-call expression like `IsNumeric(var_4C)`
+    'or `Environ$("TEMP")` - first char an identifier char, contains "(", ends ")".
+    'Used so a 16-bit `test ax,ax` of a folded predicate result (VARIANT_BOOL, which
+    'VB word-tests) resolves to `<expr> <> 0` instead of being dropped as a word-reg
+    'partial.  A leading "(" (an already-parenthesised relational) is handled separately.
+    Dim c As String
+    s = Trim$(s)
+    If Len(s) < 3 Then Exit Function
+    c = Left$(s, 1)
+    If Not ((c >= "A" And c <= "Z") Or (c >= "a" And c <= "z") Or c = "_") Then Exit Function
+    NativeIsCallExpr = (InStr(s, "(") > 0 And Right$(s, 1) = ")")
+End Function
+
 Private Function NVProcEndApprox(ByVal addr As Long) As Long
     'Upper bound for case-target validation: the next discovered proc, else +8KB.
     Dim pe As Long, e As Long
@@ -3687,18 +3701,18 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
                 NVPendingCall = "Call " & NVReg(0)
                 NativeRuntimeCall = "": Exit Function
-            Case "EOF", "FREEFILE", "ISNUMERIC", "ISDATE", "ISEMPTY", "ISNULL", _
-                 "ISARRAY", "ISOBJECT", "ISERROR", "ISMISSING"
-                'Boolean predicates (Is*/EOF) feed `If <pred> Then` / `Do While Not
-                'EOF` - the result is consumed by `test eax / jcc`, but the condition
-                'renderer can't yet turn it into a relational, so folding would drop the
-                'call AND still print a blank <cond>.
+            Case "EOF", "FREEFILE"
+                'EOF feeds a `Do While Not EOF(f)` loop test, reconstructed by a
+                'separate pre-pass that doesn't (yet) consume a folded predicate, so
+                'folding would drop the call and leave the loop cond blank.
                 'FreeFile is the file number; it is used in many places (the condition,
                 'and every Open/Put/Get/Close `#<n>`) but often has NO single clean
                 '`var = FreeFile()` store to anchor a variable name, so folding leaks
                 'the expression into all of them (`Open ... As #FreeFile(...)`).
-                'Keep them visible Calls until the value model tracks a stable file
-                'number / the condition renderer builds the relational.
+                'Keep them visible Calls until the loop pre-pass / file-number tracking
+                'handle them.  (Simple-If Boolean predicates Is*/IsNumeric DO fold now -
+                'the 16-bit `test ax,ax` of their VARIANT_BOOL result resolves to
+                '`<pred> <> 0` via NativeIsCallExpr in NativeDecodeCompare.)
                 NativeRuntimeCall = "Call " & vbName & "(" & NativeArgList() & ")": Exit Function
             Case Else
                 'Value-returning intrinsic (Environ$/Command$/Now/Timer/Rnd/
@@ -5903,13 +5917,14 @@ Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
     If op = &H85 And md = 3 And reg = rm Then
         Dim bv As String
         bv = NVReg(rm)
-        If Len(bv) > 0 And Left$(bv, 1) = "(" Then
+        If Len(bv) > 0 And (Left$(bv, 1) = "(" Or NativeIsCallExpr(bv)) Then
             If NativeLooksRelational(bv) Then
                 'Already a relational Boolean (recovered fp compare) - render it
                 'directly, without the redundant "<> 0".
                 NVCmpL = bv: NVCmpIsBool = True: NVCmpSet = True
             Else
-                'A folded value (e.g. an arithmetic sum) - test it for non-zero.
+                'A folded value or predicate call (e.g. an arithmetic sum, or
+                'IsNumeric(x)/EOF(f) word-tested as a VARIANT_BOOL) - test for non-zero.
                 NVCmpL = bv: NVCmpR = "0": NVCmpIsTest = True: NVCmpSet = True
             End If
             Exit Sub
