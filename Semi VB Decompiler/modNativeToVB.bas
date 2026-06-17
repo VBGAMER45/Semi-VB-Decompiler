@@ -6903,13 +6903,38 @@ Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
                 '`cmp ax,imm16`.  The generic decode bails on the 16-bit accumulator, so
                 'use the word captured from the preceding memory load (NVR16Val) -> the
                 'operand resolves (e.g. global_X(12)(2) >= 1) instead of leaving <cond>.
+                Dim axw As String
                 If Len(NVR16Val(0)) > 0 Then
-                    NVCmpL = NVR16Val(0): NVCmpR = CStr(NativeDumpInt16(dump, i + 1))
+                    axw = NVR16Val(0)
+                ElseIf NativeIsCallExpr(NVReg(0)) Then
+                    'ax holds an Integer-returning function result tested against a
+                    'literal (`If modMap_Dist(...) <= 1`); resolve like the `test ax,ax`
+                    'of a folded predicate call (9ab06f5) instead of dropping to <cond>.
+                    axw = NVReg(0)
+                End If
+                If Len(axw) > 0 Then
+                    NVCmpL = axw: NVCmpR = CStr(NativeDumpInt16(dump, i + 1))
                     NVCmpIsTest = False: NVCmpIsBool = False: NVCmpSet = True
                 End If
                 GoTo done3
             Case &HA9: GoTo done3                         'test ax, imm - 16-bit accumulator
-            Case Else: If md = 3 Then GoTo done3          'r/m is a register
+            Case Else
+                If md = 3 Then
+                    'A 16-bit reg-reg compare is normally VB's Boolean juggling (low-word
+                    'partials our 32-bit model can't follow) - resolving it yields garbage,
+                    'so bail.  EXCEPT a `cmp r16,r16` whose BOTH registers hold a clean
+                    'tracked named value or a numeric constant: such a value was loaded by
+                    'a full 32-bit mov / xor-to-zero (a 16-bit write clears the tracked
+                    'value), so the low word IS the Integer value, e.g.
+                    '`mov ecx,[var_58]; xor eax,eax; cmp cx,ax` = `XXrun = 0`.  Same safety
+                    'basis as the `test si,si` resolution (89c7762); falls through to decode.
+                    Dim okRR As Boolean
+                    If op = &H3B Or op = &H39 Then
+                        okRR = (NativeIsCleanNamedVal(NVReg(reg)) Or NativeIsNumLit(NVReg(reg))) _
+                           And (NativeIsCleanNamedVal(NVReg(rm)) Or NativeIsNumLit(NVReg(rm)))
+                    End If
+                    If Not okRR Then GoTo done3               'r/m is a register
+                End If
         End Select
     End If
     Select Case op
