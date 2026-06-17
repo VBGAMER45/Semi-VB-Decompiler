@@ -128,9 +128,16 @@ Integer param `mov di,[edx]`, loaded ONCE - edi is callee-saved - and reused).
   saw it and its DISPID was never collected → bare `Call LateIdSt()`.  New
   NativeResolveCallApi traces `call reg` back to the reg's IAT load.  mnuFileLoad now
   matches commercial (DialogTitle/InitDir/FileName/DefaultExt/Flags=4100/Filter/ShowOpen);
-  unresolved `Call LateId*()` program-wide: several → 0.  Minor remaining: InitDir loses
-  the `App.Path &` prefix (concat not folded); one `FileName = ""` put at vtable 0x50
-  still UnkVCall (a different put encoding).
+  unresolved `Call LateId*()` program-wide: several → 0.
+- **InitDir App.Path — DONE aa58564**: turned out the two "minor leftovers" were ONE
+  root cause - the value is `Global.App.Path & "\saved\"`, accessed via the standalone
+  VB `_Global` object (lazily `New`'d into a module global), and the App/Screen/Clipboard
+  accessor resolution was gated to the FORM's vtable only (NVRegIsFormVt).  (The "0x50
+  put" was actually `.Path`, not `FileName=""`.)  Recognise the `_Global` object at
+  __vbaNew2 (CLSID/IID family {FCFB3D2x-A0FA-1068-A738-08002B3371B5}) and accept it as a
+  receiver → `InitDir = (App.Path & "\saved\")` resolves.  Tiny residual: a FileName=""
+  condition reads `If App.Path = 0` (App.Path lingering in a reused local; the commercial
+  mangles that condition too).
 
 ## New test bench: VB6LangTest (2026-06-16)
 
