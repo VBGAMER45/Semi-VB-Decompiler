@@ -36,6 +36,39 @@ benchmarked against the Dungeon test program. Written to survive a context reset
 - Commercial decompiler hits the same walls. Form/control names, class method names,
   Declare names, and event-handler names ARE recoverable (and already are).
 
+## Dungeon Form_KeyDown / Select-Case-on-Integer (2026-06-17) — partial
+
+`frmMain.Form_KeyDown` (408DE0) is `Select Case KeyCode` rendered as a deep
+`If <cond>` cascade.  Each arm compiles to
+`mov ecx,imm ; call __vbaI2I4 ; cmp di, ax ; je` where `di` = KeyCode (a ByRef
+Integer param `mov di,[edx]`, loaded ONCE - edi is callee-saved - and reused).
+- **DONE 3de82ae**: `__vbaI2I4` now threads the numeric-literal ECX even when eax
+  is stale (fixed `picLife.ScaleMode = 1` = vbTwips elsewhere).  So `ax` = the case
+  constant is now available.
+- **REVERTED (too risky)**: tracking the 16-bit ByRef-Integer deref (`mov di,[KeyCode]`
+  → param name) + relaxing the 0x66 `cmp r16,r16` bail.  These DID resolve
+  `If KeyCode = 97` (case 1 only - later arms reuse edi for `Game.pIndex` so they
+  bail), BUT the di-tracking changed register resolution in OTHER procs, rewriting
+  already-correct conditions into plausible-but-wrong ones (proc_4177D0:
+  `If (var_24 - global_X(20)) > global_X(16)` → `If arg_8 > 0`; modItem field
+  `= ecx` → `= arg_8`).  proc_X names are stripped so correctness is unverifiable.
+  Reverted per the no-plausible-but-wrong rule.  To finish safely: scope the
+  16-bit-deref tracking to ONLY the Select-Case `cmp di,ax` shape (a pre-pass that
+  recognises the `mov di,[param] ; {mov ecx,imm; call I2I4; cmp di,ax; jcc}+` chain
+  and binds di to the param for that run only), then reconstruct the if-chain as a
+  real `Select Case`.  Big, structural; do with a dedicated mini-test.
+
+## mnuFileLoad CommonDialog1 → cmdSkillRaise (2026-06-17) — root-caused, NOT fixed
+
+`mnuFileLoad_Click` renders every `CommonDialog1.X` as `frmMain.cmdSkillRaise`
+(+ unresolved `Call LateIdSt()`).  The control LIST is correct (our `.frm` has both
+`CommonDialog1` and the `cmdSkillRaise` array), so the bug is the decompile-time
+control-FIELD-offset → name mapping: `(offset - NVBase)/4 → declaration index`
+mis-resolves CommonDialog1's form-instance field offset to the `cmdSkillRaise`
+control ARRAY (5 instances) / OCX field layout.  Plus the late-bound members
+(`DialogTitle`/`Filename`/`ShowOpen`) don't resolve via the OCX typelib.  Needs the
+control-array/OCX field-layout handling (Ionescu Control Info §10) + build/test.
+
 ## New test bench: VB6LangTest (2026-06-16)
 
 `C:\Users\Owner\frogger\vb6native\LangTest\VB6LangTest.exe` (full source alongside)
