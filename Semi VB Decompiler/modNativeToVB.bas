@@ -2877,7 +2877,10 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             Exit Function
 
         Case C_RET
-            NativeProcessInst = ind & "Exit Sub" & vbCrLf
+            'Exit <kind> matching the proc (Function/Property/Sub) so a recovered
+            'class Function/Property Get emits `Exit Function`/`Exit Property`, not a
+            'mis-typed `Exit Sub` (NVProcEndWord is set by NativeProcHeader).
+            NativeProcessInst = ind & "Exit " & NVProcEndWord & vbCrLf
             Exit Function
 
         Case C_FLT
