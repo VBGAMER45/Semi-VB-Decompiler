@@ -81,6 +81,35 @@ Still unresolved (separate, pre-existing gaps): the first ToolTipText VALUE rend
 `<value>` (a SIB array-element source push, not control-array-specific); `.Count`
 (0x4C on the array object); the `If i > lblSkillName.Count` condition.
 
+### Gap A — ToolTipText `<value>` (SIB element source) — ROOT CAUSE FOUND, fix deferred
+`lblSkillName(i).ToolTipText = SkillDef(sIndex).Description` pushes the value via
+`mov eax,[0x423020]; mov ecx,[eax+edi*8+4]` (the Description field).  The value is lost
+because `mov eax,[abs]` uses the **short-form opcode 0xA1** (mov eax, moffs32, no ModR/M)
+which `NativeTrackReg` does NOT handle - so eax never becomes the array pointer
+`global_00423020` and the SIB read can't identify it (drops to `<value>`).  The Caption
+case worked only because it loaded the same global via `mov ecx,[abs]` (0x8B, handled).
+A `Case &HA1` that mirrors the 0x8B abs-global path DOES fix it
+(`ToolTipText = global_00423020((var_24-1))(4)`) **and** improves the whole program
+(`<cond>` 44->35, `<value>` 3->1, `<arg>` 16->15, fixes the modSound `App.Path = 0`
+mangle -> `global_004230F4 = 0`, fixes `UBound((UBound(1)+10))` -> `UBound(global_X)`).
+BUT it also perturbs the SAFEARRAY struct-copy in modPlayer `modPlayer_Add` (0x4177D0):
+several field copies that rendered `global_00423088(12)(N) = global_004230C8(12)(M)`
+degrade to `= edx`, and a LSet helper call loses an arg.  Traced to a cascade where the
+now-tracked eax-global makes a stale register in the SIB index chain look `global_`,
+so the array-pointer detection (which needs exactly ONE of base/index to be `global_`)
+fails.  Tried scoping NVRegIsMe + clearing movsx/movzx dest - neither fully neutralised
+it.  So 0xA1 is net-positive but NOT strictly-additive; do it as a dedicated effort
+that also fixes the SIB pv-detection when base+index both look like data pointers.
+REVERTED 2026-06-17 (kept the codebase clean; control-array work unaffected).
+
+### Gap B — `.Count` (0x4C on the array object) — decoded, not attempted
+`If i > lblSkillName.Count` = `call [arrayVt + 0x4C]` (Count getter, value via a retbuf
+out-param) then `movsx edx,word[retbuf]; cmp i,edx; setg`.  Fixable by: (1) extend
+NativeDetectControlArrays to also catch offset 0x4C on an is-array receiver and fold
+`Form.ctrl.Count` into the retbuf local; (2) add `movsx reg,word[local]` tracking so the
+compare reads the folded value -> `If i > frmMain.lblSkillName.Count`.  Shares the movsx
+tracking dependency with Gap A.
+
 ## Dungeon Form_KeyDown / Select-Case-on-Integer (2026-06-17) — partial
 
 `frmMain.Form_KeyDown` (408DE0) is `Select Case KeyCode` rendered as a deep
