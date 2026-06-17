@@ -4153,6 +4153,23 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             NVReg(0) = "CInt(" & aa & ")"
             NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
             NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaI2Var") > 0
+            'Variant -> Integer (result in ax).  Folds the narrowing of a Variant result
+            'into eax for the consumer, e.g. `Item(i).ID = CInt(var_40)` where var_40 holds
+            'a Variant-returning Function's result (modMap_Fix_Walls); was a dropped
+            '`Call I2Var(var_40)` + a raw `= eax` store.
+            aa = NativeArgPop()
+            If Len(aa) = 0 Then aa = "<arg>"
+            NVReg(0) = "CInt(" & aa & ")"
+            NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaI4Var") > 0
+            'Variant -> Long (result in eax).
+            aa = NativeArgPop()
+            If Len(aa) = 0 Then aa = "<arg>"
+            NVReg(0) = "CLng(" & aa & ")"
+            NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
+            NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrCat") > 0
             '__vbaStrCat(p1, p2) returns p1 & p2.  p1 is pushed first (deeper on the
             'argument stack) and p2 last (on top), so the deeper operand is the LEFT
