@@ -58,16 +58,25 @@ Integer param `mov di,[edx]`, loaded ONCE - edi is callee-saved - and reused).
   and binds di to the param for that run only), then reconstruct the if-chain as a
   real `Select Case`.  Big, structural; do with a dedicated mini-test.
 
-## mnuFileLoad CommonDialog1 → cmdSkillRaise (2026-06-17) — root-caused, NOT fixed
+## mnuFileLoad CommonDialog1 → cmdSkillRaise (2026-06-17)
 
-`mnuFileLoad_Click` renders every `CommonDialog1.X` as `frmMain.cmdSkillRaise`
-(+ unresolved `Call LateIdSt()`).  The control LIST is correct (our `.frm` has both
-`CommonDialog1` and the `cmdSkillRaise` array), so the bug is the decompile-time
-control-FIELD-offset → name mapping: `(offset - NVBase)/4 → declaration index`
-mis-resolves CommonDialog1's form-instance field offset to the `cmdSkillRaise`
-control ARRAY (5 instances) / OCX field layout.  Plus the late-bound members
-(`DialogTitle`/`Filename`/`ShowOpen`) don't resolve via the OCX typelib.  Needs the
-control-array/OCX field-layout handling (Ionescu Control Info §10) + build/test.
+- **Wrong-naming FIXED 358bb7d**: every `CommonDialog1.X` rendered as
+  `frmMain.cmdSkillRaise`.  Root cause: CommonDialog1 (an OCX) is accessed at
+  vtable+0x37C = control index 33, but it is ABSENT from the parsed control array
+  (frmMain ControlCount=33, indices -1,1..32 - the OCX tControl is not in
+  `aControlArray`; reading struct[33] past the array is garbage, so it is genuinely
+  not there - indices 0 AND 33 have vtable accessors but no tControl).  With 0x2F8
+  mapping nothing in that proc, the per-proc base solver fabricated a base mapping
+  0x37C onto a real control (cmdSkillRaise idx 10).  Fix: a standard Form always uses
+  the verified 0x2F8 base (NativeOwnerIsStdForm), so the unparsed control stays
+  unresolved (`arg_8.UnkVCall_0000037Ch(...)`) instead of mis-named.  customocx
+  Winsock1/RichTextBox1 unaffected (they ARE in their array, map at 0x2F8).
+- **TODO name the OCX control**: CommonDialog1 still shows `UnkVCall_037Ch`.  Its
+  tControl is NOT in the regular `aControlArray` - OCX/external controls appear to
+  live in a separate table (note: customocx's Winsock IS in its array, so this is
+  form/version-specific).  Naming it needs locating + parsing that external-control
+  table and mapping vtable-accessor-index → name.  Also the late-bound members
+  (`DialogTitle`/`Filename`/`ShowOpen`) need OCX-typelib resolution.
 
 ## New test bench: VB6LangTest (2026-06-16)
 
