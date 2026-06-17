@@ -114,12 +114,16 @@ Integer param `mov di,[edx]`, loaded ONCE - edi is callee-saved - and reused).
   the verified 0x2F8 base (NativeOwnerIsStdForm), so the unparsed control stays
   unresolved (`arg_8.UnkVCall_0000037Ch(...)`) instead of mis-named.  customocx
   Winsock1/RichTextBox1 unaffected (they ARE in their array, map at 0x2F8).
-- **TODO name the OCX control**: CommonDialog1 still shows `UnkVCall_037Ch`.  Its
-  tControl is NOT in the regular `aControlArray` - OCX/external controls appear to
-  live in a separate table (note: customocx's Winsock IS in its array, so this is
-  form/version-specific).  Naming it needs locating + parsing that external-control
-  table and mapping vtable-accessor-index → name.  Also the late-bound members
-  (`DialogTitle`/`Filename`/`ShowOpen`) need OCX-typelib resolution.
+- **OCX control naming — DONE 2a8ff0b**: CommonDialog1 now resolves to
+  `frmMain.CommonDialog1` in code (was `arg_8.UnkVCall_037Ch`).  The control-hierarchy
+  parse (ProccessControls Case 255) sees the external control and `cControlHeader.cId`
+  IS its vtable index (CommonDialog1 cId=33 → accessor 0x37C); paired with the property
+  GUID from the matching gOcxList entry (strLibname == external class).  Skips controls
+  already in gControlNameArray (customocx Winsock has a tControl - no duplicate).
+- **TODO OCX late-bound property VALUES**: `CommonDialog1.DialogTitle = "..."` etc. are
+  `__vbaLateIdSt` (late-bound DISPID) puts - still `Call LateIdSt()`.  NativeLateIdCall
+  must resolve the DISPID via the OCX typelib (GetControlClass → "MSComDlg.CommonDialog")
+  AND track the receiver through a local (`Set var_1C = CommonDialog1; var_1C.X = ...`).
 
 ## New test bench: VB6LangTest (2026-06-16)
 
