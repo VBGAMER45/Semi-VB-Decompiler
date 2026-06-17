@@ -45,16 +45,33 @@ classes, properties, events, file I/O, and the intrinsic-function set. Findings:
 - Class method sig/kind — **DONE 574391e** (FuncDesc array leading-null fix:
   `Sub Greet(arg_C)` → `Function Greet()`, `Property Let Name(NewValue)`).
 - `Exit Sub` inside Function/Property — **DONE c6d4215** (now `Exit Function`/`Exit Property`).
+- Option Compare Text `__vbaStrTextCmp` fold — **DONE 509e226** (the case-insensitive
+  twin of `__vbaStrCmp`, materialised form).
+- Built-in value-fold — **DONE 52e4fbf** (value intrinsics Environ$/QBColor/Now/Rnd/
+  Format/financial/date/TypeName now fold into `lhs = X(args)`; LangTest bare-Call
+  lines 604→483). EXCLUDED (kept as Calls until the value model catches up): Boolean
+  predicates Is*/EOF (consumed by `test eax/jcc` - condition renderer can't build the
+  relational yet, would drop the call), and FreeFile (file number reused live in eax
+  as the next Open's `As #<n>` without reload - folding leaks `#FreeFile(...)`).
 - **TODO return + parameter TYPES** for class methods (no `As <type>` anywhere, even
   Dungeon clsBitmap). FuncDesc has the tdesc; the field isn't located yet and the
   Ionescu doc omits the method struct. Build a mini test with varied return/param
   types, dump FuncDesc fields, map. See memory `class-method-signatures.md`.
-- **TODO built-in value-fold**: `Call Environ$(temp)` should be `s = Environ$("TEMP")`
-  (~200 lines: Now/Rnd/FreeFile/TypeName/QBColor/CDbl/financial/etc. drop the `lhs =`
-  and often the literal args). Biggest raw-noise win.
-- **TODO** `RaiseEvent EventName(args)` (renders `Call RaiseEvent(arg_8,1,1)`);
-  Option Compare Text `__vbaStrTextCmp` fold; File I/O Open/Print# handle↔path conflation;
-  Class2 `Implements` member `IGreet_Greet` sig (FuncDesc under the IGreet iface vtable).
+- **TODO File I/O (#5)**: `Open ... As #<n>` still shows the path/#0 because FreeFile
+  isn't folded (see above - blocked on reused-result-register tracking: re-tag a
+  register to its stored local AFTER `var = expr()` so the live-in-eax file number
+  reads `var_X`; the naive global re-tag collapsed legit repeated `var = func()`
+  stores, so it needs to be scoped). Also: Width # renders `Call undef(...)` (helper
+  not in the API DB - add `__vbaWidthFile`-style name); Print # shows a raw address.
+- **TODO RaiseEvent (#3)**: `RaiseEvent NameChanged(NewValue)` renders
+  `Call RaiseEvent(arg_8, 1, 1)`. __vbaRaiseEvent(this, eventIdx, ?, <inline Variant
+  args>); event name IS recoverable (e.g. "NameChanged" in the binary) but needs the
+  event-index→name map + extracting the inline-built Variant arg values. Deep.
+- **TODO** condition renderer: turn a folded predicate (`test eax/jcc` after
+  `IsNumeric(x)`/EOF/StrComp) into `If <pred> <op> 0` instead of a blank `<cond>` -
+  would let Is*/EOF fold safely (and shrink `<cond>`).
+- **TODO** Class2 `Implements` member `IGreet_Greet` sig (FuncDesc under the IGreet
+  iface vtable - different voff mapping than the class default interface).
 
 ## Next tasks (prioritized — value vs effort/risk)
 
