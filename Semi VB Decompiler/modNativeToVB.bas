@@ -112,6 +112,10 @@ Private NVForCnt As Long           'per-proc loop-variable name allocation index
 Private NVFpCmp As Collection      '"P"&testVA -> "<relOp>|<regIdx>" - set NVReg(reg) to the relational
 Private NVFpSkip As Collection     '"P"&va -> "1" - suppress this scaffolding instruction
 Private NVStrCmpReg As Collection  '"P"&strcmpCallVA -> regIdx - the StrCmp result boolean-materializes into this register
+Private NVStrCmpDirect As Collection '"P"&strcmpCallVA -> "1" - the result is tested directly (`call __vbaStrCmp; test eax,eax; jcc`), no materialization/store; the handler hands its operands to the test
+Private NVStrCmpP1 As String        'direct-test StrCmp idiom (call __vbaStrCmp; test eax,eax; jcc): the left operand,
+Private NVStrCmpP2 As String        'and the right operand, handed from the StrCmp call to the following `test eax,eax`
+Private NVStrCmpPending As Boolean  'so the Jcc renders `If p1 <op> p2` (test strcmp,strcmp has the same Jcc polarity as cmp p1,p2)
 Private NVCounterSlot As Collection '"C"&disp -> "1" - a stack slot that is a loop induction variable (render by name, not a stale value)
 Private NVWhileCond As Collection  '"W"&exitJccVA -> "1" - emit `Do While <cond>` here (top-tested loop header)
 Private NVWhileLoop As Collection  '"W"&backedgeVA -> "1" - emit `Loop` here (the back-edge of a Do While)
@@ -238,6 +242,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVCmpIsBool = False: NVFpuChk = False
+    NVStrCmpPending = False: NVStrCmpP1 = "": NVStrCmpP2 = ""
     NVPendingCall = "": NVErrObjPending = False
     ReDim NVFpu(31): NVFpuTop = 0
     ReDim NVPushImm(31): ReDim NVPushDisp(31): NVPushTop = 0: NVLastPushDisp = 0
@@ -270,6 +275,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVFpCmp = New Collection
     Set NVFpSkip = New Collection
     Set NVStrCmpReg = New Collection
+    Set NVStrCmpDirect = New Collection
     Set NVCounterSlot = New Collection
     Set NVWhileCond = New Collection
     Set NVWhileLoop = New Collection
@@ -2577,6 +2583,24 @@ Private Sub NativeDetectStrCmpCompares(col As Collection)
     For Each inst In col: Set arr(k) = inst: k = k + 1: Next
     For k = 0 To n - 5
         If (arr(k).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nexts
+        'DIRECT-TEST form: `call __vbaStrCmp; test eax,eax; jcc` - the raw result is
+        'tested IMMEDIATELY (no materialisation, no store).  Resolve via NativeResolveCallApi
+        'so a register-cached strcmp (`mov edi,[iat]; call edi`, the map parser) is caught
+        'too.  Record it so the handler hands the operands to that test (-> `If p1 = p2`).
+        'Must be the very next instruction: when the result is first stored to a local
+        '(`mov var_B0,eax; ... ; test var_B0`, the config parsers) this does NOT match, so
+        'that strcmp keeps its visible Call (no lost comparison).
+        Dim cnmAny As String
+        cnmAny = NativeResolveCallApi(arr, k)
+        If (InStr(cnmAny, "__vbaStrCmp") > 0 Or InStr(cnmAny, "__vbaStrComp") > 0 Or InStr(cnmAny, "__vbaStrTextCmp") > 0) Then
+            If k + 1 <= n - 1 Then
+                If NativeIsTestEaxEax(arr(k + 1)) Then
+                    NativeColPut NVStrCmpDirect, "P" & arr(k).va, "1"
+                    GoTo nexts
+                End If
+            End If
+        End If
+        'Materialised form (neg/sbb/inc/neg) - direct `call [iat]` only, unchanged.
         Dim disp As Long, isAbs As Boolean
         If Not NativeDecodeDisp(arr(k).dump, disp, isAbs) Then GoTo nexts
         If Not isAbs Then GoTo nexts
@@ -2604,6 +2628,17 @@ nexts:
     Next k
 done:
 End Sub
+
+Private Function NativeIsTestEaxEax(inst As CInstruction) As Boolean
+    'Match `test eax, eax` (85 C0): the direct test of a __vbaStrCmp tri-state result.
+    Dim dump As String, nn As Long, i As Long
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    If NativeHas66(dump) Then Exit Function
+    NativeIsTestEaxEax = (NativeDumpByte(dump, i) = &H85 And NativeDumpByte(dump, i + 1) = &HC0)
+End Function
 
 Private Function NativeMovFromEax(inst As CInstruction) As Long
     'Match `mov REG, eax` -> dest register index, else -1.  Encodings:
@@ -4271,6 +4306,18 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                     NVReg(0) = "(" & scDeep & " = " & scTop & ")"
                     NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
                     NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                    NativeRuntimeCall = "": Exit Function
+                End If
+            End If
+            'DIRECT-TEST form (no neg/sbb/inc/neg materialisation): `call __vbaStrCmp;
+            'test eax,eax; jcc` - the raw tri-state is tested directly (0 = equal).  Hand
+            'the operands to the following `test eax,eax`, which then behaves like
+            '`cmp p1,p2` (identical Jcc polarity: je=equal, jl=p1<p2, ...), so the Jcc
+            'renders `If var_124 = "!"` etc. (a char-dispatch chain in the map parser).
+            If Len(NativeColGet(NVStrCmpDirect, "P" & inst.va)) > 0 And scN >= 2 Then
+                If NativeIsStrOperand(scA(0)) And NativeIsStrOperand(scA(1)) Then
+                    NVStrCmpP1 = scA(1): NVStrCmpP2 = scA(0): NVStrCmpPending = True
+                    NVReg(0) = ""
                     NativeRuntimeCall = "": Exit Function
                 End If
             End If
@@ -7084,6 +7131,19 @@ Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
     isTst = (mn = "TEST")
     modrm = NativeDumpByte(dump, i + 1)
     md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+    'A direct-test StrCmp (`call __vbaStrCmp; test eax,eax; jcc`): the preceding StrCmp
+    'handler stashed the operands.  `test strcmp,strcmp` has the SAME Jcc polarity as
+    '`cmp p1,p2` (je=equal, jl=p1<p2, ...), so feed the operands as a real compare and
+    'the Jcc renders `If var_124 = "!"`.  Consumed by the immediately-following
+    'test eax,eax; cleared otherwise so a later unrelated compare never reuses it.
+    If NVStrCmpPending Then
+        NVStrCmpPending = False
+        If op = &H85 And md = 3 And reg = 0 And rm = 0 Then
+            NVCmpL = NVStrCmpP1: NVCmpR = NVStrCmpP2
+            NVCmpIsTest = False: NVCmpIsBool = False: NVCmpSet = True
+            Exit Sub
+        End If
+    End If
     'test reg,reg where the register holds a recovered EXPRESSION (a relational
     'Boolean from an fp comparison, or a folded value): test it for non-zero.
     'This is the standard "If <fp compare> Then" tail (test ax,ax / test eax,eax)
