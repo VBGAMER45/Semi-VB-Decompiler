@@ -4393,6 +4393,35 @@ NewControl:
                 'against the right OCX typelib (the control name alone, e.g. "MFD",
                 'gives no hint of its class "TabDlg.SSTab").
                 Call AddControlClass(strCurrentForm & "." & cControlHeader.cName, strExternObject)
+                'Link the OCX/external control into gControlNameArray so the NATIVE
+                'decompiler resolves it: VB lays an external control's accessor at the
+                'same vtable base as intrinsic controls (0x2F8 + cId*4 - cId IS the
+                'control index; verified CommonDialog1 cId=33 -> 0x37C), but an OCX has
+                'no tControl entry, so it is otherwise missing from gControlNameArray and
+                'its calls render arg_8.UnkVCall_037Ch.  Pair it with its property GUID
+                'from the matching gOcxList entry so NativeControlProp resolves the
+                'member offsets (DialogTitle / InitDir / Filter / ...).
+                'Skip if this control is ALREADY in gControlNameArray (some OCX controls
+                'DO appear in the tControl array - e.g. customocx Winsock - and were
+                'added by the control-name parse; don't duplicate them).
+                Dim ocxGuid As String, iocx As Long, ocxDup As Boolean
+                ocxDup = False
+                For iocx = 0 To UBound(gControlNameArray)
+                    If gControlNameArray(iocx).strParentForm = strCurrentForm _
+                       And gControlNameArray(iocx).strControlName = cControlHeader.cName Then ocxDup = True: Exit For
+                Next
+                If Not ocxDup Then
+                    For iocx = 0 To UBound(gOcxList)
+                        If gOcxList(iocx).strLibname = strExternObject And Len(gOcxList(iocx).strGuid) > 0 Then
+                            ocxGuid = gOcxList(iocx).strGuid: Exit For
+                        End If
+                    Next
+                    gControlNameArray(UBound(gControlNameArray)).strControlName = cControlHeader.cName
+                    gControlNameArray(UBound(gControlNameArray)).strParentForm = strCurrentForm
+                    gControlNameArray(UBound(gControlNameArray)).strGuid = ocxGuid
+                    gControlNameArray(UBound(gControlNameArray)).lControlIndex = cControlHeader.cId
+                    ReDim Preserve gControlNameArray(UBound(gControlNameArray) + 1)
+                End If
                 'Load the control view COM if its on the computer
                 'Dim iGuid As Integer
                 'For iGuid = 0 To UBound(gOcxList)
