@@ -2078,7 +2078,8 @@ Private Sub NativeDetectStrCmpCompares(col As Collection)
         If Not isAbs Then GoTo nexts
         Dim cnm As String
         cnm = dsmNative.GetApiByIatVa(disp)
-        If InStr(cnm, "__vbaStrCmp") = 0 And InStr(cnm, "__vbaStrComp") = 0 Then GoTo nexts
+        If InStr(cnm, "__vbaStrCmp") = 0 And InStr(cnm, "__vbaStrComp") = 0 _
+           And InStr(cnm, "__vbaStrTextCmp") = 0 Then GoTo nexts   'Text = Option Compare Text
         'Optional `mov REG, eax` right after the call.
         Dim t As Long, reg As Long
         t = k + 1
@@ -3436,7 +3437,7 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             adst = NativeArgPop(): asrc = NativeArgPop()
             If Len(asrc) = 0 Then asrc = adst
             NVReg(0) = asrc: NVKeepPushStack = True: NativeRuntimeCall = "": Exit Function
-        Case InStr(nm, "__vbaStrCmp") > 0, InStr(nm, "__vbaStrComp") > 0
+        Case InStr(nm, "__vbaStrCmp") > 0, InStr(nm, "__vbaStrComp") > 0, InStr(nm, "__vbaStrTextCmp") > 0
             '__vbaStrCmp(p1, p2) returns strcmp(p1, p2); p1 is pushed deeper, p2 on
             'top.  When the pre-pass found the boolean materialisation that turns the
             'tri-state into (strcmp = 0), bind the equality relational "(p1 = p2)"
