@@ -36,6 +36,26 @@ benchmarked against the Dungeon test program. Written to survive a context reset
 - Commercial decompiler hits the same walls. Form/control names, class method names,
   Declare names, and event-handler names ARE recoverable (and already are).
 
+## New test bench: VB6LangTest (2026-06-16)
+
+`C:\Users\Owner\frogger\vb6native\LangTest\VB6LangTest.exe` (full source alongside)
+exercises ~every VB6 statement/function/feature — a broader bench than Dungeon for
+classes, properties, events, file I/O, and the intrinsic-function set. Findings:
+
+- Class method sig/kind — **DONE 574391e** (FuncDesc array leading-null fix:
+  `Sub Greet(arg_C)` → `Function Greet()`, `Property Let Name(NewValue)`).
+- `Exit Sub` inside Function/Property — **DONE c6d4215** (now `Exit Function`/`Exit Property`).
+- **TODO return + parameter TYPES** for class methods (no `As <type>` anywhere, even
+  Dungeon clsBitmap). FuncDesc has the tdesc; the field isn't located yet and the
+  Ionescu doc omits the method struct. Build a mini test with varied return/param
+  types, dump FuncDesc fields, map. See memory `class-method-signatures.md`.
+- **TODO built-in value-fold**: `Call Environ$(temp)` should be `s = Environ$("TEMP")`
+  (~200 lines: Now/Rnd/FreeFile/TypeName/QBColor/CDbl/financial/etc. drop the `lhs =`
+  and often the literal args). Biggest raw-noise win.
+- **TODO** `RaiseEvent EventName(args)` (renders `Call RaiseEvent(arg_8,1,1)`);
+  Option Compare Text `__vbaStrTextCmp` fold; File I/O Open/Print# handle↔path conflation;
+  Class2 `Implements` member `IGreet_Greet` sig (FuncDesc under the IGreet iface vtable).
+
 ## Next tasks (prioritized — value vs effort/risk)
 
 ### SAFEARRAY bounds-check suppression — DONE (this cycle, f7e5c75)
