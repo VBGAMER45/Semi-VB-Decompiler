@@ -156,6 +156,8 @@ Private NVRegObjVt(7) As String    'object NAME whose VTABLE a register holds ([
 Private NVRegObjGuid(7) As String  'control GUID a register's object POINTER refers to ("" = intrinsic global / none)
 Private NVRegObjVtGuid(7) As String 'control GUID whose VTABLE a register holds (resolves control props via GetProperty)
 Private NVRegObjInst(7) As String  'receiver expression for a register holding a user-class VTABLE (e.g. global_004230F4), so call [vt+off] -> recv.Method
+Private NVRegFieldCls(7) As String 'class of the As-New object field a register's ADDRESS points to (from `lea reg,[Me+off]`); the next `mov obj,[reg]` deref tags obj as that class
+Private NVRegFieldRecv(7) As String 'receiver expr (field_<off>) for that field, carried to the dereffed object so its method calls render field_<off>.Method
 Private NVObjClass As Collection   'key "G"&globalVA -> user class name of the object instance stored at that global (typed at the __vbaNew auto-instantiation)
 Private NVRecentPush(7) As Long    'ring of recent `push imm32/imm8` raw values (to recover __vbaNew's Object Info + @global args)
 Private NVRecentTop As Long
@@ -227,7 +229,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     ReDim NVPushImm(31): ReDim NVPushDisp(31): NVPushTop = 0: NVLastPushDisp = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
-    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegAddrDisp(r) = 0: NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": NVRegObjInst(r) = "": Next
+    For r = 0 To 7: NVReg(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegAddrDisp(r) = 0: NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": NVRegObjInst(r) = "": NVRegFieldCls(r) = "": NVRegFieldRecv(r) = "": Next
     Set NVObjClass = New Collection
     For r = 0 To 7: NVRecentPush(r) = 0: Next
     NVRecentTop = 0
@@ -3060,6 +3062,15 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                                 ElseIf NVLastLeaSet Then
                                     NativeSetLocalExpr NVLastLea, umVal: NVLastLeaSet = False
                                 End If
+                                'A Property GET returns its value through the retbuf
+                                '(eax = HRESULT) and the value is consumed through that
+                                'local; CLEAR eax so the folded expression cannot linger
+                                'and leak into a later argument push (picItemBmp.MaskDC
+                                'duplicated into BitBlt's ySrc).  A Function/Sub called as
+                                'a statement keeps eax (its call surfaces in the following
+                                'HRESULT check, e.g. If field_34.LoadBitmap(..) = 0).
+                                If Len(umKind) = 0 Then NativeTryMethodKind umAddr, umKind
+                                If InStr(umKind, "Get") > 0 Then NVReg(0) = ""
                                 Exit Function           'value flows to the consumer
                             End If
                             NVPushTop = 0
@@ -5324,7 +5335,22 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 'that object pointer; dereferencing such a pointer ([objPtr], disp 0)
                 'tags the register as that object's vtable.
                 NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = "": NVRegObjInst(reg) = ""
-                If Not isAbs And disp < 0 Then
+                Dim hadFieldCls As String, hadFieldRecv As String
+                hadFieldCls = "": hadFieldRecv = ""
+                If Not isAbs And disp = 0 And bse >= 0 And bse <= 7 And Len(NVRegFieldCls(bse)) > 0 Then
+                    hadFieldCls = NVRegFieldCls(bse): hadFieldRecv = NVRegFieldRecv(bse)
+                End If
+                NVRegFieldCls(reg) = "": NVRegFieldRecv(reg) = ""   'the dest holds a new value
+                If Len(hadFieldCls) > 0 Then
+                    'Deref of an As-New field ADDRESS (&Me.<field>) -> the field's OBJECT.
+                    'Tag the object identity (class + field_<off> receiver) so a following
+                    '`mov vt,[obj]; call [vt+off]` resolves to field_<off>.Method
+                    '(e.g. picBackBmp.LoadBitmap, accessed via lea&deref not a direct mov).
+                    'NVReg is deliberately left empty: the object pointer has no meaningful
+                    'VALUE to render, and putting "field_<off>" there leaked the receiver
+                    'into a later argument push (field_40 into a BitBlt coordinate slot).
+                    NVRegObjType(reg) = hadFieldCls: NVRegObjInst(reg) = hadFieldRecv
+                ElseIf Not isAbs And disp < 0 Then
                     If NativeIsIntrinsicObj(NVReg(reg)) Then NVRegObjType(reg) = NVReg(reg)
                     'Loading a local that holds a control object tags this register
                     'with the control's identity + GUID (for a later property call).
@@ -5384,6 +5410,7 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H8D                       'lea r32, [mem]  (address-of / ptr arithmetic)
             modrm = NativeDumpByte(dump, i + 1)
             reg = (modrm \ 8) And 7
+            NVRegFieldCls(reg) = "": NVRegFieldRecv(reg) = ""   'cleared unless this lea is an As-New field address
             If NativeDecodeDisp(dump, disp, isAbs) Then
                 Dim lbse As Long
                 lbse = NativeMemBase(dump)
@@ -5396,6 +5423,17 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 If Not isAbs And disp < 0 And lbse = 5 And NativeMemIndex(dump) < 0 Then
                     NVReg(reg) = NativeGetLocalExpr(disp)
                     NVRegIsAddr(reg) = True: NVRegAddr(reg) = "var_" & Hex$(Abs(disp)): NVRegAddrDisp(reg) = disp
+                ElseIf Not isAbs And disp > 0 And lbse >= 0 And lbse <= 7 And NVRegIsMe(lbse) And NativeMemIndex(dump) < 0 _
+                       And Len(NativeColGet(gFormFieldClass, NVForm & ":" & disp)) > 0 Then
+                    'lea reg,[Me + fieldOff] = the ADDRESS of an As-New object field
+                    '(taken to pass to __vbaNew2 in the auto-instantiation guard, then
+                    'dereferenced).  Remember the field's class + a field_<off> receiver
+                    'so the following `mov obj,[reg]` tags obj as that clsX object and a
+                    'method call on it resolves to field_<off>.Method (picBackBmp.LoadBitmap).
+                    NVReg(reg) = "field_" & Hex$(disp): NVRegIsAddr(reg) = False
+                    NVRegFieldCls(reg) = NativeColGet(gFormFieldClass, NVForm & ":" & disp)
+                    NVRegFieldRecv(reg) = "field_" & Hex$(disp)
+                    NVRegIsAddr(reg) = False
                 ElseIf isAbs And NativeIsGlobalAddr(disp) Then
                     'address-of a module-level global (e.g. an array passed by ref)
                     NVReg(reg) = NativeGlobalName(disp): NVRegIsAddr(reg) = False

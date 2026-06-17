@@ -27,6 +27,35 @@ benchmarked against the Dungeon test program. Written to survive a context reset
 - **Key structure reference:** `C:\Users\Owner\Downloads\Alex_Ionescu_vb_structures(2).pdf`
   (VB image internal format — Object Info §8, Public Object Descriptor §7, etc.). Use it instead of guessing struct layouts.
 
+## As-New clsBitmap field methods via lea+deref (2026-06-17) — DONE
+
+`picBackBmp.LoadBitmap App.Path & "..."` and `BitBlt(.., picItemBmp.MaskDC, ..)` are
+calls on `As New clsBitmap` PRIVATE form fields (picBackBmp/picVoidBmp/picItemBmp/...).
+We rendered them `.UnkVCall_00000030h(..)` / `.UnkVCall_00000024h()`.  Now:
+`field_34.LoadBitmap(var_28, var_A0)`, `BitBlt(.., field_40.MaskDC, ..)`.  The field
+NAME is unrecoverable (Private `Dim` field - stripped from typeinfo), so the receiver is
+the honest offset `field_<off>` (fabricating picBackBmp would be plausible-but-wrong).
+Dungeon UnkVCall 37->24; only frmMain.frm changed.
+
+Why it was unresolved: our engine tracked the DIRECT As-New field access (`mov reg,[Me+off]`)
+but NOT the TWO-STEP `lea reg,[Me+off]; mov obj,[reg]` the auto-instantiation guard forces
+(it needs the field ADDRESS for __vbaNew2).  Two pieces:
+- **lea+deref field tracking** (new NVRegFieldCls/NVRegFieldRecv): `lea reg,[Me+off]`
+  where off is in gFormFieldClass tags reg as a field ADDRESS (class + field_<off>
+  receiver); the next `mov obj,[reg]` deref tags obj with NVRegObjType=class +
+  NVRegObjInst=field_<off> (NOT NVReg - putting field_<off> in the register's VALUE
+  leaked the receiver into a later argument push, e.g. field_40 into a BitBlt coord).
+  Then `mov vt,[obj]; call [vt+off]` resolves via the existing user-class-method path.
+- **Property-Get eax-clear**: a Property GET (MaskDC/InvertImageDC) returns its value via
+  the retbuf out-param (eax = HRESULT); the value is consumed through the local, so eax
+  is cleared - else the folded expr lingers and a stale movsx-dest re-pushes it into a
+  BitBlt coordinate (the duplicated picItemBmp.MaskDC in ySrc).  Scoped to "Get" kind so
+  a Function/Sub statement (LoadBitmap) keeps eax and still shows in its HRESULT check.
+  (A blanket movsx-dest clear fixed the leak but REGRESSED Select-Case-on-Integer / SAFEARRAY
+  index exprs that legitimately go through movsx - reverted in favour of the Get-scoped clear.)
+Still unresolved: `picPlayerBmp(2)` is an As-New clsBitmap ARRAY field (`arg_8(96).UnkVCall`)
+- a different (harder) idiom; and BitBlt arg lists still drop one coordinate (pre-existing).
+
 ## _Global statements: Load / Unload (2026-06-17) — DONE
 
 `Load <form>` and `Unload <form>` (and `Unload Me`) compile to calls through the
