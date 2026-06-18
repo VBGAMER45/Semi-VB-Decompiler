@@ -188,6 +188,7 @@ Private NVRegFieldCls(7) As String 'class of the As-New object field a register'
 Private NVRegFieldRecv(7) As String 'receiver expr (field_<off>) for that field, carried to the dereffed object so its method calls render field_<off>.Method
 Private NVObjClass As Collection   'key "G"&globalVA -> user class name of the object instance stored at that global (typed at the __vbaNew auto-instantiation)
 Private NVLocalObjType As Collection 'key "D"&localDisp -> user class created INTO that local by __vbaNew2(ObjInfo, &local); so var_X.Member resolves via the class vtable map
+Private NVPropDir As Collection      'key "P"&callVA -> "get"/"put": data-flow direction of a property accessor call (its by-ref local read AFTER = get, else put), since VB6 FuncDesc flags Get and Let identically
 Private NVRecentPush(7) As Long    'ring of recent `push imm32/imm8` raw values (to recover __vbaNew's Object Info + @global args)
 Private NVRecentTop As Long
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
@@ -318,6 +319,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVByteClamp = New Collection
     Set NVByteClampSkip = New Collection
     Set NVLocalObjType = New Collection
+    Set NVPropDir = New Collection
     NVCurVa = 0
     NVArgN = 0
     ReDim NVSelStkBase(31): NVSelTop = 0
@@ -459,6 +461,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'buttons) into `field = field +/- 1 : If field <op> N Then field = M / End If`,
     'suppressing the raw movzx/__vbaUI1I2/store/jcc scaffolding.
     NativeDetectByteClamp col
+
+    'Determine each vtable call's data-flow direction (its by-ref local read AFTER the
+    'call = a value-out GET, else a value-in PUT) so a class-instance property access
+    'renders `var = obj.Prop` vs `obj.Prop = value` - the FuncDesc invoke-kind can't tell.
+    NativeDetectPropDir col
 
     'Detect an unclassified module Function: a simple value returned in the accumulator
     '(`mov ax/eax,[ebp-retSlot]` right before the SEH restore).  Marks the proc a
@@ -1999,6 +2006,79 @@ Private Function NativeNegJccRel(ByVal op As Long) As String
         Case &H7F: NativeNegJccRel = "<="   'jg  -> not greater
     End Select
 End Function
+
+Private Function NativeEbpOp(ByVal dump As String, ByVal wantOp As Long, ByRef disp As Long) As Boolean
+    'True when the instruction is `wantOp` (8D lea / 8B mov-from / 89 mov-to) with an
+    '[ebp +/- disp] operand (ModR/M rm = 5 = ebp, mod = 01/10).  Sets disp (signed).
+    Dim n As Long, i As Long, op As Long, modrm As Long, md As Long, rm As Long
+    On Error GoTo no
+    dump = Replace(dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op <> wantOp Then Exit Function
+    If i + 1 >= n Then Exit Function
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3: rm = modrm And 7
+    If rm <> 5 Then Exit Function                'ebp base only
+    If md = 1 Then
+        disp = NativeDumpInt8(dump, i + 2): NativeEbpOp = True
+    ElseIf md = 2 Then
+        disp = NativeDumpInt32(dump, i + 2): NativeEbpOp = True
+    End If
+no:
+End Function
+
+Private Sub NativeDetectPropDir(col As Collection)
+    'Per indirect vtable CALL, decide whether its by-ref stack local is a value-OUT
+    '(read AFTER the call before any overwrite/next call -> a GET, `var = obj.Prop`) or a
+    'value-IN (not read after -> a PUT, `obj.Prop = value`).  VB6 flags a property Get and
+    'Let identically in the FuncDesc, so this use-after data-flow is the reliable signal.
+    'Recorded for every call; consumed only by the class-instance property render path.
+    On Error GoTo done
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    If n < 2 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For k = 0 To n - 1
+        If (arr(k).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nextk
+        'The by-ref local: nearest `lea reg,[ebp-D]` in the few preceding instructions
+        '(the out-param / value pointer pushed to the accessor).
+        Dim d As Long, j As Long, leaJ As Long, dd As Long
+        leaJ = -1
+        For j = k - 1 To k - 7 Step -1
+            If j < 0 Then Exit For
+            If NativeEbpOp(arr(j).dump, &H8D, d) Then leaJ = j: Exit For
+            If (arr(j).cmdType And C_TYPEMASK) = C_CAL Then Exit For
+        Next j
+        If leaJ < 0 Then GoTo nextk
+        'PUT vs GET by WRITE-BEFORE: a put STORES its value into the local before the
+        'call (mov [ebp-D],r8/r32 = 88/89, or mov [ebp-D],imm = C7); a get's retbuf is a
+        'fresh out-param (no prior store).  Scan the window before the call for a store to
+        'D.  More robust than read-after, which a Variant-returning get defeats (its result
+        'is moved out by a helper CALL, not a plain mov).
+        Dim isPut As Boolean
+        isPut = False
+        For j = k - 1 To k - 10 Step -1
+            If j < 0 Then Exit For
+            If NativeEbpOp(arr(j).dump, &H89, dd) Then
+                If dd = d Then isPut = True: Exit For
+            End If
+            If NativeEbpOp(arr(j).dump, &H88, dd) Then
+                If dd = d Then isPut = True: Exit For
+            End If
+            If NativeEbpOp(arr(j).dump, &HC7, dd) Then
+                If dd = d Then isPut = True: Exit For
+            End If
+        Next j
+        NativeColPut NVPropDir, "P" & arr(k).va, IIf(isPut, "put", "get")
+nextk:
+    Next k
+done:
+End Sub
 
 Private Function NativeIdxOfVa(arr() As CInstruction, ByVal n As Long, ByVal va As Long) As Long
     Dim k As Long
@@ -3606,21 +3686,30 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             If Len(umRetbuf) > 0 And Left$(umRecv, 4) = "var_" And Left$(umRetbuf, 4) = "var_" _
                                And InStr(umKind, "Property") > 0 Then
                                 'A property accessor on a LOCAL class-instance (As New /
-                                'predeclared, e.g. pktCreate): emit a VISIBLE read so the
-                                'resolved member NAME shows (beats commercial's UnkVCall)
-                                'instead of silently folding into an unconsumed local and
-                                'vanishing.  Rendered as a read `var_<rb> = recv.Member`:
-                                'VB6's FuncDesc flag marks GET and LET identically, so the
-                                'put/get DIRECTION can't be told apart here (deferred - needs
-                                'value-flow); reads are correct for the majority (the GetData
-                                'serializers + received-packet field reads), and a build-time
-                                'PUT shows reversed but with the right member + a real local.
-                                umVal = umRecv & "." & umName
-                                NVPushTop = 0
-                                NativeProcessInst = ind & umRetbuf & " = " & umVal & vbCrLf
+                                'predeclared, e.g. pktCreate).  VB6 flags Get and Let alike,
+                                'so the DIRECTION comes from the data-flow pre-pass
+                                '(NVPropDir): the by-ref local read AFTER the call = a GET
+                                '(var = obj.Prop), else a PUT (obj.Prop = value).  Either way
+                                'the resolved member NAME shows (beats commercial's UnkVCall)
+                                'instead of silently folding into an unconsumed local.
+                                Dim umDir As String, umRbD As Long, umPv As String
+                                umDir = NativeColGet(NVPropDir, "P" & inst.va)
                                 On Error Resume Next
-                                NativeSetLocalExpr -CLng("&H" & Mid$(umRetbuf, 5)), umRetbuf
+                                umRbD = -CLng("&H" & Mid$(umRetbuf, 5))
                                 On Error GoTo 0
+                                NVPushTop = 0
+                                If umDir = "put" Then
+                                    'Value being stored = what the by-ref local holds (its
+                                    'tracked expression if meaningful, else the local name).
+                                    umPv = NVLocal("L" & umRbD)
+                                    If Len(umPv) = 0 Or umPv = "0" Or IsNumeric(umPv) Then umPv = umRetbuf
+                                    NativeProcessInst = ind & umRecv & "." & umName & " = " & umPv & vbCrLf
+                                Else
+                                    NativeProcessInst = ind & umRetbuf & " = " & umRecv & "." & umName & vbCrLf
+                                    On Error Resume Next
+                                    NativeSetLocalExpr umRbD, umRetbuf      'read result; reference by name
+                                    On Error GoTo 0
+                                End If
                                 NVReg(0) = ""
                                 Exit Function
                             End If
