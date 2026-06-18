@@ -195,6 +195,7 @@ Private NVObjClass As Collection   'key "G"&globalVA -> user class name of the o
 Private NVLocalObjType As Collection 'key "D"&localDisp -> user class created INTO that local by __vbaNew2(ObjInfo, &local); so var_X.Member resolves via the class vtable map
 Private NVNewEmitted As Collection 'per-proc: local disps that already emitted `Set var_X = New <class>` - suppress the repeated auto-instantiation (As New) guards before each use
 Private NVPropDir As Collection      'key "P"&callVA -> "get"/"put": data-flow direction of a property accessor call (its by-ref local read AFTER = get, else put), since VB6 FuncDesc flags Get and Let identically
+Private NVVarTstBind As Collection    'key "P"&callVA -> "1": a __vbaVarTst* relational whose VARIANT_BOOL result is stored to a MEMORY LOCAL (safe to fold to `If (a <op> b)`); the register-stored form is left unmarked so it keeps a visible Call
 Private NVRecentPush(7) As Long    'ring of recent `push imm32/imm8` raw values (to recover __vbaNew's Object Info + @global args)
 Private NVRecentTop As Long
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
@@ -330,6 +331,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVLocalObjType = New Collection
     Set NVNewEmitted = New Collection
     Set NVPropDir = New Collection
+    Set NVVarTstBind = New Collection
     NVCurVa = 0
     NVArgN = 0
     ReDim NVSelStkBase(31): NVSelTop = 0
@@ -429,6 +431,12 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'Bind the equality relational to that register so the branch reads `a = b`
     'instead of a blank <cond>.
     NativeDetectStrCmpCompares col
+
+    'Detect VB6's Variant relational (__vbaVarTstGe/Gt/Le/Lt/Ne/Eq) whose VARIANT_BOOL
+    'result is stored to a memory local and later compared - only then is it safe to
+    'fold to `If (a <op> b)` (the register-stored form's 16-bit reg-reg compare can't
+    'carry an expression and would regress to <cond>).
+    NativeDetectVarTstBind col
 
     'Mark stack slots that are loop induction variables (written AND read inside a
     'backward-branch loop) so they render by their variable name rather than a stale
@@ -3402,6 +3410,72 @@ nexts:
 done:
 End Sub
 
+Private Sub NativeDetectVarTstBind(col As Collection)
+    'A Variant relational (__vbaVarTstGe/Gt/Le/Lt/Ne/Eq) returns a VARIANT_BOOL in ax.
+    'VB6 then either:
+    '  (a) stores it to a MEMORY LOCAL  - `mov word[ebp-S],ax ; ... ; cmp [ebp-S],bx ; jcc`
+    '  (b) copies it to a REGISTER      - `mov ebx,eax ; ... ; cmp bx,si ; jcc`
+    'Form (a) is SAFE to fold: the generic memory store + memory compare path carries
+    'the relational expression through to the branch (`If (a <op> b)`).  Form (b) is
+    'NOT - a 16-bit reg-reg compare of a non-clean value bails to <cond>, so folding
+    'there regresses the condition AND leaks a stray `var_X = (a <op> b)` materialise.
+    'Mark only the FIRST-consumer-is-a-local-store calls; the runtime handler binds the
+    'relational only for those, leaving form (b) as the prior visible Call (no change).
+    On Error GoTo done
+    Dim n As Long, k As Long, j As Long, lim As Long
+    n = col.Count
+    If n < 3 Then Exit Sub
+    Dim arr() As CInstruction, inst As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For k = 0 To n - 2
+        If (arr(k).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nexts
+        Dim disp As Long, isAbs As Boolean
+        If Not NativeDecodeDisp(arr(k).dump, disp, isAbs) Then GoTo nexts
+        If Not isAbs Then GoTo nexts
+        Dim cnm As String
+        cnm = dsmNative.GetApiByIatVa(disp)
+        If InStr(cnm, "__vbaVarTstGe") = 0 And InStr(cnm, "__vbaVarTstGt") = 0 _
+           And InStr(cnm, "__vbaVarTstLe") = 0 And InStr(cnm, "__vbaVarTstLt") = 0 _
+           And InStr(cnm, "__vbaVarTstNe") = 0 And InStr(cnm, "__vbaVarTstEq") = 0 Then GoTo nexts
+        'The FIRST consumer of eax decides the form: a register copy -> unsafe (stop);
+        'a memory-local store of ax -> safe (mark).
+        lim = k + 6
+        If lim > n - 1 Then lim = n - 1
+        For j = k + 1 To lim
+            If NativeMovFromEax(arr(j)) >= 0 Then Exit For                'reg copy -> form (b), leave it
+            If NativeIsMovAxToLocal(arr(j)) Then
+                NativeColPut NVVarTstBind, "P" & arr(k).va, "1"           'form (a) -> safe to fold
+                Exit For
+            End If
+        Next j
+nexts:
+    Next k
+done:
+End Sub
+
+Private Function NativeIsMovAxToLocal(inst As CInstruction) As Boolean
+    'Match `mov [ebp-S], ax` / `mov [ebp-S], eax` (89 /r storing the accumulator to a
+    'negative-displacement stack local).  The 0x66 word-store prefix is tolerated.
+    Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, md As Long, reg As Long
+    Dim disp As Long, isAbs As Boolean
+    On Error Resume Next
+    dump = Replace(inst.dump, " ", "")
+    nn = Len(dump) \ 2
+    i = NativeOpStart(dump, nn)
+    op = NativeDumpByte(dump, i)
+    If op <> &H89 Then Exit Function              'mov r/m, r (store)
+    modrm = NativeDumpByte(dump, i + 1)
+    md = (modrm \ &H40) And 3
+    reg = (modrm \ 8) And 7
+    If md = 3 Then Exit Function                   'register destination, not a memory local
+    If reg <> 0 Then Exit Function                 'source must be (e)ax
+    If Not NativeDecodeDisp(dump, disp, isAbs) Then Exit Function
+    If isAbs Or disp >= 0 Then Exit Function       'must be a negative ebp local
+    NativeIsMovAxToLocal = True
+End Function
+
 Private Function NativeIsTestEaxEax(inst As CInstruction) As Boolean
     'Match `test eax, eax` (85 C0): the direct test of a __vbaStrCmp tri-state result.
     Dim dump As String, nn As Long, i As Long
@@ -5496,17 +5570,49 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 oiList = oiList & oiA(oiK)
             Next
             NativeRuntimeCall = "Call " & NativeFriendlyName(nm) & "(" & oiList & ")": Exit Function
-        Case InStr(nm, "__vbaVarTstNe") > 0, InStr(nm, "__vbaVarTstEq") > 0
-            'Variant comparison: __vbaVarTstNe/Eq(a, b) returns a<>b / a=b (a VARIANT_BOOL
-            'in ax).  Bind the relational into eax so the following test/jcc renders
-            'If (a <> b).  Symmetric ops only (order-independent) - Lt/Gt would need the
-            'operand order pinned.
-            Dim vtA() As String, vtN As Long, vtOp As String
-            NativeArgsSnapshot vtA, vtN
+        Case InStr(nm, "__vbaVarTstNe") > 0, InStr(nm, "__vbaVarTstEq") > 0, _
+             InStr(nm, "__vbaVarTstGe") > 0, InStr(nm, "__vbaVarTstGt") > 0, _
+             InStr(nm, "__vbaVarTstLe") > 0, InStr(nm, "__vbaVarTstLt") > 0
+            'Variant comparison: __vbaVarTstXx(p1, p2) returns a VARIANT_BOOL in ax.
+            'Bind the relational into eax so the following store/test/jcc renders
+            'If (a <op> b).  VB emits the operands REVERSED: the source LEFT operand is
+            'the DEEPER push (arg1), the right operand is the top push (arg0) - so the
+            'gate `Source.tag >= 1000` compiles to TstGe(1000, Source.tag).  Each &local
+            'operand is resolved to the inline Variant CONSTANT it carries (1000) via
+            'NativeVarOperand instead of leaving the bare slot name.  Eq/Ne are symmetric
+            'so their string order is kept as-was (arg0 <op> arg1) to avoid churn.
+            Dim vtA() As String, vtD() As Long, vtN As Long, vtOp As String
+            Dim vtL As String, vtR As String, vtSym As Boolean, vtBindOK As Boolean
+            NativeArgsSnapshotD vtA, vtD, vtN
+            'The asymmetric relationals (Ge/Gt/Le/Lt) bind ONLY when the pre-pass
+            'confirmed the safe local-store form (NVVarTstBind); the register-stored
+            'form would regress the branch to <cond>.  Eq/Ne keep their prior
+            'unconditional binding (symmetric, already proven on the benchmark).
+            vtBindOK = Len(NativeColGet(NVVarTstBind, "P" & inst.va)) > 0
             If vtN >= 2 Then
-                vtOp = IIf(InStr(nm, "TstNe") > 0, "<>", "=")
-                If Len(vtA(0)) > 0 And vtA(0) <> "<arg>" And Len(vtA(1)) > 0 And vtA(1) <> "<arg>" Then
-                    NVReg(0) = "(" & vtA(0) & " " & vtOp & " " & vtA(1) & ")"
+                Select Case True
+                    Case InStr(nm, "TstNe") > 0: vtOp = "<>": vtSym = True
+                    Case InStr(nm, "TstEq") > 0: vtOp = "=": vtSym = True
+                    Case InStr(nm, "TstGe") > 0: vtOp = ">="
+                    Case InStr(nm, "TstGt") > 0: vtOp = ">"
+                    Case InStr(nm, "TstLe") > 0: vtOp = "<="
+                    Case InStr(nm, "TstLt") > 0: vtOp = "<"
+                End Select
+                If Not vtSym And Not vtBindOK Then vtOp = ""    'unsafe form -> fall through to visible Call
+                If Len(vtOp) = 0 Then
+                    'leave operands empty so the binding block is skipped
+                ElseIf vtSym Then
+                    'Eq/Ne: keep the prior exact behaviour (the bare pushed expressions,
+                    'no inline-constant resolution) - resolving a reused Variant temp to
+                    'its last-written data slot is unreliable for these (yields stale
+                    'numerics / unresolved pointers); only the gated asymmetric form below
+                    'is built as a fresh immediate constant right before the compare.
+                    vtL = vtA(0): vtR = vtA(1)
+                Else
+                    vtL = NativeVarOperand(1, vtA, vtD): vtR = NativeVarOperand(0, vtA, vtD)
+                End If
+                If Len(vtL) > 0 And vtL <> "<arg>" And Len(vtR) > 0 And vtR <> "<arg>" Then
+                    NVReg(0) = "(" & vtL & " " & vtOp & " " & vtR & ")"
                     NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
                     NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
                     NativeRuntimeCall = "": Exit Function
@@ -7618,6 +7724,47 @@ Private Sub NativeArgsSnapshot(ByRef a() As String, ByRef cnt As Long)
     Next
     NVPushTop = 0
 End Sub
+
+Private Sub NativeArgsSnapshotD(ByRef a() As String, ByRef d() As Long, ByRef cnt As Long)
+    'Like NativeArgsSnapshot but also captures each argument's by-reference local
+    'displacement (NVPushDisp) in parallel, so a Variant-helper handler can read the
+    'inline Variant CONSTANT a `lea reg,[ebp-X]; push reg` operand points at (e.g. the
+    'integer 1000 a __vbaVarTstGe/__vbaVarSub argument carries) instead of the slot name.
+    Dim k As Long, idx As Long
+    cnt = NVPushTop
+    If cnt < 0 Then cnt = 0
+    ReDim a(IIf(cnt > 0, cnt - 1, 0))
+    ReDim d(IIf(cnt > 0, cnt - 1, 0))
+    idx = 0
+    For k = NVPushTop - 1 To 0 Step -1
+        a(idx) = NVPushImm(k): d(idx) = NVPushDisp(k): idx = idx + 1
+    Next
+    NVPushTop = 0
+End Sub
+
+Private Function NativeVarOperand(ByVal idx As Long, ByRef imms() As String, ByRef disps() As Long) As String
+    'Resolve one operand of a Variant runtime helper.  When the argument is the
+    'address of a local Variant (disp < 0) that was built inline as a CONSTANT
+    '(`mov [ebp-X],vt ; mov [ebp-X+8],data`), return the held value (1000 / 1 / ...);
+    'otherwise keep the tracked push expression (a by-ref temp, Source.tag, var_X).
+    Dim s As String
+    s = imms(idx)
+    If disps(idx) < 0 Then
+        Dim vv As String
+        vv = NativeVariantVal(disps(idx))
+        If Len(vv) > 0 And vv <> NV_MISSING And Left$(vv, 4) <> "var_" Then
+            'Reject a numeric that is actually an image POINTER (a BSTR/object data
+            'field whose target string did not resolve, e.g. 4415744) - it is not the
+            'operand's value.  Quoted string literals and ordinary numbers are kept.
+            If IsNumeric(vv) And Left$(vv, 1) <> Chr$(34) Then
+                If CDbl(vv) >= OptHeader.ImageBase Then s = imms(idx) Else s = vv
+            Else
+                s = vv
+            End If
+        End If
+    End If
+    NativeVarOperand = s
+End Function
 
 Private Function NativeRedimStmt(ByRef a() As String, ByVal cnt As Long, ByVal bPreserve As Boolean) As String
     'Build `ReDim [Preserve] arr(lb To ub, ...)` from a __vbaRedim arg snapshot:
