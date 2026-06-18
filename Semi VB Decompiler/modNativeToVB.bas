@@ -5377,6 +5377,16 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             NVReg(0) = "CInt(" & aa & ")"
             NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
             NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaUI1Var") > 0
+            'Variant -> Byte (result in al).  Folds CByte(var) into eax for the consumer
+            'so a following `mov [var_X],al` store renders `var_X = CByte(var_28)` (the
+            'rune-byte unpack in a packet build, e.g. clsPktSpellTest cmdTest_Click)
+            'instead of a dropped `Call UI1Var(var_28)`.
+            aa = NativeArgPop()
+            If Len(aa) = 0 Then aa = "<arg>"
+            NVReg(0) = "CByte(" & aa & ")"
+            NVRegIsAddr(0) = False: NVRegObjType(0) = "": NVRegObjVt(0) = ""
+            NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaI2Var") > 0
             'Variant -> Integer (result in ax).  Folds the narrowing of a Variant result
             'into eax for the consumer, e.g. `Item(i).ID = CInt(var_40)` where var_40 holds
