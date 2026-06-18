@@ -728,12 +728,37 @@ nextInst:
     NativeCloseIfs output, &H7FFFFFFF
     output = output & "End " & NVProcEndWord & vbCrLf
     output = NativeStripOrphanLabels(NativeSubstituteConstants(NativeSubstituteArgNames(NativeStripVarBuild(output))))
+    output = NativeStripSelfAssigns(output)
     output = NativeMergeElseIf(output)
     output = NativeStripEmptyIfs(output)
     DecompileNativeProcToVB = NativeInsertLocalDims(output)
     Exit Function
 fail:
     DecompileNativeProcToVB = "' Error decompiling " & Hex$(addr) & ": " & Err.Description & vbCrLf
+End Function
+
+Private Function NativeStripSelfAssigns(ByVal src As String) As String
+    'Drop trivial `X = X` self-assignment lines - a guaranteed no-op that appears when
+    'a value-conversion/move call's source resolves to the same local as its dest (e.g.
+    'an eax-chained __vbaVarAdd result re-read into its own slot).  Only an EXACT
+    'identifier-to-itself assignment is removed (var_/field_/arg_/global_); `X = X + 1`,
+    '`obj.P = obj.P` (a property round-trip with side effects) and conditions are kept.
+    Dim lines() As String, i As Long, lt As String, out As String, eqp As Long, lhs As String, rhs As String
+    On Error Resume Next
+    lines = Split(src, vbCrLf)
+    For i = 0 To UBound(lines)
+        lt = Trim$(lines(i))
+        eqp = InStr(lt, " = ")
+        If eqp > 0 Then
+            lhs = Trim$(Left$(lt, eqp - 1))
+            rhs = Trim$(Mid$(lt, eqp + 3))
+            If Len(lhs) > 0 And lhs = rhs And NativeIsIdentName(lhs) Then GoTo skipLine
+        End If
+        If Len(out) > 0 Then out = out & vbCrLf
+        out = out & lines(i)
+skipLine:
+    Next
+    NativeStripSelfAssigns = out
 End Function
 
 Private Function NativeStripOrphanLabels(ByVal src As String) As String
@@ -3151,6 +3176,12 @@ Private Function NativeLateMemCall(inst As CInstruction, ByVal apiName As String
     If InStr(apiName, "Ld") > 0 Then
         If Len(resTok) > 0 Then
             NativeLateMemCall = resTok & " = " & mref
+            'The helper returns the result Variant pointer in eax; bind it to the
+            'result local so a following `push eax` (e.g. into __vbaVarSub/Add) reads
+            'the value instead of a lost 0 - lets `var_34 = (var_24 - 1000)` fold.
+            NVReg(0) = resTok
+            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+            NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
         Else
             NVReg(0) = mref
             NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
@@ -5624,6 +5655,48 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 vtList = vtList & vtA(vtK)
             Next
             NativeRuntimeCall = "Call " & NativeFriendlyName(nm) & "(" & vtList & ")": Exit Function
+        Case InStr(nm, "__vbaVarSub") > 0, InStr(nm, "__vbaVarAdd") > 0, _
+             InStr(nm, "__vbaVarMul") > 0, InStr(nm, "__vbaVarDiv") > 0
+            'Variant arithmetic: __vbaVarXxx(dest, a, b) computes dest = b <op> a and
+            'returns the dest pointer in eax (so a chained helper's `push eax` reads
+            'this dest).  Args in snapshot order: arg0 = dest (the top push, an &local),
+            'arg1 = a, arg2 = b.  VB emits operands REVERSED (like the relationals): the
+            'source LEFT operand is the DEEPER push (arg2), so `Source.tag - 1000`
+            'compiles to VarSub(&var_34, &1000, Source.tag).  Fold to `dest = b <op> a`,
+            'resolving inline Variant constants, and bind the dest local + eax so the
+            'Sub -> Add chain and later uses reference the result.
+            Dim vsA() As String, vsD() As Long, vsN As Long, vsOp As String
+            Dim vsDest As String, vsLeft As String, vsRight As String, vsDestDisp As Long
+            NativeArgsSnapshotD vsA, vsD, vsN
+            If vsN >= 3 Then
+                Select Case True
+                    Case InStr(nm, "VarSub") > 0: vsOp = "-"
+                    Case InStr(nm, "VarAdd") > 0: vsOp = "+"
+                    Case InStr(nm, "VarMul") > 0: vsOp = "*"
+                    Case InStr(nm, "VarDiv") > 0: vsOp = "/"
+                End Select
+                vsDest = vsA(0)
+                vsLeft = NativeVarOperand(2, vsA, vsD)      'b = deeper push (source LEFT)
+                vsRight = NativeVarOperand(1, vsA, vsD)     'a = middle push (the constant)
+                'Only fold when the operands are real values - never `0 <op> X`, which is
+                'an operand we failed to recover (a lost eax-chained temp), not a literal.
+                If Left$(vsDest, 4) = "var_" And Len(vsLeft) > 0 And vsLeft <> "<arg>" And vsLeft <> "0" _
+                   And Len(vsRight) > 0 And vsRight <> "<arg>" And vsRight <> "0" Then
+                    vsDestDisp = vsD(0)
+                    NVReg(0) = vsDest
+                    NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                    NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                    If vsDestDisp < 0 Then NativeSetLocalExpr vsDestDisp, vsDest
+                    NativeRuntimeCall = vsDest & " = (" & vsLeft & " " & vsOp & " " & vsRight & ")"
+                    Exit Function
+                End If
+            End If
+            Dim vsList As String, vsK As Long
+            For vsK = 0 To vsN - 1
+                If Len(vsList) > 0 Then vsList = vsList & ", "
+                vsList = vsList & vsA(vsK)
+            Next
+            NativeRuntimeCall = "Call " & NativeFriendlyName(nm) & "(" & vsList & ")": Exit Function
         Case InStr(nm, "__vbaI2I4") > 0, InStr(nm, "__vbaUI1I2") > 0, _
              InStr(nm, "__vbaUI1I4") > 0, InStr(nm, "__vbaI4UI1") > 0, _
              InStr(nm, "__vbaI2UI1") > 0
