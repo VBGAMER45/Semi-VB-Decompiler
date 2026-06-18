@@ -752,6 +752,11 @@ Private Function NativeStripEmptyIfs(ByVal src As String) As String
     '`If ... Then` (no trailing statement) directly abutting `End If` matches, so a block
     'holding any statement, a label, or an Else is kept; matched pairs are removed
     'together, so If/End If stay balanced.
+    'CRITICAL: never strip a condition that contains "(" - it holds a method/function
+    'CALL whose SIDE EFFECT is the only trace of a real statement (e.g.
+    '`If field_34.LoadBitmap(..) = 0 Then` is the Load call rendered as an HRESULT check);
+    'dropping the If would lose the call.  A pure value comparison (0 = 0, global_X = 0)
+    'has no "(" and is safe to remove.
     Dim lines() As String, i As Long, lt As String, nt As String, out As String
     Dim changed As Boolean, pass As Long
     On Error Resume Next
@@ -763,8 +768,8 @@ Private Function NativeStripEmptyIfs(ByVal src As String) As String
         Do While i <= UBound(lines)
             lt = Trim$(lines(i))
             If i < UBound(lines) Then nt = Trim$(lines(i + 1)) Else nt = ""
-            If Left$(lt, 3) = "If " And Right$(lt, 5) = " Then" And nt = "End If" Then
-                i = i + 2: changed = True            'drop the empty If ... Then / End If pair
+            If Left$(lt, 3) = "If " And Right$(lt, 5) = " Then" And nt = "End If" And InStr(lt, "(") = 0 Then
+                i = i + 2: changed = True            'drop the empty (call-free) If ... Then / End If pair
             Else
                 If Len(out) > 0 Then out = out & vbCrLf
                 out = out & lines(i)
