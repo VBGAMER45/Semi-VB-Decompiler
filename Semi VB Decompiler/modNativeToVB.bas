@@ -7118,25 +7118,40 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             'before rather than leaking `base(idx) = al`.
             If md <> 3 And reg <= 3 Then
                 Dim d88 As Long, ia88 As Boolean, b88 As Long, lhs88 As String, v88 As String
-                If NativeDecodeDisp(dump, d88, ia88) Then
-                    If Not ia88 And d88 > 0 And d88 < &H2000 And NativeMemIndex(dump) < 0 Then
-                        v88 = NVReg(reg)
-                        If Len(v88) > 0 Then
-                            b88 = NativeMemBase(dump)
-                            lhs88 = NativeFieldStoreLHS(b88, d88)
-                            'Skip a spurious self-store: the source byte register
-                            'coincidentally tracks the buffer BASE (`var_1B8(10) = var_1B8`,
-                            'where the real byte value never reached the register) or the
-                            'full LHS (a read-modify-write that did not fold) - emitting it
-                            'would be a misleading no-op, so drop it (honest) rather than
-                            'guess.  Compare against the LHS's base token (everything before
-                            'its last "(") so the guard holds however the base was tracked.
-                            Dim base88 As String, pp88 As Long
-                            base88 = lhs88: pp88 = InStrRev(base88, "(")
-                            If pp88 > 0 Then base88 = Left$(base88, pp88 - 1)
-                            If Len(lhs88) > 0 And v88 <> base88 And v88 <> lhs88 Then
-                                NativeTrackReg = lhs88 & " = " & v88
-                            End If
+                If NativeDecodeDisp(dump, d88, ia88) And Not ia88 And NativeMemIndex(dump) < 0 Then
+                    v88 = NVReg(reg)
+                    If d88 > 0 And d88 < &H2000 And Len(v88) > 0 Then
+                        b88 = NativeMemBase(dump)
+                        lhs88 = NativeFieldStoreLHS(b88, d88)
+                        'Skip a spurious self-store: the source byte register
+                        'coincidentally tracks the buffer BASE (`var_1B8(10) = var_1B8`,
+                        'where the real byte value never reached the register) or the
+                        'full LHS (a read-modify-write that did not fold) - emitting it
+                        'would be a misleading no-op, so drop it (honest) rather than
+                        'guess.  Compare against the LHS's base token (everything before
+                        'its last "(") so the guard holds however the base was tracked.
+                        Dim base88 As String, pp88 As Long
+                        base88 = lhs88: pp88 = InStrRev(base88, "(")
+                        If pp88 > 0 Then base88 = Left$(base88, pp88 - 1)
+                        If Len(lhs88) > 0 And v88 <> base88 And v88 <> lhs88 Then
+                            NativeTrackReg = lhs88 & " = " & v88
+                        End If
+                    ElseIf d88 < 0 And Len(v88) > 0 Then
+                        'Byte store to a LOCAL: a packet property `Get` copies the buffer
+                        'byte into its return-slot local (`mov dl,[buf+idx]; mov [ebp-X],dl`)
+                        '-> `var_X = <buffer read>`.  Surface it ONLY when the value is a
+                        'meaningful deref/field expression (a recovered buffer/field read),
+                        'mirroring the dword/word 0x89 local-store; a plain register or a
+                        '0-init just updates the slot silently (no `var_X = 0` noise).
+                        'ONLY surface (and rebind the slot) for a meaningful buffer/field
+                        'read; do NOT touch the local otherwise - overwriting it with a
+                        'byte "0"-init or a raw register value clobbered a good tracked
+                        'expression and leaked `If 0 <> 0` into later conditions.
+                        Dim ln88 As String
+                        ln88 = "var_" & Hex$(Abs(d88))
+                        If (InStr(v88, "(") > 0 Or Left$(v88, 6) = "field_") And v88 <> ln88 Then
+                            NativeTrackReg = ln88 & " = " & v88
+                            NativeSetLocalExpr d88, ln88
                         End If
                     End If
                 End If
