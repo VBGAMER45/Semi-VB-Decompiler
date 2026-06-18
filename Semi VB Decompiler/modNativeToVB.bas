@@ -188,6 +188,7 @@ Private NVRegFieldCls(7) As String 'class of the As-New object field a register'
 Private NVRegFieldRecv(7) As String 'receiver expr (field_<off>) for that field, carried to the dereffed object so its method calls render field_<off>.Method
 Private NVObjClass As Collection   'key "G"&globalVA -> user class name of the object instance stored at that global (typed at the __vbaNew auto-instantiation)
 Private NVLocalObjType As Collection 'key "D"&localDisp -> user class created INTO that local by __vbaNew2(ObjInfo, &local); so var_X.Member resolves via the class vtable map
+Private NVNewEmitted As Collection 'per-proc: local disps that already emitted `Set var_X = New <class>` - suppress the repeated auto-instantiation (As New) guards before each use
 Private NVPropDir As Collection      'key "P"&callVA -> "get"/"put": data-flow direction of a property accessor call (its by-ref local read AFTER = get, else put), since VB6 FuncDesc flags Get and Let identically
 Private NVRecentPush(7) As Long    'ring of recent `push imm32/imm8` raw values (to recover __vbaNew's Object Info + @global args)
 Private NVRecentTop As Long
@@ -319,6 +320,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVByteClamp = New Collection
     Set NVByteClampSkip = New Collection
     Set NVLocalObjType = New Collection
+    Set NVNewEmitted = New Collection
     Set NVPropDir = New Collection
     NVCurVa = 0
     NVArgN = 0
@@ -5036,15 +5038,35 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             Next
             'A __vbaNew2 into a LOCAL (`lea reg,[ebp-X]; push reg` as @dest) - type that
             'local with the class so its later vtable calls resolve to var_X.Member.
+            Dim ndp As Long, ndDisp As Long
+            ndDisp = 0
             If Len(ncls) > 0 Then
-                Dim ndp As Long
                 For ndp = 0 To NVPushTop - 1
-                    If NVPushDisp(ndp) < 0 Then NativeColPut NVLocalObjType, "D" & NVPushDisp(ndp), ncls: Exit For
+                    If NVPushDisp(ndp) < 0 Then ndDisp = NVPushDisp(ndp): Exit For
                 Next
+                If ndDisp < 0 Then NativeColPut NVLocalObjType, "D" & ndDisp, ncls
             End If
             NVPushTop = 0
             If Len(ncls) > 0 Then
                 If ngObj <> 0 Then NativeColPut NVObjClass, "G" & ngObj, ncls
+                If ndDisp < 0 And ngObj = 0 Then
+                    'Creation into a LOCAL -> emit `Set var_X = New <class>` (commercial:
+                    'Set var = vbaNew2(class)) - we were dropping it, leaving an untyped
+                    'var_X whose members were the only trace.  The object goes to the local
+                    'via the @dest ptr; eax is the HRESULT the next instr error-checks, so
+                    'clear it.  (`Set var = New clsX` also lets the Dim inference type it.)
+                    'An `As New` local re-instantiates (If Is Nothing Then Set..New) before
+                    'EACH use - emit the creation only ONCE per local; suppress the repeats
+                    'so the proc matches the single `Set` commercial shows, not 10 of them.
+                    NVReg(0) = "": NVRegObjType(0) = "": NVRegObjVt(0) = ""
+                    If Len(NativeColGet(NVNewEmitted, "N" & ndDisp)) > 0 Then
+                        NativeRuntimeCall = ""                   'repeat guard - suppress
+                    Else
+                        NativeColPut NVNewEmitted, "N" & ndDisp, "1"
+                        NativeRuntimeCall = "Set var_" & Hex$(Abs(ndDisp)) & " = New " & ncls
+                    End If
+                    Exit Function
+                End If
                 NVReg(0) = "New " & ncls: NVRegObjType(0) = ncls
             ElseIf isGlobalObj Then
                 'The VB6 _Global intrinsic-objects holder, lazily New'd into a module
