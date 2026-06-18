@@ -6989,9 +6989,13 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &HC7                       'mov r/m32, imm32 (store immediate)
             If NativeDecodeDisp(dump, disp, isAbs) Then
                 If isAbs And NativeIsGlobalAddr(disp) Then
-                    'mov [abs], imm32 to a module global -> global_X = <imm/string>.
+                    'mov [abs], imm to a module global -> global_X = <imm/string>.  A
+                    '0x66-prefixed store writes a WORD (imm16): an Integer/Boolean global
+                    '(Boolean True = 0xFFFF -> -1, False = 0).  Reading it as imm32 grabbed
+                    '2 bytes of the address too (`flgSoundEnabled = True` -> -65470 instead
+                    'of -1), so honour the operand-size prefix.
                     Dim c7imm As Long, c7s As String
-                    c7imm = NativeDumpInt32(dump, n - 4)         'imm32 is the trailing dword
+                    If NativeHas66(dump) Then c7imm = NativeDumpInt16(dump, n - 2) Else c7imm = NativeDumpInt32(dump, n - 4)
                     If c7imm >= OptHeader.ImageBase Then c7s = NativeStringAt(c7imm)
                     If Len(c7s) = 0 Then c7s = NativeNumFromBits(c7imm)
                     NativeTrackReg = NativeGlobalName(disp) & " = " & c7s
