@@ -4948,7 +4948,9 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             'it so eax becomes the real source even when no control identity is on eax
             '(e.g. `Unload <form>`: the form was pushed from a register, leaving a stale
             'tag on eax that otherwise leaked as the Unload argument).
+            Dim osDest As String
             If NVPushTop >= 1 Then osSrc = NVPushImm(0)
+            If NVPushTop >= 2 Then osDest = NVPushImm(1)    'ppDest = the second (top) push
             NVPushTop = 0
             'Re-tag eax with the control identity: __vbaObjSet returns the same
             'object, so a following `mov [tempLocal], eax` (the property LET target)
@@ -4973,6 +4975,15 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                     NativeRuntimeCall = "": Exit Function
                 End If
                 NativeRuntimeCall = "Set var_" & Hex$(Abs(NVLastLea)) & " = " & osName
+                Exit Function
+            End If
+            'Set <global> = New <obj>: a module global assigned a freshly-created object
+            '(`Set dx7 = New DirectX7`).  The dest is a module global (push &global, not a
+            'lea-local) and the source is an object creation, so the lea-local branch above
+            'missed it and it was dropped.  Surface it (the external class name needs the
+            'referenced typelib, so an unresolved one shows `New (object)`).
+            If Left$(osDest, 7) = "global_" And Left$(osSrc, 4) = "New " Then
+                NativeRuntimeCall = "Set " & osDest & " = " & osSrc
                 Exit Function
             End If
             NativeRuntimeCall = "": Exit Function    'object-store plumbing - drop
