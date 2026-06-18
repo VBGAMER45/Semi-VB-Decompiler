@@ -8963,11 +8963,14 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
             If InStr(kindStr, "Property") > 0 Then NVProcEndWord = "Property" Else NVProcEndWord = kindStr
         End If
     End If
-    'A public class method's true kind (Function / Property Get / Sub) comes from its
-    'typeinfo FuncDesc.  Apply it unless the Get/Let adjacency pass already tagged it
-    'a Property (that pairing distinguishes the Let half, which the FuncDesc does not).
+    'A public class method's true kind (Function / Property Get / Property Let / Sub)
+    'comes from its typeinfo FuncDesc and is AUTHORITATIVE - it identifies Get vs Let
+    'directly (via the return-slot bit), so it overrides the positional Get/Let adjacency
+    'guess in LinkNativeProcNames (which assumes first-occurrence = Get, wrong when VB6
+    'lays the Let accessor's name before the Get).  Only fall back to the adjacency kind
+    'when the FuncDesc has no entry for this address (e.g. an event handler).
     Dim mkind As String
-    If InStr(kindStr, "Property") = 0 And NativeTryMethodKind(addr, mkind) Then
+    If NativeTryMethodKind(addr, mkind) Then
         kindStr = mkind
         If InStr(kindStr, "Property") > 0 Then NVProcEndWord = "Property" Else NVProcEndWord = kindStr
     End If

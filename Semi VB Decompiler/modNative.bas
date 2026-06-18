@@ -752,12 +752,11 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
         If isClass Then maxJ = pc - 1 Else maxJ = 255
         For j = 0 To maxJ
             p = NativeFileDword(F, arr + j * 4)
-            If p = 0 Then
-                If isClass Then
-                    If started Then Exit For Else GoTo contJ   'leading null phantom -> skip; trailing -> stop
-                End If
-                GoTo contJ                 'form array is sparse - skip the gap
-            End If
+            If p = 0 Then GoTo contJ        'null slot (private/Friend member, no public
+                                            'FuncDesc) - the class array is parallel to the
+                                            'name array and bounded by pc, so INTERIOR nulls
+                                            '(e.g. a Friend property between public methods)
+                                            'must be skipped, not treated as a terminator.
             If Not NativeIsFuncDesc(F, p) Then
                 If isClass Then
                     If started Then Exit For Else GoTo contJ   'leading private (non-FuncDesc) -> skip
@@ -771,11 +770,14 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
             b1 = (f00 \ &H100) And &H1            'hidden return slot bit
             nP = (b0 \ 4) - b1
             If nP < 0 Then nP = 0
-            'Method kind: the property bit (flags & 0x800) marks a Property Get;
-            'else the hidden-return-slot bit (b1) distinguishes Function from Sub.
+            'Method kind: flag bit 0x800 (in the +0xC dword's high word) marks a PROPERTY
+            'accessor - but it is set for the Get AND the Let/Set alike (it means "this is
+            'a property", not "Get").  The Get/Let split is the hidden-return-slot bit b1:
+            'a Property Get returns a value (b1=1); a Property Let/Set returns nothing
+            '(b1=0).  For a non-property, b1 distinguishes Function from Sub.
             fflags = NativeFileDword(F, p + &HC) \ &H10000
             If (fflags And &H800) <> 0 Then
-                kind = "Property Get"
+                If b1 = 1 Then kind = "Property Get" Else kind = "Property Let"
             ElseIf b1 = 1 Then
                 kind = "Function"
             Else
