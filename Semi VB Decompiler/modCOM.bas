@@ -8,30 +8,73 @@ Global tliTypeLibInfo As TypeLibInfo
 '--- Late-bound (__vbaLateIdCall) member resolution: DISPID -> name via the OCX typelib ---
 Private mLateTlbCache As Collection   'OCX file path -> clsTypeLibInfo (each loaded once)
 Private mOcxEvtTlbCache As Collection 'OCX file path -> TypeLibInfo (event sig resolution)
-Private mVtTlbCache As Collection     'OCX file path -> clsTypeLibInfo (vtable-offset resolution)
 
-Public Function ResolveLateMember(ByVal ocxFile As String, ByVal dispid As Long, ByVal wantKind As Long, ByRef invKind As Long) As String
-    'Load ocxFile's typelib (cached) and return the member NAME whose memid = dispid.
-    'wantKind (1=Func, 2=Get, 4=Put, 0=any) breaks ties: a control typelib can carry
-    'the SAME memid in two dispinterfaces (e.g. TABCTL32 has 0x4 = IVBDataObject.SetData
-    '[Func] AND ISSTabCtl.Tab [Put]); a property STORE must pick the Put. Returns the
-    'best (wantKind) match, else the first match.  "" if none.
-    On Error GoTo done
+Private Function OpenOcxTlb(ByVal ocxFile As String) As clsTypeLibInfo
+    'Load ocxFile's typelib once (cached) - shared by the late-bound (dispid) and
+    'early-bound (vtable offset) resolvers.
+    On Error GoTo fail
     If Len(ocxFile) = 0 Then Exit Function
     If mLateTlbCache Is Nothing Then Set mLateTlbCache = New Collection
     Dim tlb As clsTypeLibInfo
     On Error Resume Next
     Set tlb = mLateTlbCache(ocxFile)
-    On Error GoTo done
+    On Error GoTo fail
     If tlb Is Nothing Then
         Set tlb = New clsTypeLibInfo
         If Not tlb.OpenTypeLib(ocxFile) Then Exit Function
         mLateTlbCache.Add tlb, ocxFile
     End If
+    Set OpenOcxTlb = tlb
+fail:
+End Function
+
+Private Function CoclassIfaceGuids(tlb As clsTypeLibInfo, ByVal ctlClass As String) As String
+    'The "|guid|guid|" set of interfaces implemented by the coclass named ctlClass
+    '(e.g. "MSComctlLib.Slider" -> coclass "Slider" -> ISlider/_Slider...).  Used to
+    'scope member resolution to ONE control's own interfaces: an OCX typelib reuses the
+    'same dispid/vtable offset across unrelated controls (MSCOMCTL dispid 0xB is
+    'ITabStrip.ClientHeight AND ISlider.Value), so an un-scoped scan mis-resolves.  ""
+    'when the class is unknown / not a coclass here (caller then falls back to all).
+    On Error GoTo done
+    If Len(ctlClass) = 0 Then Exit Function
+    Dim shortClass As String
+    shortClass = ctlClass
+    If InStr(shortClass, ".") > 0 Then shortClass = Mid$(shortClass, InStrRev(shortClass, ".") + 1)
+    Dim i As Long, j As Long, res As String
+    For i = 0 To tlb.TypeInfoCount - 1
+        tlb.SelectTypeInfo i
+        If tlb.TypeInfoKind = TKIND_COCLASS And StrComp(tlb.TypeInfoName, shortClass, vbTextCompare) = 0 Then
+            For j = 0 To tlb.TypeInfoImplements - 1
+                tlb.SelectImplement j
+                res = res & "|" & tlb.ImplementGUID
+            Next j
+            Exit For
+        End If
+    Next i
+    If Len(res) > 0 Then CoclassIfaceGuids = res & "|"
+done:
+End Function
+
+Public Function ResolveLateMember(ByVal ocxFile As String, ByVal dispid As Long, ByVal wantKind As Long, ByRef invKind As Long, Optional ByVal ctlClass As String) As String
+    'Load ocxFile's typelib (cached) and return the member NAME whose memid = dispid.
+    'wantKind (1=Func, 2=Get, 4=Put, 0=any) breaks ties: a control typelib can carry
+    'the SAME memid in two dispinterfaces (e.g. TABCTL32 has 0x4 = IVBDataObject.SetData
+    '[Func] AND ISSTabCtl.Tab [Put]); a property STORE must pick the Put. Returns the
+    'best (wantKind) match, else the first match.  "" if none.  When ctlClass is given,
+    'the scan is SCOPED to that coclass's interfaces - vital because a dispid collides
+    'across MSCOMCTL controls (0xB = ITabStrip.ClientHeight AND ISlider.Value), so an
+    'un-scoped scan mis-resolved Slider .Value to ClientHeight.
+    On Error GoTo done
+    Dim tlb As clsTypeLibInfo
+    Set tlb = OpenOcxTlb(ocxFile)
+    If tlb Is Nothing Then Exit Function
+    Dim scope As String
+    scope = CoclassIfaceGuids(tlb, ctlClass)        '"" => unscoped (legacy behaviour)
     Dim i As Long, g As Long, anyName As String, anyKind As Long
     For i = 0 To tlb.TypeInfoCount - 1
         tlb.SelectTypeInfo i
-        If tlb.TypeInfoKind = TKIND_DISPATCH Or tlb.TypeInfoKind = TKIND_INTERFACE Then
+        If (tlb.TypeInfoKind = TKIND_DISPATCH Or tlb.TypeInfoKind = TKIND_INTERFACE) _
+           And (Len(scope) = 0 Or InStr(scope, "|" & tlb.TypeInfoGUID & "|") > 0) Then
             For g = 0 To tlb.TypeInfoFunctions - 1
                 If tlb.SelectFunction(g) Then
                     If tlb.FunctionMemberId = dispid Then
@@ -80,7 +123,7 @@ Public Function LateMemberName(ByVal libClass As String, ByVal ctlBase As String
         For i = 0 To UBound(gOcxList) - 1
             If Len(gOcxList(i).strGuid) > 0 And StrComp(gOcxList(i).strLibname, libClass, vbTextCompare) = 0 Then
                 f = OcxFileFromClsid(gOcxList(i).strGuid)
-                nm = ResolveLateMember(f, dispid, wantKind, invKind)
+                nm = ResolveLateMember(f, dispid, wantKind, invKind, libClass)
                 If Len(nm) > 0 Then LateMemberName = nm: Exit Function
             End If
         Next i
@@ -91,7 +134,7 @@ Public Function LateMemberName(ByVal libClass As String, ByVal ctlBase As String
                 If InStr(1, gOcxList(i).strLibname, ctlBase, vbTextCompare) > 0 _
                    Or InStr(1, gOcxList(i).strocxName, ctlBase, vbTextCompare) > 0 Then
                     f = OcxFileFromClsid(gOcxList(i).strGuid)
-                    nm = ResolveLateMember(f, dispid, wantKind, invKind)
+                    nm = ResolveLateMember(f, dispid, wantKind, invKind, gOcxList(i).strLibname)
                     If Len(nm) > 0 Then LateMemberName = nm: Exit Function
                 End If
             End If
@@ -109,37 +152,14 @@ Public Function ResolveVtableMember(ByVal ocxFile As String, ByVal ctlClass As S
     '"MSComctlLib.Slider" -> coclass "Slider") so a vtable offset shared across unrelated
     'interfaces can't mis-resolve.  wantKind (1=Func,2=Get,4=Put,0=any) breaks ties.
     On Error GoTo done
-    If Len(ocxFile) = 0 Then Exit Function
-    If mVtTlbCache Is Nothing Then Set mVtTlbCache = New Collection
     Dim tlb As clsTypeLibInfo
-    On Error Resume Next
-    Set tlb = mVtTlbCache(ocxFile)
-    On Error GoTo done
-    If tlb Is Nothing Then
-        Set tlb = New clsTypeLibInfo
-        If Not tlb.OpenTypeLib(ocxFile) Then Exit Function
-        mVtTlbCache.Add tlb, ocxFile
-    End If
-    'Resolve the short coclass name (drop the "Lib." prefix) and collect the GUIDs of
-    'the interfaces it implements (the default interface carries the vtable members).
-    Dim shortClass As String
-    shortClass = ctlClass
-    If InStr(shortClass, ".") > 0 Then shortClass = Mid$(shortClass, InStrRev(shortClass, ".") + 1)
-    Dim i As Long, j As Long, implGuids As String
-    For i = 0 To tlb.TypeInfoCount - 1
-        tlb.SelectTypeInfo i
-        If tlb.TypeInfoKind = TKIND_COCLASS And StrComp(tlb.TypeInfoName, shortClass, vbTextCompare) = 0 Then
-            For j = 0 To tlb.TypeInfoImplements - 1
-                tlb.SelectImplement j
-                implGuids = implGuids & "|" & tlb.ImplementGUID
-            Next j
-            Exit For
-        End If
-    Next i
+    Set tlb = OpenOcxTlb(ocxFile)
+    If tlb Is Nothing Then Exit Function
+    Dim implGuids As String
+    implGuids = CoclassIfaceGuids(tlb, ctlClass)
     If Len(implGuids) = 0 Then GoTo done       'coclass not found in this typelib
-    implGuids = implGuids & "|"
     'Scan the coclass's interfaces for a function at the wanted vtable offset.
-    Dim anyName As String, anyKind As Long
+    Dim i As Long, j As Long, anyName As String, anyKind As Long
     For i = 0 To tlb.TypeInfoCount - 1
         tlb.SelectTypeInfo i
         If (tlb.TypeInfoKind = TKIND_DISPATCH Or tlb.TypeInfoKind = TKIND_INTERFACE) _

@@ -4363,8 +4363,23 @@ Private Function NativeProperty(ByVal vtOffset As Long) As String
 'Resolve a property vtable call (call [obj + vtOffset]) on the last control.
     Dim p As String, propName As String, kind As String, valExpr As String
     If Len(NVLastGuid) = 0 Then Exit Function
-    p = modPCode.GetProperty(NVLastGuid, vtOffset)
-    If InStr(p, "Unknown GUID") > 0 Then Exit Function   'GUID/offset not in a loaded TypeLib - leave raw
+    'OCX control? Resolve via its OWN typelib first (authoritative), overriding the
+    'VB6.OLB guess - see NativeControlProp.  NVLastControl is the receiver (e.g.
+    '"frmCreate.sldrLife"); a tControl-array OCX carries a VB-intrinsic GUID here, so
+    'GetProperty would mis-name its members (Slider .Value -> .ClientHeight).
+    Dim ocxLib As String, ocxBase As String, ocxInv As Long, ocxName As String, dotP As Long
+    ocxLib = GetControlClass(NVLastControl)
+    If Len(ocxLib) > 0 Then
+        ocxBase = NVLastControl
+        dotP = InStrRev(ocxBase, ".")
+        If dotP > 0 Then ocxBase = Mid$(ocxBase, dotP + 1)
+        ocxName = modCOM.VtableMemberName(ocxLib, ocxBase, vtOffset, 0, ocxInv)
+        If Len(ocxName) > 0 Then p = "X_" & ocxName & " (" & cTypeInfo.InvKind2String(ocxInv) & ")"
+    End If
+    If Len(p) = 0 Then
+        p = modPCode.GetProperty(NVLastGuid, vtOffset)
+        If InStr(p, "Unknown GUID") > 0 Then Exit Function   'GUID/offset not in a loaded TypeLib - leave raw
+    End If
     NativeSplitProp p, propName, kind
     If Len(propName) = 0 Then Exit Function
 
