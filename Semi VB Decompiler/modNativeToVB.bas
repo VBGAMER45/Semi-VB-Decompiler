@@ -3621,6 +3621,37 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         End If
                     End If
                 End If
+                'Value-returning METHOD on a tracked intrinsic object (Clipboard.GetData):
+                'the vtable register carries the intrinsic object's name.  Fold the result
+                'to the consumer (var_X = Clipboard.GetData), like a Property Get; the
+                'optional format argument (built as a DISP_E_PARAMNOTFOUND Variant) is
+                'omitted.
+                If ocb >= 0 And ocb <= 7 Then
+                    If Len(NVRegObjVt(ocb)) > 0 Then
+                        Dim imName As String
+                        imName = NativeIntrinsicMethodByOffset(NVRegObjVt(ocb), disp)
+                        If Len(imName) > 0 Then
+                            Dim imChain As String, imLn As String
+                            imChain = NVRegObjVt(ocb) & "." & imName
+                            NVPushTop = 0
+                            'The method returns via a hidden retbuf (the most recent LEA);
+                            'the HRESULT is left in eax and error-checked next, so DON'T
+                            'leave imChain in eax (it would leak into the HRESULT compare).
+                            'Emit the assignment to the retbuf local so the call is visible
+                            'and its value flows on to the consumer (var = Clipboard.GetData).
+                            NVReg(0) = ""
+                            NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                            NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                            If NVLastLeaSet Then
+                                imLn = "var_" & Hex$(Abs(NVLastLea))
+                                NativeSetLocalExpr NVLastLea, imLn
+                                NVLastLeaSet = False
+                                NativeProcessInst = ind & imLn & " = " & imChain & vbCrLf
+                            End If
+                            Exit Function
+                        End If
+                    End If
+                End If
                 'Property access on a tracked CONTROL object: its vtable register
                 'carries the control GUID (set when the control was fetched via a
                 'form accessor and stored through __vbaObjSet).  Reuse NativeProperty
@@ -7819,6 +7850,21 @@ Private Function NativeIntrinsicPropByOffset(ByVal obj As String, ByVal disp As 
                 Case &H98: NativeIntrinsicPropByOffset = "Width"
                 Case &H50: NativeIntrinsicPropByOffset = "Height"
                 Case &H80: NativeIntrinsicPropByOffset = "TwipsPerPixelX"
+            End Select
+    End Select
+End Function
+
+Private Function NativeIntrinsicMethodByOffset(ByVal obj As String, ByVal disp As Long) As String
+    'Value-returning METHOD vtable offsets on a VB6 intrinsic object - distinct from the
+    'read-only property getters in NativeIntrinsicPropByOffset.  The Clipboard object
+    '(reached via the standalone _Global object's .Clipboard accessor at [_Global+0x1C])
+    'exposes GetData/GetText/GetFormat at fixed offsets in its runtime interface; verified
+    'on the class-example EXE (Clipboard.GetData = call [clipboardVt + 0x54]).  Extend as
+    'more offsets are observed.
+    Select Case obj
+        Case "Clipboard"
+            Select Case disp
+                Case &H54: NativeIntrinsicMethodByOffset = "GetData"
             End Select
     End Select
 End Function
