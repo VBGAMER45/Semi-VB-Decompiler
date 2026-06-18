@@ -417,15 +417,16 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
         Dim prevName As String, prevPos As Long, prevIdx As Long, pos As Long, ai As Long
         prevName = "": prevPos = -1: prevIdx = -2
 
-        'For a FORM, locate its FuncDesc pointer array (parallel to the name array) so
-        'each PUBLIC method's REAL vtable offset can be mapped below.  A class's methods
-        'sit at the predictable 0x1C+seq*4 layout (handled inline); a form's own public
-        'methods sit at high offsets (0x750.. on frmClient) that ONLY the FuncDesc
-        'records carry - without this a cross-module `<formInstance>.UnkVCall_<off>`
-        'call can't resolve to <form>.<method>.
+        'Locate the object's FuncDesc pointer array (parallel to the name array) so each
+        'PUBLIC member's REAL vtable offset can be mapped below.  Used for FORMS (their
+        'own methods sit at high offsets 0x750.. that only the FuncDesc carries) AND now
+        'CLASSES: the 0x1C+seq*4 approximation mis-orders a read/write PROPERTY's Get vs
+        'Let accessors (VB6 can lay Let before Get in the vtable while the name array
+        'lists Get first), so a `<obj>.Prop = x` put offset resolved to the GET address.
+        'The FuncDesc's real oVft maps each accessor's offset to its own address+kind.
         Dim frmArr As Long, frmHdr As Long, fj As Long
         frmArr = 0
-        If Not isClass And gObject(oi).aObjectInfo <> 0 Then
+        If gObject(oi).aObjectInfo <> 0 Then
             frmHdr = NativeFileDword(F, gObject(oi).aObjectInfo + &HC)
             If frmHdr >= OptHeader.ImageBase Then
                 If NativeArrayHasFuncDesc(F, NativeFileDword(F, frmHdr + &H18)) Then
@@ -457,16 +458,12 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
                     SubNamelist(pos).kind = "Property Let"
                 End If
                 ReDim Preserve SubNamelist(UBound(SubNamelist) + 1)
-                If isClass Then
-                    On Error Resume Next
-                    gFormVtable.Add addrs(ai), gObjectNameArray(oi) & ":off" & (&H1C + namedSeq * 4)
-                    On Error GoTo done
-                ElseIf frmArr <> 0 And i <= 255 Then
-                    'Form public method: take its REAL vtable offset from the parallel
-                    'FuncDesc and map it to this method's address.  Only when that slot
-                    'genuinely holds a FuncDesc (event handlers / private slots have a
-                    'name but no public FuncDesc -> skipped, not mis-mapped).
-                    Dim fdp As Long, fvoff As Long
+                'Prefer the REAL vtable offset from the parallel FuncDesc (forms AND
+                'classes): it maps each method/accessor's own offset to its address, so a
+                'property Get and Let land on their true offsets (not the seq*4 order).
+                Dim fdp As Long, fvoff As Long, mappedReal As Boolean
+                mappedReal = False
+                If frmArr <> 0 And i <= 255 Then
                     fdp = NativeFileDword(F, frmArr + i * 4)
                     If fdp <> 0 And NativeIsFuncDesc(F, fdp) Then
                         fvoff = (NativeFileDword(F, fdp) \ &H10000) And &HFFFC
@@ -474,8 +471,17 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
                             On Error Resume Next
                             gFormVtable.Add addrs(ai), gObjectNameArray(oi) & ":off" & fvoff
                             On Error GoTo done
+                            mappedReal = True
                         End If
                     End If
+                End If
+                'Class fallback when this slot has no FuncDesc (no real oVft): the
+                'predictable COM layout 0x1C + namedSeq*4 (methods only - properties have
+                'FuncDescs and take the real path above).
+                If isClass And Not mappedReal Then
+                    On Error Resume Next
+                    gFormVtable.Add addrs(ai), gObjectNameArray(oi) & ":off" & (&H1C + namedSeq * 4)
+                    On Error GoTo done
                 End If
                 namedSeq = namedSeq + 1
                 prevName = nm: prevPos = pos: prevIdx = i

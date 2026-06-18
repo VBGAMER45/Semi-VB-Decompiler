@@ -187,6 +187,7 @@ Private NVRegObjInst(7) As String  'receiver expression for a register holding a
 Private NVRegFieldCls(7) As String 'class of the As-New object field a register's ADDRESS points to (from `lea reg,[Me+off]`); the next `mov obj,[reg]` deref tags obj as that class
 Private NVRegFieldRecv(7) As String 'receiver expr (field_<off>) for that field, carried to the dereffed object so its method calls render field_<off>.Method
 Private NVObjClass As Collection   'key "G"&globalVA -> user class name of the object instance stored at that global (typed at the __vbaNew auto-instantiation)
+Private NVLocalObjType As Collection 'key "D"&localDisp -> user class created INTO that local by __vbaNew2(ObjInfo, &local); so var_X.Member resolves via the class vtable map
 Private NVRecentPush(7) As Long    'ring of recent `push imm32/imm8` raw values (to recover __vbaNew's Object Info + @global args)
 Private NVRecentTop As Long
 Private NVLoopHdr As Collection    'addresses that are loop headers (back-edge targets)
@@ -316,6 +317,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVLocalVtGuid = New Collection
     Set NVByteClamp = New Collection
     Set NVByteClampSkip = New Collection
+    Set NVLocalObjType = New Collection
     NVCurVa = 0
     NVArgN = 0
     ReDim NVSelStkBase(31): NVSelTop = 0
@@ -3592,9 +3594,39 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             'global_108 = clsBitmap.InvertImageDC, or
                             'If picBmp.SetBitmap(x) Then) instead of a bogus Call.
                             Dim umKind As String, umVal As String, umIsVal As Boolean
+                            NativeTryMethodKind umAddr, umKind
+                            'A property GET/method on a LOCAL class-instance receiver (an
+                            '`As New`/predeclared instance, var_X) - e.g. cmdOK_Click reading
+                            'pktCreate.Name/.Life/... into locals.  Emit the read as a VISIBLE
+                            'statement `var_<rb> = recv.Prop` so the resolved member shows
+                            '(beats commercial's UnkVCall) instead of silently folding into an
+                            'unconsumed local and vanishing.  Scoped to local-instance
+                            'receivers (umRecv "var_") so As-New FIELD receivers (clsBitmap
+                            'field_X, whose gets are consumed inline) keep their current fold.
+                            If Len(umRetbuf) > 0 And Left$(umRecv, 4) = "var_" And Left$(umRetbuf, 4) = "var_" _
+                               And InStr(umKind, "Property") > 0 Then
+                                'A property accessor on a LOCAL class-instance (As New /
+                                'predeclared, e.g. pktCreate): emit a VISIBLE read so the
+                                'resolved member NAME shows (beats commercial's UnkVCall)
+                                'instead of silently folding into an unconsumed local and
+                                'vanishing.  Rendered as a read `var_<rb> = recv.Member`:
+                                'VB6's FuncDesc flag marks GET and LET identically, so the
+                                'put/get DIRECTION can't be told apart here (deferred - needs
+                                'value-flow); reads are correct for the majority (the GetData
+                                'serializers + received-packet field reads), and a build-time
+                                'PUT shows reversed but with the right member + a real local.
+                                umVal = umRecv & "." & umName
+                                NVPushTop = 0
+                                NativeProcessInst = ind & umRetbuf & " = " & umVal & vbCrLf
+                                On Error Resume Next
+                                NativeSetLocalExpr -CLng("&H" & Mid$(umRetbuf, 5)), umRetbuf
+                                On Error GoTo 0
+                                NVReg(0) = ""
+                                Exit Function
+                            End If
                             umIsVal = (Len(umRetbuf) > 0)
                             If Not umIsVal Then
-                                If NativeTryMethodKind(umAddr, umKind) Then umIsVal = (InStr(umKind, "Get") > 0)
+                                umIsVal = (InStr(umKind, "Get") > 0)
                             End If
                             If umIsVal Then
                                 umVal = umRecv & "." & umName
@@ -4896,6 +4928,14 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 If rv <> 0 And Not isGlobalObj Then isGlobalObj = NativeIsVBGlobalDesc(rv)
                 If rv <> 0 And NativeIsGlobalAddr(rv) Then ngObj = rv
             Next
+            'A __vbaNew2 into a LOCAL (`lea reg,[ebp-X]; push reg` as @dest) - type that
+            'local with the class so its later vtable calls resolve to var_X.Member.
+            If Len(ncls) > 0 Then
+                Dim ndp As Long
+                For ndp = 0 To NVPushTop - 1
+                    If NVPushDisp(ndp) < 0 Then NativeColPut NVLocalObjType, "D" & NVPushDisp(ndp), ncls: Exit For
+                Next
+            End If
             NVPushTop = 0
             If Len(ncls) > 0 Then
                 If ngObj <> 0 Then NativeColPut NVObjClass, "G" & ngObj, ncls
@@ -6228,6 +6268,11 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NVRegObjType(reg) = hadFieldCls: NVRegObjInst(reg) = hadFieldRecv
                 ElseIf Not isAbs And disp < 0 Then
                     If NativeIsIntrinsicObj(NVReg(reg)) Then NVRegObjType(reg) = NVReg(reg)
+                    'Loading a local that __vbaNew2 typed with a user class (an `As New`
+                    'instance, e.g. pktCreate): tag it so var_X.Member resolves.
+                    Dim lcls As String
+                    lcls = NativeColGet(NVLocalObjType, "D" & disp)
+                    If Len(lcls) > 0 Then NVRegObjType(reg) = lcls: NVRegObjInst(reg) = "var_" & Hex$(Abs(disp))
                     'Loading a local that holds a control object tags this register
                     'with the control's identity + GUID (for a later property call).
                     Dim lguid As String
