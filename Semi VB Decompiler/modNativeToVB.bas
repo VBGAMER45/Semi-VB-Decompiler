@@ -2982,17 +2982,27 @@ Private Function NativeInstDestReg(inst As CInstruction) As Long
 End Function
 
 Private Function NativeIs16BitAddSub(inst As CInstruction) As Boolean
-    'True for a 16-bit (0x66) `add r16,r/m16` / `sub r16,r/m16` (reg-form, opcode
-    '0x03 / 0x2B).  These fold their dest's word shadow (NVR16Val) in place, so the
-    'per-instruction shadow-clear must skip them.
-    Dim dump As String, n As Long, i As Long, op As Long
+    'True for a 16-bit (0x66) in-place arithmetic that folds its dest's word shadow
+    '(NVR16Val) in NativeTrackReg - the per-instruction shadow-clear must skip these so
+    'the read-then-write (`cx = cx * 1000` / `cx = cx - 55`) sees the prior value:
+    '  add/sub r16,r/m16   (reg-form 0x03 / 0x2B)
+    '  imul r16,r/m16,imm  (0x69 / 0x6B)
+    '  add/sub r/m16,imm   (group-1 0x83 / 0x81, reg field 0 = add, 5 = sub)
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long, rf As Long
     On Error Resume Next
     dump = Replace(inst.dump, " ", "")
     n = Len(dump) \ 2
     If Not NativeHas66(dump) Then Exit Function
     i = NativeOpStart(dump, n)
     op = NativeDumpByte(dump, i)
-    NativeIs16BitAddSub = (op = &H3 Or op = &H2B)
+    Select Case op
+        Case &H3, &H2B, &H69, &H6B
+            NativeIs16BitAddSub = True
+        Case &H83, &H81
+            modrm = NativeDumpByte(dump, i + 1)
+            rf = (modrm \ 8) And 7
+            NativeIs16BitAddSub = (rf = 0 Or rf = 5)
+    End Select
 End Function
 
 Private Function NativeBerrStubFromIdx(arr() As CInstruction, ByVal n As Long, isBerr() As Boolean, ByVal idx As Long) As Boolean
@@ -4434,6 +4444,20 @@ Private Function NativeIsFoldableArith(ByVal v As String) As Boolean
     If Left$(v, 4) = "var_" Or Left$(v, 4) = "arg_" Or Left$(v, 4) = "loc_" _
        Or Left$(v, 7) = "global_" Or Left$(v, 6) = "field_" Then Exit Function
     NativeIsFoldableArith = True
+End Function
+
+Private Function NativeIs16Foldable(ByVal v As String) As Boolean
+    'A 16-bit shadow value (NVR16Val) is always an Integer VALUE - a field/local/element
+    'read or an Integer expression already built from one - never a pointer (16-bit
+    'registers do not hold addresses in this code).  So arithmetic may fold onto any
+    'non-empty, non-placeholder value, including a field-read deref arg_8(52) that the
+    'pointer-aware NativeIsFoldableArith deliberately rejects.  Length-capped so repeated
+    'folds cannot blow up.
+    If Len(v) = 0 Then Exit Function
+    If Left$(v, 1) = Chr$(34) Then Exit Function       'string literal
+    If Left$(v, 1) = "<" Then Exit Function            '<arg>/<cond> placeholder
+    If Len(v) > 70 Then Exit Function
+    NativeIs16Foldable = True
 End Function
 
 Private Function NativeHasArithOp(ByVal v As String) As Boolean
@@ -6809,12 +6833,46 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             'meaningful tracked value (a call result like Len(s), or a clean variable)
             'with the immediate so `Right$(s, Len(s) - 4)` keeps the "- 4".  Skip esp/ebp.
             If md = 3 And (reg = 0 Or reg = 5) And rm <> 4 And rm <> 5 Then
-                If NativeIsFoldableArith(NVReg(rm)) Then
-                    Dim aimm As Long
-                    If op = &H83 Then aimm = NativeDumpInt8(dump, n - 1) Else aimm = NativeDumpInt32(dump, n - 4)
+                Dim aimm As Long
+                If op = &H83 Then aimm = NativeDumpInt8(dump, n - 1) Else aimm = NativeDumpInt32(dump, n - 4)
+                If NativeHas66(dump) Then
+                    'A 16-bit add/sub (sub cx,55) folds onto the 16-bit shadow, which
+                    'carries an Integer field/expression (an Integer Function builds its
+                    'result this way: `mvarID * 1000 - 55`).  NVReg's 16-bit value was
+                    'cleared, so fold NVR16Val and leave NVReg alone.  A 16-bit register
+                    'is always a VALUE (never a pointer), so the permissive
+                    'NativeIs16Foldable gate is used (NativeIsFoldableArith would reject
+                    'the field-read deref arg_8(52) as pointer math).
+                    If NativeIs16Foldable(NVR16Val(rm)) Then
+                        NVR16Val(rm) = NativeFoldArith(NVR16Val(rm), (reg = 5), aimm)
+                    End If
+                ElseIf NativeIsFoldableArith(NVReg(rm)) Then
                     NVReg(rm) = NativeFoldArith(NVReg(rm), (reg = 5), aimm)
                     NVRegIsAddr(rm) = False: NVRegIsMe(rm) = False: NVRegIsFormVt(rm) = False
                     NVRegObjType(rm) = "": NVRegObjVt(rm) = "": NVRegObjGuid(rm) = "": NVRegObjVtGuid(rm) = ""
+                End If
+            End If
+        Case &H69, &H6B                 'imul reg, r/m, imm -> (r/m * imm) into reg
+            modrm = NativeDumpByte(dump, i + 1)
+            md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+            If md = 3 And rm <> 4 And rm <> 5 And reg <> 4 And reg <> 5 Then
+                Dim mimm As Long, msrc As String
+                If op = &H6B Then
+                    mimm = NativeDumpInt8(dump, n - 1)
+                ElseIf NativeHas66(dump) Then
+                    mimm = NativeDumpInt16(dump, n - 2)
+                Else
+                    mimm = NativeDumpInt32(dump, n - 4)
+                End If
+                If NativeHas66(dump) Then
+                    'A 16-bit `imul cx,cx,1000` building an Integer expression (mvarID *
+                    '1000): multiply the 16-bit shadow value, leaving NVReg cleared.
+                    msrc = NVR16Val(rm)
+                    If NativeIs16Foldable(msrc) Then NVR16Val(reg) = "(" & msrc & " * " & CStr(mimm) & ")"
+                ElseIf NativeIsFoldableArith(NVReg(rm)) Then
+                    NVReg(reg) = "(" & NVReg(rm) & " * " & CStr(mimm) & ")"
+                    NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                    NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
                 End If
             End If
         Case &H2D, &H5                  'sub/add eax, imm32
