@@ -119,6 +119,17 @@ Private NVStrCmpPending As Boolean  'so the Jcc renders `If p1 <op> p2` (test st
 Private NVCounterSlot As Collection '"C"&disp -> "1" - a stack slot that is a loop induction variable (render by name, not a stale value)
 Private NVWhileCond As Collection  '"W"&exitJccVA -> "1" - emit `Do While <cond>` here (top-tested loop header)
 Private NVWhileLoop As Collection  '"W"&backedgeVA -> "1" - emit `Loop` here (the back-edge of a Do While)
+'Variant For loops: a `For v = a To b` over a Variant counter compiles to
+'__vbaVarForInit (header) ... __vbaVarForNext (back-edge).  Detected on top of the
+'Do While structure, then rendered For/Next instead of Do While/Loop and the two
+'helper calls suppressed.  NVVarForInitLink: "V"&forInitCallVA -> "jccVA|backedgeVA"
+'(set in the pre-pass); the call handler reads the args and fills NVVarForFor
+'("W"&jccVA -> "ctr|start|limit", render the For header) + NVVarForNext
+'("W"&backedgeVA -> ctr, render Next).  NVVarForSuppress drops the ForNext call.
+Private NVVarForInitLink As Collection
+Private NVVarForFor As Collection
+Private NVVarForNext As Collection
+Private NVVarForSuppress As Collection
 Private NVElemIdx As Collection    '"E"&accessVA -> recovered logical array index expr (e.g. arg_8) for a SAFEARRAY element access at that VA; injected by the SIB read/store renderers
 Private NVCurVa As Long            'VA of the instruction currently being rendered (so the SIB renderers can look up NVElemIdx)
 Private NVLateDispid As Collection '"L"&callVA -> comma list of candidate DISPIDs pushed to a __vbaLateIdCall (resolve to the OCX member name at render)
@@ -280,6 +291,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVCounterSlot = New Collection
     Set NVWhileCond = New Collection
     Set NVWhileLoop = New Collection
+    Set NVVarForInitLink = New Collection
+    Set NVVarForFor = New Collection
+    Set NVVarForNext = New Collection
+    Set NVVarForSuppress = New Collection
     Set NVElemIdx = New Collection
     Set NVLateDispid = New Collection
     Set NVSuppressObjSet = New Collection
@@ -1559,6 +1574,22 @@ Private Sub NativeDetectWhileLoops(col As Collection)
                             NativeColPut NVWhileCond, "W" & arr(j + 1).va, "1"
                             NativeColPut NVWhileLoop, "W" & arr(bi).va, "1"
                             NativeAddUnique NVSkipLabels, hdrVA       'header label -> Do While line
+                            'Variant For loop: header preceded by __vbaVarForInit, the
+                            'back-edge by __vbaVarForNext -> render For/Next, drop the calls.
+                            Dim vi As Long, vn As Long, lo As Long, z As Long
+                            vi = -1: vn = -1
+                            lo = hi - 5: If lo < 0 Then lo = 0
+                            For z = hi - 1 To lo Step -1
+                                If InStr(NativeApiName(arr(z)), "__vbaVarForInit") > 0 Then vi = z: Exit For
+                            Next z
+                            lo = bi - 5: If lo < 0 Then lo = 0
+                            For z = bi - 1 To lo Step -1
+                                If InStr(NativeApiName(arr(z)), "__vbaVarForNext") > 0 Then vn = z: Exit For
+                            Next z
+                            If vi >= 0 And vn >= 0 Then
+                                NativeColPut NVVarForSuppress, "V" & arr(vn).va, "1"
+                                NativeColPut NVVarForInitLink, "V" & arr(vi).va, arr(j + 1).va & "|" & arr(bi).va
+                            End If
                         End If
                     End If
                 End If
@@ -3812,6 +3843,20 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 NativeAddUnique NVSkipLabels, inst.jmpConst
                 Exit Function
             End If
+            'Variant For loop header (detected pre-pass): this exit Jcc is a `For`.
+            Dim vffStr As String
+            vffStr = NativeColGet(NVVarForFor, "W" & inst.va)
+            If Len(vffStr) > 0 Then
+                Dim vffP() As String, vffC As String, vffS As String, vffL As String
+                vffP = Split(vffStr, "|")
+                vffC = vffP(0)
+                vffS = "?": vffL = "?"
+                If UBound(vffP) >= 1 And Len(vffP(1)) > 0 Then vffS = vffP(1)
+                If UBound(vffP) >= 2 And Len(vffP(2)) > 0 Then vffL = vffP(2)
+                NativeProcessInst = ind & "For " & vffC & " = " & vffS & " To " & vffL & vbCrLf
+                NVIndent = NVIndent + 1
+                Exit Function
+            End If
             'Top-tested Do While header (detected pre-pass): the exit Jcc becomes the
             'loop condition - the loop runs while the jump is NOT taken.
             If Len(NativeColGet(NVWhileCond, "W" & inst.va)) > 0 Then
@@ -3838,6 +3883,14 @@ Private Function NativeProcessInst(inst As CInstruction) As String
             Exit Function
 
         Case C_JMP
+            'Back-edge of a Variant For loop -> Next <counter>.
+            Dim vfnStr As String
+            vfnStr = NativeColGet(NVVarForNext, "W" & inst.va)
+            If Len(vfnStr) > 0 Then
+                If NVIndent > 0 Then NVIndent = NVIndent - 1
+                NativeProcessInst = NativeIndentStr() & "Next " & vfnStr & vbCrLf
+                Exit Function
+            End If
             If Len(NativeColGet(NVWhileLoop, "W" & inst.va)) > 0 Then
                 'Back-edge of a reconstructed Do While loop -> Loop.
                 If NVIndent > 0 Then NVIndent = NVIndent - 1
@@ -4288,6 +4341,32 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
     'arguments.  Harvest it (decode -> gUDTDesc) so the Type block is reconstructed.
     'Non-destructive: the call still renders normally below (type recovery only).
     If InStr(nm, "__vbaRec") > 0 Then NativeHarvestUDTArgs
+
+    'Variant For loop: a detected __vbaVarForInit becomes the `For` header (its args are
+    'the counter / start / limit), and its paired __vbaVarForNext becomes `Next`; both
+    'calls are suppressed.  The structure was paired in NativeDetectWhileLoops.
+    If InStr(nm, "__vbaVarForInit") > 0 Then
+        Dim vfLink As String
+        vfLink = NativeColGet(NVVarForInitLink, "V" & inst.va)
+        If Len(vfLink) > 0 Then
+            Dim vfA() As String, vfArgs As String, vfL() As String
+            Dim vfCtr As String, vfStart As String, vfLimit As String
+            vfArgs = NativeArgList()
+            vfA = Split(vfArgs, ", ")
+            If UBound(vfA) >= 0 Then vfCtr = vfA(0)
+            If UBound(vfA) >= 1 Then vfStart = vfA(1)
+            If UBound(vfA) >= 2 Then vfLimit = vfA(2)
+            vfL = Split(vfLink, "|")                 'jccVA|backedgeVA
+            NativeColPut NVVarForFor, "W" & vfL(0), vfCtr & "|" & vfStart & "|" & vfLimit
+            NativeColPut NVVarForNext, "W" & vfL(1), vfCtr
+            NVPushTop = 0
+            NativeRuntimeCall = "": Exit Function
+        End If
+    ElseIf InStr(nm, "__vbaVarForNext") > 0 Then
+        If Len(NativeColGet(NVVarForSuppress, "V" & inst.va)) > 0 Then
+            NVPushTop = 0: NativeRuntimeCall = "": Exit Function
+        End If
+    End If
 
     'Internal __vba* helpers handled specially
     Select Case True
