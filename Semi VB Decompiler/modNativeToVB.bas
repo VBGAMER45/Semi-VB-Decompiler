@@ -3851,9 +3851,26 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                 'Checked first: requiring a real gFormVtable slot is a stronger
                 'signal than the NVBase control heuristic (which the same form-method
                 'calls can otherwise mis-solve into a bogus control base).
-                Dim ftgt As Long
+                Dim ftgt As Long, fvThis As String
+                If NVPushTop >= 1 Then fvThis = NVPushImm(NVPushTop - 1)
                 ftgt = NativeFormVtableTarget(disp)
-                If ftgt <> 0 Then
+                'This path resolves against NVForm's OWN vtable, so it must not fire for a
+                'call on a DIFFERENT form instance (`mov edi,[global_X]; call [edi_vt+off]`
+                'where global_X is e.g. frmClient) - that would mis-resolve to NVForm's
+                'same-offset method and leak the real receiver into the args (the
+                '`frmCreate.cmdOK_Click(global_0055D5A0, ...)` bug).  A genuine self-call
+                'pushes arg_8/Me (or leaves `this` untracked), OR uses the form's OWN
+                'predeclared-instance global (global_X == NVForm) - both fine; only a
+                'global_ that maps to a DIFFERENT form is excluded.
+                'Exclude a call whose `this` is a separate object held in a module global
+                '(`mov edi,[global_X]; call [edi_vt + off]`): such a call is NOT a Me-self
+                'call, so resolving it against NVForm's vtable is wrong - it fabricates
+                'NVForm's same-offset method and leaks the real receiver into the args
+                '(client2 `frmCreate.cmdOK_Click(global_0055D5A0, ...)`; Dungeon Form_Load
+                'mis-attributing a SOUND-object call to frmMain.Update_Status/Death).  A
+                'genuine self-call pushes arg_8/Me (or leaves `this` untracked), never a
+                'global_.  Verified against source: both were plausible-but-wrong.
+                If ftgt <> 0 And Left$(fvThis, 7) <> "global_" Then
                     'A COM-style form-method call leads with the implicit Me/this (the
                     'form pointer, tracked as arg_8 when it reaches the arg stack); drop
                     'it and the trailing retbuf, keeping the real parameters (count from
