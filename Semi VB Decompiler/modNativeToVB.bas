@@ -7891,22 +7891,31 @@ Private Function NativeRenderUDTBody(ByVal n As Long, ByVal fieldsStr As String)
     'in-memory Unicode size), so the total stays exactly n even when a field is really an
     'array (its remainder is absorbed into the following byte gap).  Falls back to a single
     'bStruc(1 To n) when there are no string fields or the layout is inconsistent.
-    Dim parts() As String, offs() As Long, lens() As Long, c As Long, k As Long, m As Long, cp As Long
-    Dim res As String, pos As Long
+    Dim parts() As String, offs() As Long, kinds() As String, prm() As Long, c As Long, k As Long, m As Long
+    Dim res As String, pos As Long, p1 As Long, p2 As Long, decl As String, adv As Long
     If Len(fieldsStr) = 0 Then NativeRenderUDTBody = "    bStruc(1 To " & n & ") As Byte" & vbCrLf: Exit Function
     parts = Split(fieldsStr, ";")
-    ReDim offs(UBound(parts)): ReDim lens(UBound(parts)): c = 0
+    ReDim offs(UBound(parts)): ReDim kinds(UBound(parts)): ReDim prm(UBound(parts)): c = 0
     For k = 0 To UBound(parts)
-        cp = InStr(parts(k), ":")
-        If cp > 0 Then offs(c) = CLng(Left$(parts(k), cp - 1)): lens(c) = CLng(Mid$(parts(k), cp + 1)): c = c + 1
+        p1 = InStr(parts(k), ":")                                'off : kind : param
+        If p1 > 0 Then
+            p2 = InStr(p1 + 1, parts(k), ":")
+            If p2 > 0 Then
+                offs(c) = CLng(Left$(parts(k), p1 - 1))
+                kinds(c) = Mid$(parts(k), p1 + 1, p2 - p1 - 1)
+                prm(c) = CLng(Mid$(parts(k), p2 + 1))
+                c = c + 1
+            End If
+        End If
     Next
     If c = 0 Then NativeRenderUDTBody = "    bStruc(1 To " & n & ") As Byte" & vbCrLf: Exit Function
-    For k = 0 To c - 2
+    For k = 0 To c - 2                                           'sort by offset
         For m = 0 To c - 2 - k
             If offs(m) > offs(m + 1) Then
-                Dim t1 As Long
+                Dim t1 As Long, ts As String
                 t1 = offs(m): offs(m) = offs(m + 1): offs(m + 1) = t1
-                t1 = lens(m): lens(m) = lens(m + 1): lens(m + 1) = t1
+                ts = kinds(m): kinds(m) = kinds(m + 1): kinds(m + 1) = ts
+                t1 = prm(m): prm(m) = prm(m + 1): prm(m + 1) = t1
             End If
         Next
     Next
@@ -7917,8 +7926,16 @@ Private Function NativeRenderUDTBody(ByVal n As Long, ByVal fieldsStr As String)
             res = res & "    field_" & Hex$(pos) & "(1 To " & (offs(k) - pos) & ") As Byte" & vbCrLf
             pos = offs(k)
         End If
-        res = res & "    field_" & Hex$(pos) & " As String * " & lens(k) & vbCrLf
-        pos = pos + lens(k) * 2
+        Select Case kinds(k)
+            Case "S": decl = "String * " & prm(k): adv = prm(k) * 2     'in-memory Unicode
+            Case "I": decl = "Integer": adv = 2
+            Case "L": decl = "Long": adv = 4
+            Case "G": decl = "Single": adv = 4
+            Case "D": decl = "Double": adv = 8
+            Case Else: GoTo inconsistent
+        End Select
+        res = res & "    field_" & Hex$(pos) & " As " & decl & vbCrLf
+        pos = pos + adv
         If pos > n Then GoTo inconsistent
     Next
     If pos < n Then res = res & "    field_" & Hex$(pos) & "(1 To " & (n - pos) & ") As Byte" & vbCrLf
@@ -8098,10 +8115,98 @@ Public Sub NativeDetectUDTStringFields()
             If isFix = 1 Then NativeDecodeFixstrCall buf, i
         End If
     Next
+    'Second pass: NUMERIC fields.  Anchor on the array+pvData idiom
+    '(mov R1,[arrayBase]; mov R2,[R1+0x0C]) and classify the following element access by
+    'width: word (0x66)->Integer, dword->Long, fld dword->Single, fld qword->Double.
+    Dim r1 As Long, r2 As Long, aLen As Long, j As Long, aId As String
+    For i = &H1000 To sz - 20
+        aId = NativeArrBaseAt(buf, i, r1, aLen)
+        If Len(aId) > 0 Then
+            For j = i + aLen To i + aLen + 10
+                If buf(j) = &H8B And (buf(j + 1) And &HC0) = &H40 And (buf(j + 1) And 7) = r1 And buf(j + 2) = &HC And ((buf(j + 1) \ 8) And 7) <> 4 Then
+                    r2 = (buf(j + 1) \ 8) And 7        'mov R2,[R1+0x0C] (pvData) - R2 != esp
+                    NativeDecodeNumField buf, j + 3, r2, aId
+                    Exit For
+                End If
+                If buf(j) = &HFF Or buf(j) = &HE8 Or buf(j) = &HC3 Then Exit For   'a call/ret ends the idiom
+            Next
+        End If
+    Next
     Exit Sub
 done:
     On Error Resume Next
     Close fp
+End Sub
+
+Private Function NativeArrBaseAt(buf() As Byte, ByVal i As Long, ByRef destReg As Long, ByRef instLen As Long) As String
+    'If buf(i) starts a "mov R1,[arrayBase]" - [Me+off] or [global] - return the arrayId
+    '("F"&MeFieldOffset / "G"&globalVA), the dest register and the instruction length.
+    Dim md As Long
+    If buf(i) = &H8B Then
+        md = buf(i + 1)
+        destReg = (md \ 8) And 7
+        If (md And &HC7) = &H46 Then NativeArrBaseAt = "F" & Hex$(buf(i + 2)): instLen = 3: Exit Function          'mov r,[esi+disp8]
+        If (md And &HC7) = &H47 Then NativeArrBaseAt = "F" & Hex$(buf(i + 2)): instLen = 3: Exit Function          'mov r,[edi+disp8]
+        If (md And &HC7) = &H86 Then NativeArrBaseAt = "F" & Hex$(NativeBufDword(buf, i + 2)): instLen = 6: Exit Function   'mov r,[esi+disp32]
+        If (md And &HC7) = &H5 Then NativeArrBaseAt = "G" & Right$("00000000" & Hex$(NativeBufDword(buf, i + 2)), 8): instLen = 6: Exit Function   'mov r,[abs]
+    ElseIf buf(i) = &HA1 Then
+        destReg = 0: NativeArrBaseAt = "G" & Right$("00000000" & Hex$(NativeBufDword(buf, i + 1)), 8): instLen = 5   'mov eax,[moffs32]
+    End If
+End Function
+
+Private Sub NativeDecodeNumField(buf() As Byte, ByVal startOff As Long, ByVal r2 As Long, ByVal arrId As String)
+    'From just after the pvData load, find the first SIB-indexed element access whose base
+    'is r2 (or r3 after a lea r3,[r2+idx+disp]) and record its offset+type.  Requires a
+    'real typed access (mov/cmp/fld/grp1), so a string field's lea-then-push-Fixstr is not
+    'misread as numeric (no typed access follows on the lea'd register).
+    Dim p As Long, tgt As Long, off As Long, haveOff As Boolean, w16 As Boolean, op As Long, md As Long, sib As Long
+    tgt = r2: off = -1: haveOff = False
+    For p = startOff To startOff + 22
+        w16 = False
+        op = buf(p)
+        If op = &H66 Then w16 = True: p = p + 1: op = buf(p)         'operand-size prefix -> word
+        If op = &H8D Then                                            'lea r3,[r2+idx+disp] - follow r3, take disp
+            md = buf(p + 1)
+            If (md And 7) = 4 Then
+                sib = buf(p + 2)
+                If (sib And 7) = tgt Then
+                    tgt = (md \ 8) And 7
+                    If (md And &HC0) = &H40 Then off = buf(p + 3): haveOff = True
+                    If (md And &HC0) = &H80 Then off = NativeBufDword(buf, p + 3): haveOff = True
+                End If
+            End If
+        ElseIf op = &H8B Or op = &H89 Or op = &H3B Or op = &H39 Or op = &H83 Then  'mov/cmp/grp1 r/m
+            md = buf(p + 1)
+            If (md And 7) = 4 Then
+                sib = buf(p + 2)
+                If (sib And 7) = tgt Then
+                    If Not haveOff Then
+                        If (md And &HC0) = &H40 Then off = buf(p + 3): haveOff = True
+                        If (md And &HC0) = &H80 Then off = NativeBufDword(buf, p + 3): haveOff = True
+                        If (md And &HC0) = &H0 Then off = 0: haveOff = True
+                    End If
+                    If haveOff And off >= 0 And off < 65536 Then NativeAddUDTField arrId, off, IIf(w16, "I:2", "L:4")
+                    Exit Sub
+                End If
+            End If
+        ElseIf op = &HD9 Or op = &HDD Then                          'fld/fstp dword(D9)/qword(DD)
+            md = buf(p + 1)
+            If (md And 7) = 4 Then
+                sib = buf(p + 2)
+                If (sib And 7) = tgt Then
+                    If Not haveOff Then
+                        If (md And &HC0) = &H40 Then off = buf(p + 3): haveOff = True
+                        If (md And &HC0) = &H80 Then off = NativeBufDword(buf, p + 3): haveOff = True
+                        If (md And &HC0) = &H0 Then off = 0: haveOff = True
+                    End If
+                    If haveOff And off >= 0 And off < 65536 Then NativeAddUDTField arrId, off, IIf(op = &HD9, "G:4", "D:8")
+                    Exit Sub
+                End If
+            End If
+        ElseIf op = &HFF Or op = &HE8 Or op = &HC3 Then
+            Exit Sub                                                 'call/ret - give up
+        End If
+    Next
 End Sub
 
 Private Sub NativeDecodeFixstrCall(ByRef buf() As Byte, ByVal callOff As Long)
@@ -8136,19 +8241,21 @@ Private Sub NativeDecodeFixstrCall(ByRef buf() As Byte, ByVal callOff As Long)
         End If
     Next
     If gotLn And gotOff And gotArr And ln > 0 And ln < 32768 And off >= 0 And off < 65536 Then
-        NativeAddUDTStrField arrId, off, ln
+        NativeAddUDTField arrId, off, "S:" & ln
     End If
 End Sub
 
-Private Sub NativeAddUDTStrField(ByVal arrId As String, ByVal off As Long, ByVal ln As Long)
-    'Append "off:len" to gUDTStrFields(arrId), skipping a duplicate offset.
-    Dim cur As String, entry As String
+Private Sub NativeAddUDTField(ByVal arrId As String, ByVal off As Long, ByVal tail As String)
+    'Append "off:tail" to gUDTStrFields(arrId), skipping a duplicate offset.  tail encodes
+    'the kind+param: "S:<len>" (String * len), "I:2" (Integer), "L:4" (Long), "G:4"
+    '(Single), "D:8" (Double).  First detection of an offset wins (strings are scanned
+    'before numerics, so a fixed string is never overwritten by a numeric guess).
+    Dim cur As String
     If gUDTStrFields Is Nothing Then Set gUDTStrFields = New Collection
     cur = NativeColGet(gUDTStrFields, arrId)
-    entry = off & ":" & ln
     If InStr(";" & cur & ";", ";" & off & ":") > 0 Then Exit Sub      'offset already recorded
     If Len(cur) > 0 Then cur = cur & ";"
-    NativeColPut gUDTStrFields, arrId, cur & entry
+    NativeColPut gUDTStrFields, arrId, cur & off & ":" & tail
 End Sub
 
 Private Function NativeBufDword(ByRef buf() As Byte, ByVal i As Long) As Long
