@@ -708,6 +708,7 @@ nextInst:
     output = output & "End " & NVProcEndWord & vbCrLf
     output = NativeStripOrphanLabels(NativeSubstituteConstants(NativeSubstituteArgNames(NativeStripVarBuild(output))))
     output = NativeMergeElseIf(output)
+    output = NativeStripEmptyIfs(output)
     DecompileNativeProcToVB = NativeInsertLocalDims(output)
     Exit Function
 fail:
@@ -741,6 +742,38 @@ Private Function NativeStripOrphanLabels(ByVal src As String) As String
 skipLine:
     Next
     NativeStripOrphanLabels = out
+End Function
+
+Private Function NativeStripEmptyIfs(ByVal src As String) As String
+    'Remove an `If <cond> Then` line immediately followed by `End If` - an EMPTY
+    'conditional whose body was suppressed (a COM HRESULT error-check, an auto-
+    'instantiation null-check, a removed bounds guard) - pure noise.  Iterates so an
+    'empty INNER If that leaves its OUTER If empty is also removed.  Only a multi-line
+    '`If ... Then` (no trailing statement) directly abutting `End If` matches, so a block
+    'holding any statement, a label, or an Else is kept; matched pairs are removed
+    'together, so If/End If stay balanced.
+    Dim lines() As String, i As Long, lt As String, nt As String, out As String
+    Dim changed As Boolean, pass As Long
+    On Error Resume Next
+    NativeStripEmptyIfs = src
+    For pass = 1 To 20
+        lines = Split(NativeStripEmptyIfs, vbCrLf)
+        out = "": changed = False
+        i = 0
+        Do While i <= UBound(lines)
+            lt = Trim$(lines(i))
+            If i < UBound(lines) Then nt = Trim$(lines(i + 1)) Else nt = ""
+            If Left$(lt, 3) = "If " And Right$(lt, 5) = " Then" And nt = "End If" Then
+                i = i + 2: changed = True            'drop the empty If ... Then / End If pair
+            Else
+                If Len(out) > 0 Then out = out & vbCrLf
+                out = out & lines(i)
+                i = i + 1
+            End If
+        Loop
+        NativeStripEmptyIfs = out
+        If Not changed Then Exit For
+    Next pass
 End Function
 
 Private Function NativeMergeElseIf(ByVal src As String) As String
