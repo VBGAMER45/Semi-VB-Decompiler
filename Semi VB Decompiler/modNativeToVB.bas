@@ -6250,7 +6250,18 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     'resolves to obj.Method.
                     Dim gcls As String
                     gcls = NativeColGet(NVObjClass, "G" & disp)
-                    If Len(gcls) > 0 Then NVRegObjType(reg) = gcls: NVRegObjInst(reg) = NVReg(reg)
+                    If Len(gcls) > 0 Then
+                        NVRegObjType(reg) = gcls: NVRegObjInst(reg) = NVReg(reg)
+                    Else
+                        'A FORM's predeclared-instance global (e.g. `frmClient`, a module
+                        'global VB auto-creates): type the register as that form so a
+                        'following `mov vt,[obj]; call [vt+off]` resolves to the form's
+                        'public method (frmClient.UnkVCall_0768h -> frmClient.<method>),
+                        'via the form vtable map populated from the FuncDesc offsets.
+                        Dim gfrm As String
+                        gfrm = FormNameByInstGlobal(disp)
+                        If Len(gfrm) > 0 Then NVRegObjType(reg) = gfrm: NVRegObjInst(reg) = gfrm
+                    End If
                 ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 Then
                     NVRegObjVt(reg) = NVRegObjType(bse)
                     NVRegObjVtGuid(reg) = NVRegObjGuid(bse)   'deref of a control pointer -> its vtable carries the GUID

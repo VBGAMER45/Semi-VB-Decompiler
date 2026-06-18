@@ -416,6 +416,27 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
         namedSeq = 0
         Dim prevName As String, prevPos As Long, prevIdx As Long, pos As Long, ai As Long
         prevName = "": prevPos = -1: prevIdx = -2
+
+        'For a FORM, locate its FuncDesc pointer array (parallel to the name array) so
+        'each PUBLIC method's REAL vtable offset can be mapped below.  A class's methods
+        'sit at the predictable 0x1C+seq*4 layout (handled inline); a form's own public
+        'methods sit at high offsets (0x750.. on frmClient) that ONLY the FuncDesc
+        'records carry - without this a cross-module `<formInstance>.UnkVCall_<off>`
+        'call can't resolve to <form>.<method>.
+        Dim frmArr As Long, frmHdr As Long, fj As Long
+        frmArr = 0
+        If Not isClass And gObject(oi).aObjectInfo <> 0 Then
+            frmHdr = NativeFileDword(F, gObject(oi).aObjectInfo + &HC)
+            If frmHdr >= OptHeader.ImageBase Then
+                If NativeArrayHasFuncDesc(F, NativeFileDword(F, frmHdr + &H18)) Then
+                    frmArr = NativeFileDword(F, frmHdr + &H18)
+                Else
+                    For fj = &H1C To &H140 Step 4
+                        If NativeArrayHasFuncDesc(F, NativeFileDword(F, frmHdr + fj)) Then frmArr = NativeFileDword(F, frmHdr + fj): Exit For
+                    Next fj
+                End If
+            End If
+        End If
         For i = 0 To pc - 1
             nm = ""
             If NativeValidNamePtr(namesVA(i)) Then
@@ -440,6 +461,21 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
                     On Error Resume Next
                     gFormVtable.Add addrs(ai), gObjectNameArray(oi) & ":off" & (&H1C + namedSeq * 4)
                     On Error GoTo done
+                ElseIf frmArr <> 0 And i <= 255 Then
+                    'Form public method: take its REAL vtable offset from the parallel
+                    'FuncDesc and map it to this method's address.  Only when that slot
+                    'genuinely holds a FuncDesc (event handlers / private slots have a
+                    'name but no public FuncDesc -> skipped, not mis-mapped).
+                    Dim fdp As Long, fvoff As Long
+                    fdp = NativeFileDword(F, frmArr + i * 4)
+                    If fdp <> 0 And NativeIsFuncDesc(F, fdp) Then
+                        fvoff = (NativeFileDword(F, fdp) \ &H10000) And &HFFFC
+                        If fvoff >= &H1C Then
+                            On Error Resume Next
+                            gFormVtable.Add addrs(ai), gObjectNameArray(oi) & ":off" & fvoff
+                            On Error GoTo done
+                        End If
+                    End If
                 End If
                 namedSeq = namedSeq + 1
                 prevName = nm: prevPos = pos: prevIdx = i
