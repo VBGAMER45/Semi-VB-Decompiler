@@ -63,6 +63,7 @@ Public NVLastDisasmText As String
 '--- Per-procedure data-flow state ---
 Private NVForm As String          'owning form/object (for control resolution)
 Private NVHasMe As Boolean        'current proc is a class/form method (receives Me at ebp+8), not a .bas module sub
+Private NVIsClass As Boolean      'owning object is a CLASS (not a form/module) - gates private-field-type harvesting
 Private NVBase As Long            'solved control-block base for this form (-1 = unknown)
 Private NVLastControl As String   'most recently accessed control name
 Private NVLastGuid As String      'its GUID (for property name resolution)
@@ -261,6 +262,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'Reset per-proc state
     NVForm = NativeFormOf(addr)
     NVHasMe = NativeProcHasMe(addr)
+    NVIsClass = NativeOwnerIsClass(NVForm)
     NVProcEndWord = "Sub"
     NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0: NVRetbuf = False
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
@@ -5347,6 +5349,7 @@ Private Function NativeMoveAssign() As String
             dn = "field_" & Hex$(NVLastLea)
             NativeMoveAssign = dn & " = " & src
             NVReg(0) = dn                   'the helper returns the moved value in eax
+            NativeRecordFieldType NVLastLea, "String"   'a strcopy store -> a String field
         End If
         NVLastLeaSet = False: NVLastLeaField = False: NVPendingArg = "": NVKeepPushStack = True
         Exit Function
@@ -6667,8 +6670,16 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     'Store to a struct FIELD: mov [base + off], reg - an instance
                     'field of Me, or a ByRef-passed UDT field (see NativeFieldStoreLHS).
                     Dim lhs89 As String, fv89 As String
-                    lhs89 = NativeFieldStoreLHS(NativeMemBase(dump), disp)
+                    Dim fb89 As Long, fbMe89 As Boolean
+                    fb89 = NativeMemBase(dump)
+                    lhs89 = NativeFieldStoreLHS(fb89, disp)
                     If Len(lhs89) > 0 Then
+                        'Harvest the field's type for the class field-decl block: a
+                        '0x66-prefixed store writes a 16-bit Integer, a plain store a Long.
+                        '(Guard the base index before NVRegIsMe - VB6 And is not short-circuit.)
+                        fbMe89 = False
+                        If fb89 >= 0 And fb89 <= 7 Then fbMe89 = (NVHasMe And NVRegIsMe(fb89))
+                        If fbMe89 Then NativeRecordFieldType disp, IIf(NativeHas66(dump), "Integer", "Long")
                         fv89 = NVReg(reg)
                         'Prefer the 16-bit word shadow when set: the stored register was
                         'sign-extended from a tracked 16-bit expression (movsx of a folded
@@ -6719,12 +6730,23 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 ElseIf Not isAbs And disp > 0 And disp < &H2000 Then
                     'Store an immediate to a struct FIELD: mov [base + off], imm.
                     'A 0x66-prefixed store writes a word (Boolean True = 0xFFFF -> -1).
-                    Dim lhsC7 As String, fimm As Long, fis As String
-                    lhsC7 = NativeFieldStoreLHS(NativeMemBase(dump), disp)
+                    Dim lhsC7 As String, fimm As Long, fis As String, fbC7 As Long, fbMeC7 As Boolean
+                    fbC7 = NativeMemBase(dump)
+                    lhsC7 = NativeFieldStoreLHS(fbC7, disp)
                     If Len(lhsC7) > 0 Then
                         If NativeHas66(dump) Then fimm = NativeDumpInt16(dump, n - 2) Else fimm = NativeDumpInt32(dump, n - 4)
                         If fimm >= OptHeader.ImageBase Then fis = NativeStringAt(fimm)
                         If Len(fis) = 0 Then fis = NativeNumFromBits(fimm)
+                        'Harvest the field type for the class field-decl block.
+                        fbMeC7 = False
+                        If fbC7 >= 0 And fbC7 <= 7 Then fbMeC7 = (NVHasMe And NVRegIsMe(fbC7))
+                        If fbMeC7 Then
+                            If Left$(fis, 1) = Chr$(34) Then
+                                NativeRecordFieldType disp, "String"
+                            Else
+                                NativeRecordFieldType disp, IIf(NativeHas66(dump), "Integer", "Long")
+                            End If
+                        End If
                         NativeTrackReg = lhsC7 & " = " & fis
                         'Variant DATA field (offset +8) immediate -> remember as the
                         'value (and base temp) for a following late put / method call.
@@ -9126,6 +9148,46 @@ Private Function NativeProcHasMe(ByVal addr As Long) As Boolean
     Next
     NativeProcHasMe = True
 End Function
+
+Private Function NativeOwnerIsClass(ByVal owner As String) As Boolean
+    'True when the owning object is a CLASS module (ObjectType bit 0x100000), as
+    'opposed to a form, UserControl or standard module.  Used to gate private-field
+    'type harvesting to classes (where a Get/Let/Set property's backing variable is a
+    'private instance field we surface as `Private field_<off> As <type>`).
+    Dim i As Long
+    If Len(owner) = 0 Then Exit Function
+    On Error Resume Next
+    For i = 0 To UBound(gObjectNameArray)
+        If gObjectNameArray(i) = owner Then
+            NativeOwnerIsClass = ((gObject(i).ObjectType And &H100000) <> 0)
+            Exit Function
+        End If
+    Next
+End Function
+
+Private Sub NativeRecordFieldType(ByVal off As Long, ByVal typ As String)
+    'Remember the inferred VB type of a private instance field of the current class,
+    'so a `Private field_<off> As <type>` declaration block can be emitted at the class
+    'top.  Only harvested for classes (NVIsClass) and for plausible field offsets.  A
+    'specific type (String/Object) wins over a vaguer numeric guess (Long/Integer)
+    'recorded by another access, so a later word-store never downgrades a String field.
+    If Not NVIsClass Then Exit Sub
+    If Len(NVForm) = 0 Or off <= 0 Or off >= &H2000 Then Exit Sub
+    Dim key As String, cur As String
+    key = NVForm & ":" & off
+    If gClassFieldType Is Nothing Then Set gClassFieldType = New Collection
+    cur = NativeColGet(gClassFieldType, key)
+    If Len(cur) > 0 Then
+        'Keep the stronger evidence: a reference type (String/Object/<class>) is a
+        'definite signal; a numeric width is a weak default that must not overwrite it.
+        If cur <> "Long" And cur <> "Integer" And cur <> "Byte" Then Exit Sub
+        If typ = "Long" Or typ = "Integer" Or typ = "Byte" Then Exit Sub  'don't churn numeric guesses
+    End If
+    On Error Resume Next
+    gClassFieldType.Remove key
+    On Error GoTo 0
+    gClassFieldType.Add typ, key
+End Sub
 
 Private Function NativeProcName(ByVal addr As Long) As String
     Dim nm As String, p As Long, idx As Long

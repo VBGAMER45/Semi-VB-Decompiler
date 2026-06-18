@@ -652,6 +652,15 @@ Global gFieldName As Collection
 'at the top of the form/class like the API Declare block.  From the same VarDesc.
 Global gFieldDecl As Collection
 
+'Inferred TYPE of a private instance field, keyed "<class>:<decimalOffset>" -> a VB
+'type name (Integer/Long/String/Object/...).  Recovered from how each field is
+'stored during decompile (word store -> Integer, __vbaStrCopy -> String, ...) because
+'a class's PRIVATE backing-variable descriptors are null-stripped from the typeinfo
+'(only public VarDesc names survive, in gFieldDecl).  Used to synthesize a
+'`Private field_<off> As <type>` declaration block at the top of a class - the backing
+'var a Get/Let/Set property reads and writes.
+Global gClassFieldType As Collection
+
 'Standard-module global (Public/Global) variable tracking, used to synthesize the
 'declaration block at a module's top.  Module var NAMES are stripped in native
 'compilation, so these are keyed/rendered by address (global_XXXXXXXX); each global
