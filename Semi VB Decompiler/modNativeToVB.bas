@@ -5432,6 +5432,17 @@ Private Function NativeMoveAssign() As String
     If Left$(NVReg(2), 1) = Chr$(34) Then src = NVReg(2)
     If Not NativeIsExprValue(src) And Len(NVPendingArg) > 0 Then src = NVPendingArg
     If Not NativeIsExprValue(src) And NativeIsExprValue(NVReg(2)) Then src = NVReg(2)
+    'A move/copy whose fastcall DEST register (ecx) holds a module-global ADDRESS
+    '(`mov ecx, &global; call __vbaStrMove`) stores into that global - e.g.
+    '`Module1.packetValue = CStr(value)`.  Use it instead of the last LEA, which is often
+    'an earlier cleanup lea (the __vbaFreeVar of the call's Variant arg) and would
+    'mis-target a local (var_34).  Checked first; the global dest is an unambiguous signal.
+    If Left$(NVReg(1), 7) = "global_" And (NativeIsExprValue(src) Or NativeIsCleanNamedVal(src)) Then
+        NativeMoveAssign = NVReg(1) & " = " & src
+        NVReg(0) = NVReg(1)
+        NVLastLeaSet = False: NVLastLeaField = False: NVPendingArg = "": NVKeepPushStack = True
+        Exit Function
+    End If
     'A move/copy into a Me-FIELD ([Me+off], NVLastLeaField) is a field store
     'field_<off> = src - e.g. a String Property Let `packetName = vData` copies the
     'value param into [Me+0x3C] via __vbaStrCopy.  The store target has no ebp local
@@ -6458,7 +6469,19 @@ Private Function NativeTrackReg(inst As CInstruction) As String
             Dim immv As Long, sv As String
             immv = NativeDumpInt32(dump, i + 1)
             If immv >= OptHeader.ImageBase Then sv = NativeStringAt(immv)
-            If Len(sv) > 0 Then NVReg(op - &HB8) = sv Else NVReg(op - &HB8) = NativeNumFromBits(immv)
+            If Len(sv) > 0 Then
+                NVReg(op - &HB8) = sv
+            ElseIf NativeIsGlobalAddr(immv) Then
+                'mov reg, &global - the immediate IS a module-global's ADDRESS, loaded to
+                'pass it by reference (a store DEST for __vbaStrMove / a ByRef arg).  Name
+                'it global_<va> so a following `__vbaStrMove(dest=ecx)` renders the real
+                'target (Module1.packetValue) instead of the bare numeric literal / a
+                'stale lea.  (`mov reg, [global]` - the VALUE - is opcode 0x8B/0xA1, not
+                'this imm form, so this only fires for the address-of idiom.)
+                NVReg(op - &HB8) = NativeGlobalName(immv)
+            Else
+                NVReg(op - &HB8) = NativeNumFromBits(immv)
+            End If
             NVRegIsAddr(op - &HB8) = False: NVRegIsMe(op - &HB8) = False: NVRegIsFormVt(op - &HB8) = False
             NVRegObjType(op - &HB8) = "": NVRegObjVt(op - &HB8) = "": NVRegObjGuid(op - &HB8) = "": NVRegObjVtGuid(op - &HB8) = ""
         Case &H8B                       'mov r32, r/m32
