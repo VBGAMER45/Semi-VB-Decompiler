@@ -5512,6 +5512,20 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             If Len(args) > 0 Then NativeRuntimeCall = vbName & " " & args Else NativeRuntimeCall = vbName
         Else
             NVReg(0) = vbName & "(" & args & ")"     'value-returning -> flows to consumer
+            'Len(x) computed MID-CONCAT: a string LITERAL pushed for the later
+            '__vbaStrCat (its deep operand) is left on the stack while VB computes
+            'Len(txtText.Text) -> CStr in between.  Len pops only its 1 arg; KEEP the
+            'deeper pushes so the literal survives to the concat - otherwise NVPushTop
+            'reset wiped it and the concat rendered `(<arg> & x)`, dropping the literal
+            '("Details length: " & CStr(Len(..))).  TIGHTLY SCOPED: keep ONLY when the
+            'remaining top-of-stack is a quoted string LITERAL.  Keeping for any pending
+            'value let a stale var_/arg_ leak into a later drain-all call (a compiler
+            'helper thunk - _adj_fdiv_m64 / __vbaChkstk - or a variadic intrinsic
+            'over-collected a spurious arg).  A pending string literal is the
+            'distinctive tell of a deferred concat and never a thunk's argument.
+            If vbName = "Len" And NVPushTop > 0 Then
+                If Left$(NVPushImm(NVPushTop - 1), 1) = Chr$(34) Then NVKeepPushStack = True
+            End If
             NativeRuntimeCall = ""
         End If
         Exit Function
