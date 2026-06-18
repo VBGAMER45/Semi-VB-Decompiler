@@ -83,6 +83,7 @@ Private NVPushDisp() As Long       'for each pushed arg, the by-ref local displa
 Private NVPushTop As Long
 Private NVLastPushDisp As Long     'set by NativePushOperand: by-ref local disp of the value just decoded (0 = none)
 Private NVVSlot As Collection      'variant stack slot (disp) -> last value stored (VT tag / string / expr)
+Private NVLocalValRead As Collection 'local ebp disp -> space-list of VAs where its VALUE is read (mov reg,[ebp+d]/movsx/movzx) - so a method call can tell a discarded retbuf (statement call) from a used one (value/condition)
 Private NVLastVarData As String    'last value written to a Variant DATA field (offset +8) - the RHS for a following late-bound property put whose value would otherwise be <value>
 Private NVLastVarBase As String    'the base local (e.g. var_C) of that Variant temp - its field-build stores are suppressed once a late put consumes the value
 Private NVSuppressVarBuild As Collection 'set of Variant-temp base names whose numeric-field-store lines to strip in finalisation
@@ -489,6 +490,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'dword=Long, __vbaStrCopy=String).  Runs before NativeProcHeader, which appends the
     '`As <type>`.
     NativeDetectClassRetType b, addr
+    'Record where each local's VALUE is read, so a method-call statement whose result
+    '(retbuf) is never used (ds7.Load ..) emits a `Call`, while one whose result IS used
+    '(If ds7.Init(..)) keeps flowing to its consumer (no duplicate Call).
+    NativeDetectLocalReads col
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -3844,6 +3849,20 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             If umIsVal Then
                                 umVal = umRecv & "." & umName
                                 If Len(umArgs) > 0 Then umVal = umVal & "(" & umArgs & ")"
+                                'A Function called as a STATEMENT whose result (retbuf) is
+                                'never read afterwards: emit `Call recv.Method(args)` now.
+                                'Without this the call was lost - the COM HRESULT error
+                                'guard consumes/drops the deferred call (ds7.Load App.Path
+                                '& "..").  A Function whose result IS used (If ds7.Init(..))
+                                'has its retbuf read after the call, so it skips this and
+                                'flows to its consumer below (no duplicate Call).
+                                If Len(umRetbuf) > 0 And InStr(umKind, "Get") = 0 _
+                                   And Not NativeRetbufUsedAfter(umRetbuf, inst.va) Then
+                                    NVPushTop = 0
+                                    NVReg(0) = "": NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjInst(0) = ""
+                                    NativeProcessInst = ind & "Call " & umVal & vbCrLf
+                                    Exit Function
+                                End If
                                 NVPushTop = 0
                                 NVReg(0) = umVal
                                 NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjInst(0) = ""
@@ -7750,6 +7769,86 @@ Private Sub NativeCloseIfs(ByRef output As String, ByVal addr As Long)
         output = output & NativeIndentStr() & "End If" & vbCrLf
     Loop
 End Sub
+
+Private Sub NativeDetectLocalReads(col As Collection)
+    'Build NVLocalValRead: for each ebp local, the VAs where its VALUE is read - a
+    '`mov reg,[ebp+disp]` (0x8B) or movsx/movzx (0F BE/BF/B6/B7).  Deliberately NOT a
+    '`lea reg,[ebp+disp]` (an address-of, e.g. passing a retbuf/arg BY REFERENCE) and NOT
+    'a store.  So a method call's retbuf counts as "used" only when its VALUE is later
+    'loaded, not merely when its address was passed to the call.
+    Set NVLocalValRead = New Collection
+    On Error Resume Next
+    Dim inst As CInstruction, dump As String, n As Long, i As Long, op As Long, op2 As Long
+    Dim modrm As Long, md As Long, rm As Long, disp As Long, isAbs As Boolean, isRead As Boolean
+    For Each inst In col
+        dump = Replace(inst.dump, " ", "")
+        n = Len(dump) \ 2
+        If n >= 2 Then
+            i = NativeOpStart(dump, n)
+            op = NativeDumpByte(dump, i)
+            isRead = False
+            If op = &H8B Then
+                isRead = True                                  'mov reg, [mem]
+            ElseIf op = &HF Then
+                op2 = NativeDumpByte(dump, i + 1)
+                If op2 = &HBE Or op2 = &HBF Or op2 = &HB6 Or op2 = &HB7 Then isRead = True   'movsx/movzx
+            End If
+            If isRead Then
+                modrm = NativeDumpByte(dump, i + IIf(op = &HF, 2, 1))
+                md = (modrm \ &H40) And 3: rm = modrm And 7
+                If md <> 3 And NativeMemBase(dump) = 5 And NativeMemIndex(dump) < 0 Then
+                    If NativeDecodeDisp(dump, disp, isAbs) Then
+                        If Not isAbs And disp < 0 Then
+                            Dim k As String, cur As String
+                            k = "D" & disp
+                            cur = ""
+                            cur = NVLocalValRead(k)
+                            NVLocalValRead.Remove k
+                            NVLocalValRead.Add cur & " " & Hex$(inst.va), k
+                        End If
+                    End If
+                End If
+            End If
+        End If
+    Next
+End Sub
+
+Private Function NativeRetbufUsedAfter(ByVal retbufTok As String, ByVal callVa As Long) As Boolean
+    'True when the local named by retbufTok (var_<hex>) has its VALUE read at a VA shortly
+    'AFTER callVa - i.e. the method call's [out,retval] result is consumed (an If/value),
+    'so the call must NOT also be emitted as a standalone `Call`.  A window bounds it to
+    'this call's result (the same slot may be reused by a later, unrelated call).
+    If Left$(retbufTok, 4) <> "var_" Then Exit Function
+    Dim disp As Long
+    On Error Resume Next
+    disp = -CLng("&H" & Mid$(retbufTok, 5))
+    If disp >= 0 Then Exit Function
+    If NVLocalValRead Is Nothing Then Exit Function
+    Dim s As String, parts() As String, j As Long, va As Long
+    s = NVLocalValRead("D" & disp)
+    If Len(s) = 0 Then Exit Function
+    parts = Split(Trim$(s), " ")
+    For j = 0 To UBound(parts)
+        If Len(parts(j)) > 0 Then
+            va = CLng("&H" & parts(j))
+            If va > callVa And va < callVa + &H120 Then NativeRetbufUsedAfter = True: Exit Function
+        End If
+    Next
+End Function
+
+Private Function NativeIsMethodCallExpr(ByVal s As String) As Boolean
+    'True when s is a resolved method/function CALL with an argument list -
+    '`<receiver>.<Method>(<args>)` - so it can be emitted as a `Call` statement when its
+    'result is discarded.  Requires a receiver token, a "." then a "(" (the call), which
+    'excludes a property get (App.Path, no parens) and a bare deref (global_X(12), no ".").
+    Dim dotp As Long
+    If Len(s) = 0 Then Exit Function
+    dotp = InStr(s, ".")
+    If dotp = 0 Then Exit Function
+    If InStr(dotp, s, "(") = 0 Then Exit Function
+    NativeIsMethodCallExpr = (Left$(s, 7) = "global_") Or (Left$(s, 4) = "var_") _
+        Or (Left$(s, 6) = "field_") Or (Left$(s, 4) = "arg_") Or (Left$(s, 4) = "Form")
+End Function
 
 Private Function NativeIsErrorCheckJcc(ByVal mn As String) As Boolean
     'Condition codes VB uses to skip a successful-HRESULT error check.
