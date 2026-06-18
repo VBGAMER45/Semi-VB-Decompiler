@@ -3677,21 +3677,33 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             umDot = InStr(umName, "."): If umDot > 0 Then umName = Mid$(umName, umDot + 1)
                             umRecv = NVRegObjInst(ocb)
                             If Len(umRecv) = 0 Then umRecv = NVRegObjVt(ocb)
-                            'Args (source order) lead with the `this` pointer (pushed
-                            'last) and may end with a hidden return buffer (pushed
-                            'first).  Drop the leading `this` when it is the receiver,
-                            'then keep the method's real parameter count from the front.
+                            'Method kind (for the this/retbuf arithmetic below).
+                            Dim umKind As String, umVal As String, umIsVal As Boolean
+                            NativeTryMethodKind umAddr, umKind
+                            'Args (source order) lead with the implicit `this` pointer and
+                            'may end with a hidden [out,retval] return buffer.  Whether the
+                            'this is PRESENT in the captured list varies (a New-local
+                            'receiver pushes it as a stale "0"; an As-New FIELD receiver does
+                            'not), so decide by COUNT: a value-returning method has a retbuf,
+                            'so expected-without-this = params + retbuf; any EXTRA leading
+                            'arg beyond that is the implicit this and is dropped.  (The old
+                            'gate umP(0)=umRecv missed the this when it rendered as "0" -
+                            '`testPacket.ID = 0` instead of 25 - while unconditionally
+                            'dropping arg 0 ate a real arg of the field-receiver calls.)
                             umArgs = NativeArgList()
                             Dim umP() As String, umStart As Long, umKeep As Long, umI As Long, umOut As String
-                            Dim umTotal As Long, umRetbuf As String
+                            Dim umTotal As Long, umRetbuf As String, umNP As Long, umRb As Long, umExp As Long
                             umTotal = 0: umRetbuf = ""
                             If Len(umArgs) > 0 Then
                                 umP = Split(umArgs, ", ")
+                                umNP = 0
+                                If NativeTryMethodSig(umAddr, umSig) Then umNP = NativeArgCount(umSig)
+                                umRb = IIf(InStr(umKind, "Function") > 0 Or InStr(umKind, "Get") > 0, 1, 0)
+                                umExp = umNP + umRb                        'args expected when `this` is absent
                                 umStart = 0
-                                If umP(0) = umRecv Then umStart = 1
+                                If (UBound(umP) + 1) > umExp Then umStart = 1   'extra leading arg = the implicit this
                                 umTotal = UBound(umP) - umStart + 1
-                                umKeep = umTotal
-                                If NativeTryMethodSig(umAddr, umSig) Then umKeep = NativeArgCount(umSig)
+                                umKeep = umNP
                                 If umKeep > umTotal Then umKeep = umTotal
                                 For umI = umStart To umStart + umKeep - 1
                                     If umI > UBound(umP) Then Exit For
@@ -3720,8 +3732,6 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             'the value flows to its consumer (e.g.
                             'global_108 = clsBitmap.InvertImageDC, or
                             'If picBmp.SetBitmap(x) Then) instead of a bogus Call.
-                            Dim umKind As String, umVal As String, umIsVal As Boolean
-                            NativeTryMethodKind umAddr, umKind
                             'A Property LET/SET on a user-class instance (e.g.
                             'testPacket.ID = 25 / testPacket.Name = "Jonathan").  The
                             'FuncDesc kind is authoritative (b1=0 -> Let/Set), so this is
