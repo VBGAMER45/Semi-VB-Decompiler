@@ -3708,7 +3708,10 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                                 For umI = umStart To umStart + umKeep - 1
                                     If umI > UBound(umP) Then Exit For
                                     If Len(umOut) > 0 Then umOut = umOut & ", "
-                                    umOut = umOut & umP(umI)
+                                    'A by-ref Variant temp built for an untyped (Variant)
+                                    'param resolves to the literal value the caller passed:
+                                    'SetupCalc(55) instead of SetupCalc(var_34).
+                                    umOut = umOut & NativeResolveVarArg(umP(umI))
                                 Next
                                 umArgs = umOut
                                 'An argument beyond the real parameter count is the
@@ -4599,6 +4602,28 @@ Private Sub NativeSetVSlot(ByVal disp As Long, ByVal v As String)
     On Error GoTo 0
     NVVSlot.Add v, k
 End Sub
+
+Private Function NativeResolveVarArg(ByVal arg As String) As String
+    'A by-ref Variant temp local (var_X) built for an untyped (Variant) parameter, when
+    'it holds a SIMPLE VALUE type, renders the literal the caller passed instead of the
+    'temp name: a VARIANT at slot -X has its VT tag at -X and its data at -X+8, so
+    '`MOV [ebp-34],2 ; MOV [ebp-2C],55` is the Integer 55 -> SetupCalc(55).  Restricted to
+    'value VTs (I2/I4/R4/R8/CY/DATE); a BSTR/object Variant's +8 field is a pointer, not
+    'the value, so those keep the temp name.
+    NativeResolveVarArg = arg
+    If Left$(arg, 4) <> "var_" Then Exit Function
+    Dim disp As Long, vt As String, dataV As String, vtN As Long
+    On Error Resume Next
+    disp = -CLng("&H" & Mid$(arg, 5))
+    On Error GoTo 0
+    If disp >= 0 Then Exit Function
+    vt = NativeGetVSlot(disp)
+    If Len(vt) = 0 Or Not IsNumeric(vt) Then Exit Function
+    vtN = CLng(vt)
+    If vtN < 2 Or vtN > 7 Then Exit Function          '2=I2 3=I4 4=R4 5=R8 6=CY 7=DATE
+    dataV = NativeGetVSlot(disp + 8)                   'VARIANT data field
+    If Len(dataV) > 0 Then NativeResolveVarArg = dataV
+End Function
 
 Private Function NativeGetVSlot(ByVal disp As Long) As String
     On Error Resume Next
