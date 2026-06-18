@@ -7106,6 +7106,41 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     If Len(ffcls) > 0 Then NVRegObjType(reg) = ffcls: NVRegObjInst(reg) = ffcls
                 End If
             End If
+        Case &H88                       'mov r/m8, r8  (byte store)
+            modrm = NativeDumpByte(dump, i + 1)
+            md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
+            'Byte store to a field/buffer at an offset: a packet class property `Let`
+            '(`mov ecx,[Me+0x44]; mov al,[inDir]; mov [ecx+1],al`) writes a byte into the
+            'class's data buffer -> base(idx) = value (the same field/deref LHS the
+            'dword/word store 0x89 uses, completing it for the byte case).  Emit ONLY when
+            'the source byte register (al/cl/dl/bl) carries a TRACKED value, so a plain
+            'untracked byte store (string building, byte-array fill) is left dropped as
+            'before rather than leaking `base(idx) = al`.
+            If md <> 3 And reg <= 3 Then
+                Dim d88 As Long, ia88 As Boolean, b88 As Long, lhs88 As String, v88 As String
+                If NativeDecodeDisp(dump, d88, ia88) Then
+                    If Not ia88 And d88 > 0 And d88 < &H2000 And NativeMemIndex(dump) < 0 Then
+                        v88 = NVReg(reg)
+                        If Len(v88) > 0 Then
+                            b88 = NativeMemBase(dump)
+                            lhs88 = NativeFieldStoreLHS(b88, d88)
+                            'Skip a spurious self-store: the source byte register
+                            'coincidentally tracks the buffer BASE (`var_1B8(10) = var_1B8`,
+                            'where the real byte value never reached the register) or the
+                            'full LHS (a read-modify-write that did not fold) - emitting it
+                            'would be a misleading no-op, so drop it (honest) rather than
+                            'guess.  Compare against the LHS's base token (everything before
+                            'its last "(") so the guard holds however the base was tracked.
+                            Dim base88 As String, pp88 As Long
+                            base88 = lhs88: pp88 = InStrRev(base88, "(")
+                            If pp88 > 0 Then base88 = Left$(base88, pp88 - 1)
+                            If Len(lhs88) > 0 And v88 <> base88 And v88 <> lhs88 Then
+                                NativeTrackReg = lhs88 & " = " & v88
+                            End If
+                        End If
+                    End If
+                End If
+            End If
         Case &H8A                       'mov r8, r/m8  (byte load)
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
@@ -7122,6 +7157,28 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         NVReg(reg) = NVReg(baseB)
                         NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
                         NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+                    End If
+                End If
+            ElseIf md <> 3 And reg <= 3 Then
+                'A byte load of a tracked pointer's value, NOT zero-extended first: a
+                'packet property `Let` reads the ByRef byte param (`mov al,[inDir]`) -> the
+                'param value; a `Get` reads a field-buffer byte (`mov dl,[bufptr+idx]`) ->
+                'base(idx).  Track it so the following byte store / return reconstructs the
+                'body (al/cl/dl/bl hold the byte as the whole value here - it is stored or
+                'returned immediately, never used as a wider register).
+                If NativeDecodeDisp(dump, disp, isAbs) And Not isAbs Then
+                    Dim bb8a As Long
+                    bb8a = NativeMemBase(dump)
+                    If bb8a >= 0 And bb8a <= 7 Then
+                        If disp = 0 And Left$(NVReg(bb8a), 4) = "arg_" Then
+                            NVReg(reg) = NVReg(bb8a)            'deref of a ByRef param ptr -> its value
+                            NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                            NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+                        ElseIf disp > 0 And disp < &H2000 And NativeMemIndex(dump) < 0 And NativeIsDerefBase(NVReg(bb8a)) Then
+                            NVReg(reg) = NVReg(bb8a) & "(" & CStr(disp) & ")"   'field-buffer byte
+                            NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                            NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+                        End If
                     End If
                 End If
             End If
