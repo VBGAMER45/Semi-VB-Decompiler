@@ -72,6 +72,8 @@ Private NVLocal As Collection      'local stack slot (disp) -> expression
 Private NVLocalGuid As Collection  'local stack slot (disp) -> control GUID, when the slot holds a control object
 Private NVLastLea As Long          'displacement of the most recent LEA (GET out-param)
 Private NVLastLeaSet As Boolean
+Private NVLastLeaField As Boolean  'the most recent LEA addressed a Me-FIELD ([Me+off]),
+                                   'so a move/copy into it is a field store field_<off> = src
 Private NVPendingArg As String     'value fstp'd into the outgoing argument area
 Private NVLastImm As String        'most recent pushed immediate (decoded)
 Private NVRegImport(7) As String   'register -> runtime helper cached into it
@@ -262,7 +264,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVProcEndWord = "Sub"
     NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0: NVRetbuf = False
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
-    NVLastLea = 0: NVLastLeaSet = False: NVLastCmp = ""
+    NVLastLea = 0: NVLastLeaSet = False: NVLastLeaField = False: NVLastCmp = ""
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVCmpIsBool = False: NVFpuChk = False
     NVStrCmpPending = False: NVStrCmpP1 = "": NVStrCmpP2 = ""
     NVPendingCall = "": NVErrObjPending = False
@@ -4260,8 +4262,20 @@ Private Function NativeProcessInst(inst As CInstruction) As String
         Case C_CMD
             'LEA records the local slot that a following property GET writes into
             If mn = "LEA" Then
-                Dim ld As Long, lAbs As Boolean
-                If NativeDecodeDisp(inst.dump, ld, lAbs) Then NVLastLea = ld: NVLastLeaSet = True
+                Dim ld As Long, lAbs As Boolean, llBase As Long
+                If NativeDecodeDisp(inst.dump, ld, lAbs) Then
+                    NVLastLea = ld: NVLastLeaSet = True
+                    'A `lea reg,[Me + off]` (positive disp on the Me register, no index)
+                    'takes the address of an instance FIELD - a following move/copy into
+                    'it is a field store (field_<off> = src), unlike the common
+                    '`lea reg,[ebp-X]` which addresses a local.  (Guard the base-register
+                    'index before NVRegIsMe - VB6 And is not short-circuit.)
+                    NVLastLeaField = False
+                    llBase = NativeMemBase(inst.dump)
+                    If Not lAbs And ld > 0 And llBase >= 0 And llBase <= 7 And NativeMemIndex(inst.dump) < 0 Then
+                        NVLastLeaField = NVRegIsMe(llBase)
+                    End If
+                End If
                 Call NativeTrackReg(inst)
                 Exit Function
             End If
@@ -5322,11 +5336,33 @@ Private Function NativeMoveAssign() As String
     If Left$(NVReg(2), 1) = Chr$(34) Then src = NVReg(2)
     If Not NativeIsExprValue(src) And Len(NVPendingArg) > 0 Then src = NVPendingArg
     If Not NativeIsExprValue(src) And NativeIsExprValue(NVReg(2)) Then src = NVReg(2)
+    'A move/copy into a Me-FIELD ([Me+off], NVLastLeaField) is a field store
+    'field_<off> = src - e.g. a String Property Let `packetName = vData` copies the
+    'value param into [Me+0x3C] via __vbaStrCopy.  The store target has no ebp local
+    'slot, and the value is often a plain param/field (vData) rather than a folded
+    'expression, so accept a named source (arg_/field_/global_/var_) here too.
+    If NVLastLeaSet And NVLastLeaField Then
+        If Not NativeIsExprValue(src) And NativeIsCleanNamedVal(NVReg(2)) Then src = NVReg(2)
+        If NativeIsExprValue(src) Or NativeIsCleanNamedVal(src) Then
+            dn = "field_" & Hex$(NVLastLea)
+            NativeMoveAssign = dn & " = " & src
+            NVReg(0) = dn                   'the helper returns the moved value in eax
+        End If
+        NVLastLeaSet = False: NVLastLeaField = False: NVPendingArg = "": NVKeepPushStack = True
+        Exit Function
+    End If
     If NVLastLeaSet And NativeIsExprValue(src) Then
         dn = "var_" & Hex$(Abs(NVLastLea))
         NativeMoveAssign = dn & " = " & src
         NativeSetLocalExpr NVLastLea, dn
         NVReg(0) = dn                       'the helper returns the moved value in eax
+    ElseIf NVLastLeaSet And NVLastLea < 0 And NativeIsCleanNamedVal(NVReg(2)) Then
+        'A plain param/field/global copied into a local via the fastcall (edx) source -
+        'typically a compiler temp that is immediately copied onward (a String Property
+        'Let compiles `temp = vData` then `field = temp`).  Track the source value
+        'silently so the downstream store folds to it (field_<off> = vData) instead of
+        'referencing the bare temp; no noisy `var_X = vData` line is emitted.
+        NativeSetLocalExpr NVLastLea, NVReg(2)
     End If
     'These move/copy helpers are fastcall (ecx/edx) and take no stack arguments, so
     'pending pushes belong to an enclosing expression (e.g. a string-literal operand
