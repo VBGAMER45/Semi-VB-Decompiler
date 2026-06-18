@@ -203,6 +203,7 @@ Private NVAccumRet As Boolean      'the proc returns a simple value in the accum
 Private NVRetbuf As Boolean        'the proc returns a Variant/String/UDT via a hidden retbuf (first param, ebp+8) - a module Function (from gRetbufFunc); the header drops that param and renders `As Variant`
 Private NVAccumRetType As String   'recovered return type from that load: "Integer" (word/ax) or "Long" (dword/eax)
 Private NVAccumRetSlot As Long      'the return slot's ebp displacement (negative; 0 = none) - so a constant store `mov [ebp-slot],imm` (0xC7) to it renders `FuncName = imm`
+Private NVClassRetType As String    'CLASS Function/Property-Get return type, inferred from the width of the store into its hidden [out,retval] retbuf param (word=Integer, dword=Long, strcopy=String); "" if undetermined
 Private NVRetN As Long             'the proc's `ret imm16` operand (callee-popped arg bytes), -1 if none
 Private NVApiStubCache As Collection 'declared-DLL stub address -> resolved API name (global, "" = not a stub)
 Private NVCmpL As String           'pending condition: left operand (symbolic)
@@ -264,7 +265,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVHasMe = NativeProcHasMe(addr)
     NVIsClass = NativeOwnerIsClass(NVForm)
     NVProcEndWord = "Sub"
-    NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0: NVRetbuf = False
+    NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0: NVRetbuf = False: NVClassRetType = ""
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastLeaField = False: NVLastCmp = ""
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVCmpIsBool = False: NVFpuChk = False
@@ -483,6 +484,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'mark it so NativeProcHeader emits `Function ... As Variant` and drops the retbuf
     'param.  Mutually exclusive with the accumulator return (different epilogue).
     If Not NVAccumRet Then NVRetbuf = (Len(NativeColGet(gRetbufFunc, "V" & addr)) > 0)
+    'A CLASS Function / Property Get returns through a hidden [out,retval] retbuf param;
+    'infer its TYPE from the width of the store into that buffer (word=Integer,
+    'dword=Long, __vbaStrCopy=String).  Runs before NativeProcHeader, which appends the
+    '`As <type>`.
+    NativeDetectClassRetType b, addr
 
     output = NativeProcHeader(addr) & vbCrLf
 
@@ -5907,6 +5913,67 @@ Private Sub NativeDetectAccumReturn(b() As Byte, ByVal addr As Long)
 done:
 End Sub
 
+Private Sub NativeDetectClassRetType(b() As Byte, ByVal addr As Long)
+    'A CLASS Function / Property Get returns its value through a hidden [out,retval]
+    'retbuf param (the LAST param: Me@8, user params@0xC.., retbuf last).  Infer the
+    'return TYPE from the WIDTH of the store into that buffer:
+    '  mov reg,[ebp+retbufDisp] ; [66] 89 [reg]  ->  word = Integer, dword = Long.
+    'A String/object return zero-inits the retbuf (mov [reg],edi with edi the SEH zero)
+    'then fills it via __vbaStrCopy / objset - left untyped (conservative; the value
+    'types are the common, unambiguous win, e.g. SetupCalc As Long, ID As Integer).
+    On Error GoTo done
+    NVClassRetType = ""
+    Dim kind As String
+    If Not NativeTryMethodKind(addr, kind) Then Exit Sub
+    If InStr(kind, "Function") = 0 And InStr(kind, "Get") = 0 Then Exit Sub
+    Dim sig As String, nP As Long, rbDisp As Long
+    If NativeTryMethodSig(addr, sig) Then nP = NativeArgCount(sig)
+    rbDisp = &HC + nP * 4                        'the retbuf param's ebp+ offset
+    If rbDisp > &HFF Then Exit Sub
+    'Bound the scan to this proc (the 8KB buffer overruns into the next one).
+    Dim hi As Long, pp As Long, dd As Long
+    hi = 4096
+    For pp = 0 To UBound(gNativeProcArray) - 1
+        If gNativeProcArray(pp).offset > addr Then
+            dd = gNativeProcArray(pp).offset - addr
+            If dd > 0 And dd < hi Then hi = dd
+        End If
+    Next
+    If hi > 8190 Then hi = 8190
+    Dim j As Long, modrm As Long, rbReg As Long, k As Long, m2 As Long, srcReg As Long, isWord As Boolean
+    For j = 0 To hi - 3
+        If b(j) = &H8B Then
+            modrm = b(j + 1)
+            If (modrm And &HC0) = &H40 And (modrm And 7) = 5 Then    'mov reg,[ebp+disp8]
+                If b(j + 2) = rbDisp Then
+                    rbReg = (modrm \ 8) And 7
+                    For k = j + 3 To j + 24
+                        If k >= hi - 2 Then Exit For
+                        isWord = False: m2 = -1
+                        If b(k) = &H66 And b(k + 1) = &H89 Then
+                            isWord = True: m2 = b(k + 2)
+                        ElseIf b(k) = &H89 Then
+                            m2 = b(k + 1)
+                        End If
+                        If m2 >= 0 Then
+                            If (m2 And &HC0) = 0 And (m2 And 7) = rbReg And rbReg <> 4 And rbReg <> 5 Then
+                                srcReg = (m2 \ 8) And 7              'store into [retbuf]
+                                If isWord Then
+                                    NVClassRetType = "Integer"
+                                ElseIf srcReg <> 7 Then              'edi(7) = SEH zero -> String/object init, skip
+                                    NVClassRetType = "Long"
+                                End If
+                                Exit Sub
+                            End If
+                        End If
+                    Next k
+                End If
+            End If
+        End If
+    Next j
+done:
+End Sub
+
 Private Function NativeMovRegEbp(inst As CInstruction, ByRef reg As Long, ByRef disp As Long) As Boolean
     'Match `mov r(16/32), [ebp + disp]` (8B /r, base ebp): dest reg + signed disp.
     Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, isAbs As Boolean
@@ -9306,6 +9373,8 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
     If NVAccumRet And Len(NVAccumRetType) > 0 And InStr(kindStr, "Function") > 0 Then asType = " As " & NVAccumRetType
     'A retbuf return is a Variant/String/UDT - indistinguishable from the binary, so As Variant.
     If NVRetbuf And InStr(kindStr, "Function") > 0 Then asType = " As Variant"
+    'A CLASS Function / Property Get return type recovered from the retbuf store width.
+    If Len(NVClassRetType) > 0 And (InStr(kindStr, "Function") > 0 Or InStr(kindStr, "Property Get") > 0) Then asType = " As " & NVClassRetType
     NativeProcHeader = vis & " " & kindStr & " " & nm & asType & "   '" & Hex$(addr)
 End Function
 
