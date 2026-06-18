@@ -4630,6 +4630,28 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 oiList = oiList & oiA(oiK)
             Next
             NativeRuntimeCall = "Call " & NativeFriendlyName(nm) & "(" & oiList & ")": Exit Function
+        Case InStr(nm, "__vbaVarTstNe") > 0, InStr(nm, "__vbaVarTstEq") > 0
+            'Variant comparison: __vbaVarTstNe/Eq(a, b) returns a<>b / a=b (a VARIANT_BOOL
+            'in ax).  Bind the relational into eax so the following test/jcc renders
+            'If (a <> b).  Symmetric ops only (order-independent) - Lt/Gt would need the
+            'operand order pinned.
+            Dim vtA() As String, vtN As Long, vtOp As String
+            NativeArgsSnapshot vtA, vtN
+            If vtN >= 2 Then
+                vtOp = IIf(InStr(nm, "TstNe") > 0, "<>", "=")
+                If Len(vtA(0)) > 0 And vtA(0) <> "<arg>" And Len(vtA(1)) > 0 And vtA(1) <> "<arg>" Then
+                    NVReg(0) = "(" & vtA(0) & " " & vtOp & " " & vtA(1) & ")"
+                    NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                    NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                    NativeRuntimeCall = "": Exit Function
+                End If
+            End If
+            Dim vtList As String, vtK As Long
+            For vtK = 0 To vtN - 1
+                If Len(vtList) > 0 Then vtList = vtList & ", "
+                vtList = vtList & vtA(vtK)
+            Next
+            NativeRuntimeCall = "Call " & NativeFriendlyName(nm) & "(" & vtList & ")": Exit Function
         Case InStr(nm, "__vbaI2I4") > 0, InStr(nm, "__vbaUI1I2") > 0, _
              InStr(nm, "__vbaUI1I4") > 0, InStr(nm, "__vbaI4UI1") > 0, _
              InStr(nm, "__vbaI2UI1") > 0
@@ -5897,6 +5919,17 @@ Private Function NativePushOperand(inst As CInstruction) As String
     End Select
 End Function
 
+Private Function NativeIsRelationalExpr(ByVal s As String) As Boolean
+    'A parenthesised relational/boolean expression (a comparison result), e.g.
+    '`(var_7C <> var_4C)` or `(a Is Nothing)` - the materialised result of
+    '__vbaVarTstNe / __vbaStrCmp / __vbaObjIs.  Used to gate the narrow 16-bit
+    'reg-reg propagation (a Boolean is -1/0, so the low word is the whole value).
+    If Left$(s, 1) <> "(" Then Exit Function
+    If InStr(s, " <> ") > 0 Or InStr(s, " = ") > 0 Or InStr(s, " Is ") > 0 _
+       Or InStr(s, " < ") > 0 Or InStr(s, " > ") > 0 _
+       Or InStr(s, " <= ") > 0 Or InStr(s, " >= ") > 0 Then NativeIsRelationalExpr = True
+End Function
+
 Private Function NativeTrackReg(inst As CInstruction) As String
     'Lightweight GP-register value tracking for mov/lea/xor so pushes and
     'assignment right-hand-sides can be reconstructed.  Returns a "var_X = expr"
@@ -5920,7 +5953,19 @@ Private Function NativeTrackReg(inst As CInstruction) As String
         Case &H8B                       'mov r32, r/m32
             modrm = NativeDumpByte(dump, i + 1)
             md = (modrm \ &H40) And 3: reg = (modrm \ 8) And 7: rm = modrm And 7
-            If NativeHas66(dump) Then
+            If NativeHas66(dump) And md = 3 And NativeIsRelationalExpr(NVReg(rm)) Then
+                'NARROW exception to the 16-bit clear below: the source register holds a
+                'RELATIONAL/boolean expression (a `(a <> b)` from __vbaVarTstNe /
+                '__vbaStrCmp / __vbaObjIs).  A 16-bit `mov bx,ax` here copies the
+                'VARIANT_BOOL result whose VALUE is the low word (-1/0 - no high half to
+                'lose), so propagate it: it must survive to the deferred `test bx,bx`/jcc
+                'that forms the loop/If condition (VB moves the result into a callee-saved
+                'register across the Variant cleanup calls).  Only relational sources
+                'qualify, so the general truncation hazard below is untouched.
+                NVReg(reg) = NVReg(rm)
+                NVRegIsAddr(reg) = False: NVRegIsMe(reg) = False: NVRegIsFormVt(reg) = False
+                NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
+            ElseIf NativeHas66(dump) Then
                 'A 16-bit move (mov si,ax) writes only the LOW WORD of the dest; we
                 'model whole 32-bit values, so the dest is now unknown.  Copying the
                 'source clobbered the high half with a stale value and collapsed
