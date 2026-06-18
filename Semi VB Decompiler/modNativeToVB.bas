@@ -4391,8 +4391,26 @@ Private Function NativeControlProp(ByVal ctlName As String, ByVal guid As String
 'rather than NVReg(0) (which holds the control object itself, not the value).
     Dim p As String, propName As String, kind As String, valExpr As String
     If Len(guid) = 0 Then Exit Function
-    p = modPCode.GetProperty(guid, vtOffset)
-    If InStr(p, "Unknown GUID") > 0 Then Exit Function   'GUID/offset not in a loaded TypeLib - leave raw
+    'When the control has a known EXTERNAL class (an OCX: MSCOMCTL Slider/StatusBar,
+    'RichTextBox, ...), its OWN typelib is the authoritative source for the vtable
+    'offset -> member mapping.  Resolve there FIRST and override any VB6.OLB guess: a
+    'named OCX control already present in the tControl array carries a VB-intrinsic GUID,
+    'so GetProperty would mis-resolve its members (e.g. Slider .Value -> .ClientHeight).
+    'Intrinsic controls have no external class (GetControlClass empty), so this never
+    'perturbs them.  Falls through to GetProperty/VB6.OLB when the OCX doesn't resolve.
+    Dim ocxLib As String, ocxBase As String, ocxInv As Long, ocxName As String, dotP As Long
+    ocxLib = GetControlClass(ctlName)
+    If Len(ocxLib) > 0 Then
+        ocxBase = ctlName
+        dotP = InStrRev(ocxBase, ".")
+        If dotP > 0 Then ocxBase = Mid$(ocxBase, dotP + 1)
+        ocxName = modCOM.VtableMemberName(ocxLib, ocxBase, vtOffset, 0, ocxInv)
+        If Len(ocxName) > 0 Then p = "X_" & ocxName & " (" & cTypeInfo.InvKind2String(ocxInv) & ")"
+    End If
+    If Len(p) = 0 Then
+        p = modPCode.GetProperty(guid, vtOffset)
+        If InStr(p, "Unknown GUID") > 0 Then Exit Function   'GUID/offset not in any loaded TypeLib - leave raw
+    End If
     NativeSplitProp p, propName, kind
     If Len(propName) = 0 Then Exit Function
 

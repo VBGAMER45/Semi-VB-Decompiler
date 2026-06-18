@@ -8,6 +8,7 @@ Global tliTypeLibInfo As TypeLibInfo
 '--- Late-bound (__vbaLateIdCall) member resolution: DISPID -> name via the OCX typelib ---
 Private mLateTlbCache As Collection   'OCX file path -> clsTypeLibInfo (each loaded once)
 Private mOcxEvtTlbCache As Collection 'OCX file path -> TypeLibInfo (event sig resolution)
+Private mVtTlbCache As Collection     'OCX file path -> clsTypeLibInfo (vtable-offset resolution)
 
 Public Function ResolveLateMember(ByVal ocxFile As String, ByVal dispid As Long, ByVal wantKind As Long, ByRef invKind As Long) As String
     'Load ocxFile's typelib (cached) and return the member NAME whose memid = dispid.
@@ -92,6 +93,100 @@ Public Function LateMemberName(ByVal libClass As String, ByVal ctlBase As String
                     f = OcxFileFromClsid(gOcxList(i).strGuid)
                     nm = ResolveLateMember(f, dispid, wantKind, invKind)
                     If Len(nm) > 0 Then LateMemberName = nm: Exit Function
+                End If
+            End If
+        Next i
+    End If
+End Function
+
+'--- Early-bound (vtable) member resolution: vtable offset -> name via the OCX typelib ---
+Public Function ResolveVtableMember(ByVal ocxFile As String, ByVal ctlClass As String, ByVal vtOffset As Long, ByVal wantKind As Long, ByRef invKind As Long) As String
+    'Load ocxFile's typelib (cached) and return the member NAME whose VTABLE OFFSET
+    '(oVft) = vtOffset, on the interface(s) implemented by the control's coclass.  The
+    'twin of ResolveLateMember for EARLY-bound calls (`call [vt+off]`): VB6 OCX controls
+    '(MSCOMCTL Slider/StatusBar, etc.) are accessed through their dual interface's vtable,
+    'not late-bound dispatch.  Scoped to the coclass's own interfaces (ctlClass, e.g.
+    '"MSComctlLib.Slider" -> coclass "Slider") so a vtable offset shared across unrelated
+    'interfaces can't mis-resolve.  wantKind (1=Func,2=Get,4=Put,0=any) breaks ties.
+    On Error GoTo done
+    If Len(ocxFile) = 0 Then Exit Function
+    If mVtTlbCache Is Nothing Then Set mVtTlbCache = New Collection
+    Dim tlb As clsTypeLibInfo
+    On Error Resume Next
+    Set tlb = mVtTlbCache(ocxFile)
+    On Error GoTo done
+    If tlb Is Nothing Then
+        Set tlb = New clsTypeLibInfo
+        If Not tlb.OpenTypeLib(ocxFile) Then Exit Function
+        mVtTlbCache.Add tlb, ocxFile
+    End If
+    'Resolve the short coclass name (drop the "Lib." prefix) and collect the GUIDs of
+    'the interfaces it implements (the default interface carries the vtable members).
+    Dim shortClass As String
+    shortClass = ctlClass
+    If InStr(shortClass, ".") > 0 Then shortClass = Mid$(shortClass, InStrRev(shortClass, ".") + 1)
+    Dim i As Long, j As Long, implGuids As String
+    For i = 0 To tlb.TypeInfoCount - 1
+        tlb.SelectTypeInfo i
+        If tlb.TypeInfoKind = TKIND_COCLASS And StrComp(tlb.TypeInfoName, shortClass, vbTextCompare) = 0 Then
+            For j = 0 To tlb.TypeInfoImplements - 1
+                tlb.SelectImplement j
+                implGuids = implGuids & "|" & tlb.ImplementGUID
+            Next j
+            Exit For
+        End If
+    Next i
+    If Len(implGuids) = 0 Then GoTo done       'coclass not found in this typelib
+    implGuids = implGuids & "|"
+    'Scan the coclass's interfaces for a function at the wanted vtable offset.
+    Dim anyName As String, anyKind As Long
+    For i = 0 To tlb.TypeInfoCount - 1
+        tlb.SelectTypeInfo i
+        If (tlb.TypeInfoKind = TKIND_DISPATCH Or tlb.TypeInfoKind = TKIND_INTERFACE) _
+           And InStr(implGuids, "|" & tlb.TypeInfoGUID & "|") > 0 Then
+            For j = 0 To tlb.TypeInfoFunctions - 1
+                If tlb.SelectFunction(j) Then
+                    If tlb.FunctionVTOffset = vtOffset Then
+                        If wantKind <> 0 And (tlb.FunctionInvKind And wantKind) <> 0 Then
+                            ResolveVtableMember = tlb.FunctionName: invKind = tlb.FunctionInvKind: Exit Function
+                        ElseIf Len(anyName) = 0 Then
+                            anyName = tlb.FunctionName: anyKind = tlb.FunctionInvKind
+                        End If
+                    End If
+                End If
+            Next j
+        End If
+    Next i
+    ResolveVtableMember = anyName: invKind = anyKind
+done:
+End Function
+
+Public Function VtableMemberName(ByVal libClass As String, ByVal ctlBase As String, ByVal vtOffset As Long, ByVal wantKind As Long, ByRef invKind As Long) As String
+    'Resolve an early-bound vtable member on an OCX control to its name, by the control's
+    'external class (libClass, e.g. "MSComctlLib.Slider" from gControlClass).  Mirrors
+    'LateMemberName: find the gOcxList entry for the class, get its OCX file, resolve the
+    'offset on that coclass's interfaces.  ctlBase (the control's base name) is a weak
+    'fallback when the external class gave no hit.
+    On Error Resume Next
+    Dim i As Long, f As String, nm As String
+    If UBound(gOcxList) < 1 Then Exit Function
+    If Len(libClass) > 0 Then                          'pass 1: exact external class
+        For i = 0 To UBound(gOcxList) - 1
+            If Len(gOcxList(i).strGuid) > 0 And StrComp(gOcxList(i).strLibname, libClass, vbTextCompare) = 0 Then
+                f = OcxFileFromClsid(gOcxList(i).strGuid)
+                nm = ResolveVtableMember(f, libClass, vtOffset, wantKind, invKind)
+                If Len(nm) > 0 Then VtableMemberName = nm: Exit Function
+            End If
+        Next i
+    End If
+    If Len(ctlBase) > 0 Then                            'pass 2: OCX whose name matches the control base
+        For i = 0 To UBound(gOcxList) - 1
+            If Len(gOcxList(i).strGuid) > 0 Then
+                If InStr(1, gOcxList(i).strLibname, ctlBase, vbTextCompare) > 0 _
+                   Or InStr(1, gOcxList(i).strocxName, ctlBase, vbTextCompare) > 0 Then
+                    f = OcxFileFromClsid(gOcxList(i).strGuid)
+                    nm = ResolveVtableMember(f, gOcxList(i).strLibname, vtOffset, wantKind, invKind)
+                    If Len(nm) > 0 Then VtableMemberName = nm: Exit Function
                 End If
             End If
         Next i
