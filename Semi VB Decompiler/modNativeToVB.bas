@@ -143,6 +143,11 @@ Private NVLateDispid As Collection '"L"&callVA -> comma list of candidate DISPID
 'bails on these 16-bit register compares; this map records the resolved operands
 '("<paramTok>|<const>") per cmp VA so the Jcc renders `If KeyCode = 97` not `<cond>`.
 Private NVKeyCmp As Collection     '"K"&cmpVA -> "<paramTok>|<const>"
+'A ByRef Long parameter read-modify-write the store path drops (`Xpos = Xpos - 1`):
+'`mov ptr,[ebp+arg]; mov v,[ptr]; add/sub v,imm; [jo]; mov [ptr],v` writes through the
+'parameter POINTER, a disp-0 `mov [reg],reg` no field/local store branch matches.  A
+'pre-pass (NativeDetectByRefArith) binds `arg_X = (arg_X +/- N)` per store VA.
+Private NVByRefArith As Collection '"B"&storeVA -> reconstructed `arg_X = (arg_X +/- N)`
 Private NVAbsGlobalCmp As Collection '"T"&testVA -> global token: a `mov eax,[abs](0xA1); test eax,eax` condition (the short-form global load isn't register-tracked) -> `If global_X <op> 0`
 Private NVBoolVarCtl As Collection  '"T"&testVA -> "CBool(Form.control)": a control default-property read AS a condition (control accessor -> VT_DISPATCH Variant -> __vbaBoolVarNull -> test r16) -> `If CBool(frmX.optClosed) <> 0`
 'Branchless select-of-two-constants (`If cond Then x=c1 Else x=c2` compiled as
@@ -320,6 +325,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVCtlArrGuid = New Collection
     Set NVCtlArrRetbuf = New Collection
     Set NVKeyCmp = New Collection
+    Set NVByRefArith = New Collection
     Set NVAbsGlobalCmp = New Collection
     Set NVBoolVarCtl = New Collection
     Set NVSelConst = New Collection
@@ -485,6 +491,13 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'buttons) into `field = field +/- 1 : If field <op> N Then field = M / End If`,
     'suppressing the raw movzx/__vbaUI1I2/store/jcc scaffolding.
     NativeDetectByteClamp col
+
+    'Reconstruct a ByRef Long parameter read-modify-write (`Xpos = Xpos - 1`): the
+    'idiom `mov ptr,[ebp+arg]; mov v,[ptr]; add/sub v,imm; [jo]; mov [ptr],v` writes
+    'through the parameter pointer; its store is a disp-0 `mov [reg],reg` no field
+    '(disp>0) or local (disp<0) store branch handles, so it was dropped - leaving an
+    'empty Select-Case arm.  Bind `arg_X = (arg_X +/- N)` at the store VA.
+    NativeDetectByRefArith col
 
     'Determine each vtable call's data-flow direction (its by-ref local read AFTER the
     'call = a value-out GET, else a value-in PUT) so a class-instance property access
@@ -1656,6 +1669,137 @@ Private Function NativeForLimitVal(arr() As CInstruction, ByVal ci As Long, ByVa
         If o2 = &H33 And mmd = 3 And mrg = limReg And mrm = limReg Then NativeForLimitVal = "0": Exit Function  'xor limReg,limReg
 prev2:
     Next i
+End Function
+
+Private Sub NativeDetectByRefArith(col As Collection)
+    'Reconstruct a ByRef Long parameter read-modify-write the store path drops.
+    'VB6 compiles `Xpos = Xpos - 1` (Xpos a ByRef Long param) to:
+    '    mov  reg1,[ebp+arg]   ; reg1 = the parameter POINTER
+    '    mov  reg2,[reg1]      ; reg2 = *reg1 (the Long value)
+    '    add/sub reg2,imm      ; the arithmetic
+    '    [jo/jno overflow]     ; compiler overflow check (optional, already suppressed)
+    '    mov  [reg1],reg2      ; *reg1 = reg2  -> the store, anchored here
+    'The store is a disp-0 `mov [reg],reg`, which the field (disp>0) and local (disp<0)
+    'store branches never match, so the whole RMW was dropped - leaving an empty
+    'Select-Case arm.  Bind `arg_X = (arg_X +/- N)` at the store VA.  Strict CONTIGUOUS
+    'match (only the overflow jmp may sit between the arithmetic and the store); a miss
+    'just leaves the body as-is, never a false statement.
+    On Error GoTo done
+    Dim n As Long, k As Long, s As Long, j As Long, inst As CInstruction
+    n = col.Count
+    If n < 4 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    Dim d As String, nb As Long, p As Long, mr As Long, md As Long, rg As Long, rm As Long
+    Dim reg1 As Long, reg2 As Long, isSub As Boolean, imm As Long, argDisp As Long
+    Dim argTok As String, rhs As String
+    For s = 3 To n - 1
+        'Anchor: store `mov [reg1], reg2` - 0x89, mod=00, base reg (rm not 4=SIB / 5=disp32).
+        d = Replace(arr(s).dump, " ", "")
+        nb = Len(d) \ 2
+        If nb < 2 Then GoTo nexts
+        If NativeHas66(d) Then GoTo nexts                  'Long store only
+        p = NativeOpStart(d, nb)
+        If NativeDumpByte(d, p) <> &H89 Then GoTo nexts
+        mr = NativeDumpByte(d, p + 1)
+        md = (mr \ &H40) And 3: rg = (mr \ 8) And 7: rm = mr And 7
+        If md <> 0 Or rm = 4 Or rm = 5 Then GoTo nexts
+        reg1 = rm: reg2 = rg
+        If reg1 = reg2 Then GoTo nexts                     'distinct ptr / value registers
+        'Step back over a single overflow-check jmp (jo/jno) if present.
+        j = s - 1
+        If NativeIsOvfJmp(arr(j)) Then j = j - 1
+        If j < 2 Then GoTo nexts
+        'Arithmetic: add/sub reg2, imm.
+        If Not NativeRegImmArith(arr(j), reg2, isSub, imm) Then GoTo nexts
+        'Deref: mov reg2, [reg1]  (0x8B, mod=00, reg=reg2, rm=reg1).
+        j = j - 1
+        d = Replace(arr(j).dump, " ", "")
+        nb = Len(d) \ 2
+        If nb < 2 Then GoTo nexts
+        p = NativeOpStart(d, nb)
+        If NativeDumpByte(d, p) <> &H8B Then GoTo nexts
+        mr = NativeDumpByte(d, p + 1)
+        md = (mr \ &H40) And 3: rg = (mr \ 8) And 7: rm = mr And 7
+        If md <> 0 Or rg <> reg2 Or rm <> reg1 Then GoTo nexts
+        'Pointer load: mov reg1, [ebp+arg]  (0x8B, reg=reg1, rm=5/ebp, disp >= 8).
+        j = j - 1
+        If j < 0 Then GoTo nexts
+        d = Replace(arr(j).dump, " ", "")
+        nb = Len(d) \ 2
+        If nb < 3 Then GoTo nexts
+        p = NativeOpStart(d, nb)
+        If NativeDumpByte(d, p) <> &H8B Then GoTo nexts
+        mr = NativeDumpByte(d, p + 1)
+        md = (mr \ &H40) And 3: rg = (mr \ 8) And 7: rm = mr And 7
+        If rg <> reg1 Or rm <> 5 Then GoTo nexts           'rm=5 = [ebp+disp]
+        If md = 1 Then
+            argDisp = NativeDumpInt8(d, p + 2)
+        ElseIf md = 2 Then
+            argDisp = NativeDumpInt32(d, p + 2)
+        Else
+            GoTo nexts                                     'md=0/3 not [ebp+disp8/32]
+        End If
+        If argDisp < 8 Then GoTo nexts                     'a positive ebp offset = a parameter
+        'Record: arg_<disp> = (arg_<disp> +/- imm).  Skip a no-op (imm folded to nothing).
+        argTok = "arg_" & Hex$(argDisp)
+        rhs = NativeFoldArith(argTok, isSub, imm)
+        If rhs <> argTok Then NativeColPut NVByRefArith, "B" & arr(s).va, argTok & " = " & rhs
+nexts:
+    Next s
+done:
+End Sub
+
+Private Function NativeIsOvfJmp(inst As CInstruction) As Boolean
+    'True for an overflow-check conditional jump (jo/jno) - rel8 (0x70/0x71) or the
+    'two-byte rel32 form (0F 80 / 0F 81).  These guard VB6 integer arithmetic and are
+    'suppressed elsewhere; here they may sit between the arithmetic and the store.
+    Dim d As String, nb As Long, p As Long, op As Long
+    On Error Resume Next
+    d = Replace(inst.dump, " ", "")
+    nb = Len(d) \ 2
+    If nb < 1 Then Exit Function
+    p = NativeOpStart(d, nb)
+    op = NativeDumpByte(d, p)
+    If op = &H70 Or op = &H71 Then NativeIsOvfJmp = True: Exit Function
+    If op = &HF And nb > p + 1 Then
+        op = NativeDumpByte(d, p + 1)
+        If op = &H80 Or op = &H81 Then NativeIsOvfJmp = True
+    End If
+End Function
+
+Private Function NativeRegImmArith(inst As CInstruction, ByVal targ As Long, ByRef isSub As Boolean, ByRef imm As Long) As Boolean
+    'True when inst is `add/sub targ, imm` (32-bit): 0x83 /0|/5 (imm8), 0x81 /0|/5
+    '(imm32), or the eax short forms 0x05/0x2D.  Returns the operator (isSub) and the
+    'immediate.  Long arithmetic only (a 0x66 16-bit form is rejected).
+    Dim d As String, nb As Long, p As Long, op As Long, mr As Long, md As Long, rg As Long, rm As Long
+    On Error Resume Next
+    d = Replace(inst.dump, " ", "")
+    nb = Len(d) \ 2
+    If nb < 2 Then Exit Function
+    If NativeHas66(d) Then Exit Function
+    p = NativeOpStart(d, nb)
+    op = NativeDumpByte(d, p)
+    If op = &H83 Or op = &H81 Then
+        mr = NativeDumpByte(d, p + 1)
+        md = (mr \ &H40) And 3: rg = (mr \ 8) And 7: rm = mr And 7
+        If md <> 3 Or rm <> targ Then Exit Function
+        If rg = 0 Then
+            isSub = False
+        ElseIf rg = 5 Then
+            isSub = True
+        Else
+            Exit Function
+        End If
+        If op = &H83 Then imm = NativeDumpInt8(d, nb - 1) Else imm = NativeDumpInt32(d, nb - 4)
+        NativeRegImmArith = True
+    ElseIf (op = &H5 Or op = &H2D) And targ = 0 Then
+        imm = NativeDumpInt32(d, p + 1)
+        isSub = (op = &H2D)
+        NativeRegImmArith = True
+    End If
 End Function
 
 Private Sub NativeDetectWhileLoops(col As Collection)
@@ -7119,6 +7263,12 @@ Private Function NativeTrackReg(inst As CInstruction) As String
     Dim dump As String, n As Long, i As Long, op As Long, modrm As Long, md As Long, reg As Long, rm As Long
     Dim disp As Long, isAbs As Boolean, lname As String
     On Error Resume Next
+    'A ByRef Long parameter read-modify-write recovered by NativeDetectByRefArith
+    '(`Xpos = Xpos - 1`): its store writes through the param pointer ([reg], disp 0),
+    'which no field/local store branch handles, so emit the bound statement here.
+    Dim braRMW As String
+    braRMW = NativeColGet(NVByRefArith, "B" & inst.va)
+    If Len(braRMW) > 0 Then NativeTrackReg = braRMW: Exit Function
     dump = Replace(inst.dump, " ", "")
     n = Len(dump) \ 2
     If n < 2 Then Exit Function
