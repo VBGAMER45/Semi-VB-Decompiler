@@ -3677,6 +3677,26 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             'If picBmp.SetBitmap(x) Then) instead of a bogus Call.
                             Dim umKind As String, umVal As String, umIsVal As Boolean
                             NativeTryMethodKind umAddr, umKind
+                            'A Property LET/SET on a user-class instance (e.g.
+                            'testPacket.ID = 25 / testPacket.Name = "Jonathan").  The
+                            'FuncDesc kind is authoritative (b1=0 -> Let/Set), so this is
+                            'a STORE, not a value-returning call: render `recv.Prop = value`
+                            '(`Set recv.Prop = value` for a Set).  Without this it fell
+                            'through to the value path and the put was consumed by the
+                            'following HRESULT check as a bogus `If recv.Prop(0) = 0 Then`.
+                            'The stored value is the method's single real parameter (umArgs,
+                            'after the leading `this` was dropped above).
+                            If InStr(umKind, "Property Let") > 0 Or InStr(umKind, "Property Set") > 0 Then
+                                Dim umSetKw As String
+                                umSetKw = IIf(InStr(umKind, "Property Set") > 0, "Set ", "")
+                                If Len(umVal) = 0 Then umVal = umArgs
+                                If Len(umVal) = 0 Then umVal = umRetbuf
+                                NVPushTop = 0
+                                NVReg(0) = ""                       'put returns nothing - clear the HRESULT slot
+                                NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjInst(0) = ""
+                                NativeProcessInst = ind & umSetKw & umRecv & "." & umName & " = " & umVal & vbCrLf
+                                Exit Function
+                            End If
                             'A property GET/method on a LOCAL class-instance receiver (an
                             '`As New`/predeclared instance, var_X) - e.g. cmdOK_Click reading
                             'pktCreate.Name/.Life/... into locals.  Emit the read as a VISIBLE
