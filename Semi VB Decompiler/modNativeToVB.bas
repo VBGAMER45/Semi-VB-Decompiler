@@ -159,6 +159,13 @@ Private NVCtlArrRetbuf As Collection '"K"&callVA -> the element retbuf local dis
 Private NVLocalVtName As Collection  '"L"&disp -> control NAME whose vtable that slot holds
 Private NVLocalVtGuid As Collection  '"L"&disp -> control GUID whose vtable that slot holds
 Private NVSuppressObjSet As Collection '"O"&objSetVA -> "1" - a __vbaObjSet whose only purpose is to pass the control into the very next late call; drop the redundant `Set temp = control`
+'Byte-field increment/decrement-with-clamp idiom (VB6 `field = field +/- 1 : If field
+'<op> N Then field = M`, where field is a Byte member coerced via __vbaUI1I2).  The whole
+'sequence (movzx/sub/jo/call/cmp/store/jcc/mov-imm/call/store) is recognised by signature
+'and reconstructed; the raw instructions are suppressed.  Beats the commercial decompiler,
+'which drops the unconditional decrement store and mangles the condition (`+ 1+1 > 9`).
+Private NVByteClamp As Collection      '"B"&anchorVA -> "opSign|cmpOp|cmpVal|bodyVal|fieldOff"
+Private NVByteClampSkip As Collection  '"B"&va -> "1" - an idiom instruction to suppress
 Private NVArgTok() As String       'per-proc: generic tokens (arg_<offset>) to replace with...
 Private NVArgNm() As String        '...their recovered parameter names, at proc finalisation
 Private NVArgN As Long             'count of recovered parameter-name substitutions this proc
@@ -307,6 +314,8 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVSelConstSkip = New Collection
     Set NVLocalVtName = New Collection
     Set NVLocalVtGuid = New Collection
+    Set NVByteClamp = New Collection
+    Set NVByteClampSkip = New Collection
     NVCurVa = 0
     NVArgN = 0
     ReDim NVSelStkBase(31): NVSelTop = 0
@@ -444,6 +453,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'rather than the misleading bare relational.
     NativeDetectSelectConst col
 
+    'Reconstruct the Byte-field +/-1-with-clamp idiom (frmCreate body-part Up/Down
+    'buttons) into `field = field +/- 1 : If field <op> N Then field = M / End If`,
+    'suppressing the raw movzx/__vbaUI1I2/store/jcc scaffolding.
+    NativeDetectByteClamp col
+
     'Detect an unclassified module Function: a simple value returned in the accumulator
     '(`mov ax/eax,[ebp-retSlot]` right before the SEH restore).  Marks the proc a
     'Function, recovers its return TYPE (Integer/Long), and renames the return slot to
@@ -479,6 +493,25 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         End If
         'Close any structured If blocks that end at this address
         NativeCloseIfs output, inst.va
+
+        '--- Byte-field +/-1-with-clamp idiom ---
+        'At the anchor (the movzx), emit the reconstructed statements; every idiom
+        'instruction (including the anchor) is then suppressed.
+        Dim bcRec As String
+        bcRec = NativeColGet(NVByteClamp, "B" & inst.va)
+        If Len(bcRec) > 0 Then
+            Dim bcP() As String, bcFld As String, bcInd As String
+            bcP = Split(bcRec, "|")
+            bcFld = NativeFieldName(CLng(bcP(4)))
+            bcInd = NativeIndentStr()
+            output = output & bcInd & bcFld & " = (" & bcFld & " " & bcP(0) & " 1)" & vbCrLf
+            output = output & bcInd & "If " & bcFld & " " & bcP(1) & " " & bcP(2) & " Then" & vbCrLf
+            NVIndent = NVIndent + 1
+            output = output & NativeIndentStr() & bcFld & " = " & bcP(3) & vbCrLf
+            NVIndent = NVIndent - 1
+            output = output & bcInd & "End If" & vbCrLf
+        End If
+        If Len(NativeColGet(NVByteClampSkip, "B" & inst.va)) > 0 Then GoTo nextInst
 
         '--- Select Case transitions (after If-close so case-body Ifs close first) ---
         Dim svaKey As String, selCV As String, selExpr As String
@@ -1852,6 +1885,118 @@ Private Sub NativeDetectBoundsChecks(col As Collection)
     Next
 done:
 End Sub
+
+Private Sub NativeDetectByteClamp(col As Collection)
+    'VB6's Byte-member +/-1-with-clamp idiom (frmCreate's body-part Up/Down buttons,
+    'e.g. `iHead = iHead - 1 : If iHead <= 0 Then iHead = 1`).  A Byte field is loaded,
+    'incremented/decremented, range-coerced through __vbaUI1I2, stored back, then
+    'clamped to a bound:
+    '    movzx cx,byte[esi+off] ; mov edi,[__vbaUI1I2] ; (add|sub) cx,1 ; jo ovf ;
+    '    call edi ; (cmp al,N | test al,al) ; mov [esi+off],al ; jcc skip ;
+    '    mov ecx,M ; call edi ; mov [esi+off],al ; skip:
+    'We otherwise drop the lot (the store has no NVReg source, the cmp/jcc on the
+    'byte register yields a blank <cond>, and the body store is lost) - leaving an
+    'empty `If <cond> Then / End If`.  Reconstruct it exactly; the unconditional
+    'decrement store (which the commercial decompiler omits) is recovered too.  The
+    'signature is rigid (esi = Me, __vbaUI1I2 confirmed via the IAT), so it cannot
+    'misfire on unrelated code; a non-match leaves the proc untouched.
+    On Error GoTo done
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    If n < 11 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    For k = 0 To n - 11
+        Dim d0 As String, off As Long
+        d0 = Replace(arr(k).dump, " ", "")
+        'movzx cx, byte[esi+disp32]  (66 0F B6 8E <d32>)
+        If Len(d0) < 16 Then GoTo nextk
+        If Not (NativeDumpByte(d0, 0) = &H66 And NativeDumpByte(d0, 1) = &HF _
+                And NativeDumpByte(d0, 2) = &HB6 And NativeDumpByte(d0, 3) = &H8E) Then GoTo nextk
+        off = NativeDumpInt32(d0, 4)
+        'mov edi, [abs]  (8B 3D <abs32>) - confirm it is __vbaUI1I2
+        Dim d1 As String, iat As Long
+        d1 = Replace(arr(k + 1).dump, " ", "")
+        If Not (NativeDumpByte(d1, 0) = &H8B And NativeDumpByte(d1, 1) = &H3D) Then GoTo nextk
+        iat = NativeDumpInt32(d1, 2)
+        If InStr(dsmNative.GetApiByIatVa(iat), "__vbaUI1I2") = 0 Then GoTo nextk
+        '(add|sub) cx, 1  (66 83 C1 01 = add ecx ; 66 83 E9 01 = sub ecx)
+        Dim d2 As String, opSign As String
+        d2 = Replace(arr(k + 2).dump, " ", "")
+        If Not (NativeDumpByte(d2, 0) = &H66 And NativeDumpByte(d2, 1) = &H83 _
+                And NativeDumpByte(d2, 3) = &H1) Then GoTo nextk
+        Select Case NativeDumpByte(d2, 2)
+            Case &HC1: opSign = "+"
+            Case &HE9: opSign = "-"
+            Case Else: GoTo nextk
+        End Select
+        'jo ovf  (70 rel8)
+        If NativeDumpByte(Replace(arr(k + 3).dump, " ", ""), 0) <> &H70 Then GoTo nextk
+        'call edi  (FF D7)
+        Dim d4 As String
+        d4 = Replace(arr(k + 4).dump, " ", "")
+        If Not (NativeDumpByte(d4, 0) = &HFF And NativeDumpByte(d4, 1) = &HD7) Then GoTo nextk
+        'cmp al,imm8 (3C N) | test al,al (84 C0)
+        Dim d5 As String, cmpVal As Long
+        d5 = Replace(arr(k + 5).dump, " ", "")
+        If NativeDumpByte(d5, 0) = &H3C Then
+            cmpVal = NativeDumpByte(d5, 1)
+        ElseIf NativeDumpByte(d5, 0) = &H84 And NativeDumpByte(d5, 1) = &HC0 Then
+            cmpVal = 0
+        Else
+            GoTo nextk
+        End If
+        'mov [esi+off], al  (88 86 <d32>)
+        Dim d6 As String
+        d6 = Replace(arr(k + 6).dump, " ", "")
+        If Not (NativeDumpByte(d6, 0) = &H88 And NativeDumpByte(d6, 1) = &H86 _
+                And NativeDumpInt32(d6, 2) = off) Then GoTo nextk
+        'jcc skip (short) - the body runs on the NEGATED condition
+        Dim cmpOp As String
+        cmpOp = NativeNegJccRel(NativeDumpByte(Replace(arr(k + 7).dump, " ", ""), 0))
+        If Len(cmpOp) = 0 Then GoTo nextk
+        'mov ecx, imm32  (B9 <imm32>)
+        Dim d8 As String, bodyVal As Long
+        d8 = Replace(arr(k + 8).dump, " ", "")
+        If NativeDumpByte(d8, 0) <> &HB9 Then GoTo nextk
+        bodyVal = NativeDumpInt32(d8, 1)
+        'call edi (FF D7) ; mov [esi+off], al (88 86 <d32>)
+        Dim d9 As String, d10 As String
+        d9 = Replace(arr(k + 9).dump, " ", "")
+        d10 = Replace(arr(k + 10).dump, " ", "")
+        If Not (NativeDumpByte(d9, 0) = &HFF And NativeDumpByte(d9, 1) = &HD7) Then GoTo nextk
+        If Not (NativeDumpByte(d10, 0) = &H88 And NativeDumpByte(d10, 1) = &H86 _
+                And NativeDumpInt32(d10, 2) = off) Then GoTo nextk
+        'Record the reconstruction at the anchor; suppress the 11 idiom instructions.
+        NativeColPut NVByteClamp, "B" & arr(k).va, _
+            opSign & "|" & cmpOp & "|" & cmpVal & "|" & bodyVal & "|" & off
+        Dim j As Long
+        For j = k To k + 10
+            NativeColPut NVByteClampSkip, "B" & arr(j).va, "1"
+        Next
+nextk:
+    Next k
+done:
+End Sub
+
+Private Function NativeNegJccRel(ByVal op As Long) As String
+    'The VB relational for the block a short Jcc SKIPS (i.e. the NEGATION of the Jcc's
+    'taken condition), used to render the reconstructed `If <field> <rel> N`.
+    Select Case op
+        Case &H72: NativeNegJccRel = ">="   'jb  -> not below
+        Case &H73: NativeNegJccRel = "<"    'jae -> not (>=)
+        Case &H74: NativeNegJccRel = "<>"   'je  -> not equal
+        Case &H75: NativeNegJccRel = "="    'jne -> equal
+        Case &H76: NativeNegJccRel = ">"    'jbe -> above
+        Case &H77: NativeNegJccRel = "<="   'ja  -> not above
+        Case &H7C: NativeNegJccRel = ">="   'jl  -> not less
+        Case &H7D: NativeNegJccRel = "<"    'jge -> not (>=)
+        Case &H7E: NativeNegJccRel = ">"    'jle -> greater
+        Case &H7F: NativeNegJccRel = "<="   'jg  -> not greater
+    End Select
+End Function
 
 Private Function NativeIdxOfVa(arr() As CInstruction, ByVal n As Long, ByVal va As Long) As Long
     Dim k As Long
