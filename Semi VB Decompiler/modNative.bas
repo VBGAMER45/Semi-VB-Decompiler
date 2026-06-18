@@ -39,6 +39,11 @@ Private gEvSlot() As tEvSlot
 Private gEvSlotN As Long
 Private gEvName() As tEvName
 Private gEvNameN As Long
+'Addresses confirmed (by LinkNativeEventNames) to be TRUE event handlers - i.e. an
+'event-link slot that matched a named event.  A private form helper that merely occupies
+'an event-link slot (e.g. a `Private Sub Display`) is NOT in this set, so it keeps its
+'real FuncDesc signature; only confirmed event handlers must ignore the FuncDesc.
+Private gEventAddr As Collection
 
 'Decompiled code, grouped by owning object (form/module/class), built once at
 'load so the main tree can show it inline.  Keyed "OBJ_<UPPER object name>".
@@ -553,6 +558,7 @@ Public Sub LinkNativeEventNames()
     'correlation (no heuristics).  Helper/private methods occupy the slots that no
     'event points at, and stay unnamed.
     On Error GoTo done
+    Set gEventAddr = New Collection
     Dim e As Long, s As Long, pos As Long
     For e = 0 To gEvNameN - 1
         For s = 0 To gEvSlotN - 1
@@ -563,6 +569,10 @@ Public Sub LinkNativeEventNames()
                 SubNamelist(pos).visibility = "Private"
                 SubNamelist(pos).kind = ""
                 ReDim Preserve SubNamelist(UBound(SubNamelist) + 1)
+                'Record this address as a confirmed event handler (ignore its FuncDesc).
+                On Error Resume Next
+                gEventAddr.Add gEvSlot(s).addr, "A" & gEvSlot(s).addr
+                On Error GoTo done
                 Exit For
             End If
         Next s
@@ -808,7 +818,15 @@ Public Sub LinkNativePublicParams(ByVal F As Integer)
             If Err.Number = 0 Then addr = CLng(v)
             Err.Clear
             On Error GoTo done
-            If addr <> 0 Then
+            'An event handler is NOT a public method - its signature/kind come from the
+            'event tables (getEventComplete), never the FuncDesc.  The FORM path above
+            'maps voff>=0x6F8 onto the event-link vtable slots, so a shared/garbage
+            'FuncDesc can land on a parameterless event handler (e.g. Command2_Click)
+            'and wrongly retype it `Function ...(KeyRoot, KeyName, ...)`.  Skip only a
+            'CONFIRMED event handler (matched a named event); a private form helper that
+            'merely occupies an event-link slot (e.g. `Private Sub Display`) keeps its
+            'real FuncDesc signature, and a class method is never an event handler.
+            If addr <> 0 And Not NativeAddrIsEventHandler(addr) Then
                 On Error Resume Next
                 gMethodSig.Remove "A" & addr
                 gMethodSig.Add sig, "A" & addr
@@ -822,6 +840,17 @@ nextO:
     Next oi
 done:
 End Sub
+
+Private Function NativeAddrIsEventHandler(ByVal addr As Long) As Boolean
+    'True when addr is a CONFIRMED event handler (a slot that matched a named event in
+    'LinkNativeEventNames).  A private helper that merely sits in an event-link slot is
+    'NOT confirmed, so it keeps its real FuncDesc signature.
+    On Error Resume Next
+    Dim v As Variant
+    If gEventAddr Is Nothing Then Exit Function
+    v = gEventAddr("A" & addr)
+    NativeAddrIsEventHandler = (Err.Number = 0)
+End Function
 
 Public Sub Decode(ByVal Filename As String)
 '*****************************
