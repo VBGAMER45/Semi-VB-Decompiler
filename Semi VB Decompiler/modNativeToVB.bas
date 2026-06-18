@@ -3812,7 +3812,7 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             'unconsumed local and vanishing.  Scoped to local-instance
                             'receivers (umRecv "var_") so As-New FIELD receivers (clsBitmap
                             'field_X, whose gets are consumed inline) keep their current fold.
-                            If Len(umRetbuf) > 0 And Left$(umRecv, 4) = "var_" And Left$(umRetbuf, 4) = "var_" _
+                            If Len(umRetbuf) > 0 And (Left$(umRecv, 4) = "var_" Or Left$(umRecv, 6) = "field_") And Left$(umRetbuf, 4) = "var_" _
                                And InStr(umKind, "Property") > 0 Then
                                 'A property accessor on a LOCAL class-instance (As New /
                                 'predeclared, e.g. pktCreate).  VB6 flags Get and Let alike,
