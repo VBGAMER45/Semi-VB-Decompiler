@@ -6680,7 +6680,11 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     Dim isCtrSlot As Boolean
                     isCtrSlot = Len(NativeColGet(NVCounterSlot, "C" & disp)) > 0
                     lname = "var_" & Hex$(Abs(disp))
-                    If InStr(stv89, "(") > 0 And Left$(stv89, 1) <> Chr$(34) Then
+                    If (InStr(stv89, "(") > 0 Or Left$(stv89, 6) = "field_") And Left$(stv89, 1) <> Chr$(34) Then
+                        'Surface a meaningful value as `var_X = <expr>`: a call/deref
+                        '(parenthesised) OR a bare instance-field read (field_<off>) - so an
+                        'Integer Property Get's `temp = field_34` return-slot copy shows and
+                        'the post-pass renames it to `ID = field_34`.
                         NativeTrackReg = lname & " = " & stv89
                         NativeSetLocalExpr disp, lname
                     ElseIf isCtrSlot And Len(stv89) > 0 And stv89 <> lname Then
@@ -7949,7 +7953,20 @@ Private Function NativeRmVal(ByVal dump As String, ByVal md As Long, ByVal rm As
             'base would render the nonsense 0(20), and a control/property base a
             'misleading frmMain.Text1(20) - both stay as their raw register instead.
             bse = NativeMemBase(dump)
-            If bse >= 0 And bse <= 7 And NativeIsDerefBase(NVReg(bse)) Then
+            Dim rmIsMe As Boolean
+            rmIsMe = False
+            If bse >= 0 And bse <= 7 Then rmIsMe = (NVHasMe And NVRegIsMe(bse))
+            If rmIsMe And disp > 0 And disp < &H2000 Then
+                'Read of an instance FIELD of Me (this/self) -> field_<off> (or its real
+                'typeinfo name), MIRRORING the field STORE side (NativeFieldStoreLHS) so a
+                'read and write of the same field match: an Integer Property Get/Function
+                'reads `ID = field_34` / `field_34 * 1000` to pair with its Let's
+                '`field_34 = vData` and the `Private field_34` declaration, not the bare
+                'Me-deref arg_8(52).  Scoped to THIS operand/16-bit-shadow path; the 32-bit
+                'NVReg deref path is unchanged, so struct/array deref chains and the
+                'string-concat operands that depend on the arg_8(N) form are unaffected.
+                NativeRmVal = NativeFieldName(disp)
+            ElseIf bse >= 0 And bse <= 7 And NativeIsDerefBase(NVReg(bse)) Then
                 If disp = 0 Then
                     NativeRmVal = NVReg(bse)
                 Else
