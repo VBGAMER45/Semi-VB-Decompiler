@@ -6600,10 +6600,19 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 NVRegObjGuid(rm) = NVRegObjGuid(reg): NVRegObjVtGuid(rm) = NVRegObjVtGuid(reg)
             ElseIf NativeDecodeDisp(dump, disp, isAbs) Then
                 If Not isAbs And disp < 0 Then
+                    'Effective stored value: the register's tracked 32-bit value, or -
+                    'when that was cleared because the register was last loaded as a
+                    '16-bit memory WORD (mov cx,[Me+off]; mov [ebp-X],ecx) - the 16-bit
+                    'shadow, which carries the Integer field/var value (an Integer
+                    'Property Get reads `temp = mvarID` this way; without it the body
+                    'vanished entirely).
+                    Dim stv89 As String
+                    stv89 = NVReg(reg)
+                    If Len(stv89) = 0 And Len(NVR16Val(reg)) > 0 Then stv89 = NVR16Val(reg)
                     'Record the register's value against the slot (a Variant data or
                     'VT field filled from a register, e.g. `mov [ebp-X], esi` with
                     'esi = 0xA for a missing optional argument).
-                    NativeSetVSlot disp, NVReg(reg)
+                    NativeSetVSlot disp, stv89
                     'A stored call result (expression containing a call) is worth
                     'surfacing as a real assignment; bind the local to its name so
                     'later uses reference the variable rather than re-expanding.  A
@@ -6613,14 +6622,14 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     Dim isCtrSlot As Boolean
                     isCtrSlot = Len(NativeColGet(NVCounterSlot, "C" & disp)) > 0
                     lname = "var_" & Hex$(Abs(disp))
-                    If InStr(NVReg(reg), "(") > 0 And Left$(NVReg(reg), 1) <> Chr$(34) Then
-                        NativeTrackReg = lname & " = " & NVReg(reg)
+                    If InStr(stv89, "(") > 0 And Left$(stv89, 1) <> Chr$(34) Then
+                        NativeTrackReg = lname & " = " & stv89
                         NativeSetLocalExpr disp, lname
-                    ElseIf isCtrSlot And Len(NVReg(reg)) > 0 And NVReg(reg) <> lname Then
-                        NativeTrackReg = lname & " = " & NVReg(reg)
+                    ElseIf isCtrSlot And Len(stv89) > 0 And stv89 <> lname Then
+                        NativeTrackReg = lname & " = " & stv89
                         NativeSetLocalExpr disp, lname
                     Else
-                        NativeSetLocalExpr disp, NVReg(reg)
+                        NativeSetLocalExpr disp, stv89
                     End If
                     'Storing a tracked control object to a local (plain mov, not
                     '__vbaObjSet) - remember its GUID so a later property access
