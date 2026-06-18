@@ -4729,6 +4729,28 @@ End Function
 ' Idiom helpers
 '---------------------------------------------------------------------------
 
+Private Function NativePropGetResult(ByVal valExpr As String) As String
+    'A control property GET resolves its member name but writes its result through a
+    'retbuf local (the `lea` just before the call).  Emit it as a REAL assignment
+    '`var_<lea> = receiver.prop` and make the result local reference the property BY
+    'NAME downstream, instead of dropping the read into a `' get` comment.  The old
+    'comment form silently lost the read whenever the inline fold did not reach the
+    'consumer (a user-class property put then read an otherwise-unassigned var_20:
+    '`var_18.Text = var_20`).  Mirrors the user-class-instance GET path (the As-New /
+    'predeclared case, `umRetbuf = umRecv.umName`).  Falls back to the comment only
+    'when the result is in the accumulator with no capture local (NVLastLeaSet False -
+    'the value is consumed directly by a following condition, no var to assign).
+    Dim ln As String
+    If NVLastLeaSet Then
+        ln = "var_" & Hex$(Abs(NVLastLea))
+        NativeSetLocalExpr NVLastLea, ln       'downstream reads reference the var by name
+        NVLastLeaSet = False
+        NativePropGetResult = ln & " = " & valExpr
+    Else
+        NativePropGetResult = "' get " & valExpr
+    End If
+End Function
+
 Private Function NativeProperty(ByVal vtOffset As Long) As String
 'Resolve a property vtable call (call [obj + vtOffset]) on the last control.
     Dim p As String, propName As String, kind As String, valExpr As String
@@ -4757,9 +4779,7 @@ Private Function NativeProperty(ByVal vtOffset As Long) As String
         Case "Get"
             'Result is written to the local addressed just before the call
             valExpr = NVLastControl & "." & propName
-            If NVLastLeaSet Then NativeSetLocalExpr NVLastLea, valExpr
-            NVLastLeaSet = False
-            NativeProperty = "' get " & valExpr
+            NativeProperty = NativePropGetResult(valExpr)
         Case "Let", "Set"
             valExpr = NativePopValue()
             NativeProperty = NVLastControl & "." & propName & " = " & valExpr
@@ -4802,9 +4822,7 @@ Private Function NativeControlProp(ByVal ctlName As String, ByVal guid As String
     Select Case kind
         Case "Get"
             valExpr = ctlName & "." & propName
-            If NVLastLeaSet Then NativeSetLocalExpr NVLastLea, valExpr
-            NVLastLeaSet = False
-            NativeControlProp = "' get " & valExpr
+            NativeControlProp = NativePropGetResult(valExpr)
         Case "Let", "Set"
             'Property Let compiles to `push value; push this; call [vt+off]`.  The TOP
             'push is the control `this` itself - never the value - so take the push
