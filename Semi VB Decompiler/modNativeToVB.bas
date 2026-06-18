@@ -144,6 +144,7 @@ Private NVLateDispid As Collection '"L"&callVA -> comma list of candidate DISPID
 '("<paramTok>|<const>") per cmp VA so the Jcc renders `If KeyCode = 97` not `<cond>`.
 Private NVKeyCmp As Collection     '"K"&cmpVA -> "<paramTok>|<const>"
 Private NVAbsGlobalCmp As Collection '"T"&testVA -> global token: a `mov eax,[abs](0xA1); test eax,eax` condition (the short-form global load isn't register-tracked) -> `If global_X <op> 0`
+Private NVBoolVarCtl As Collection  '"T"&testVA -> "CBool(Form.control)": a control default-property read AS a condition (control accessor -> VT_DISPATCH Variant -> __vbaBoolVarNull -> test r16) -> `If CBool(frmX.optClosed) <> 0`
 'Branchless select-of-two-constants (`If cond Then x=c1 Else x=c2` compiled as
 'xor/cmp/setcc/dec/and mask/add base) -> reconstruct IIf(cond, base, base+mask).
 Private NVSelConst As Collection     '"S"&setccVA -> "<base>|<base+mask>" (true / false value)
@@ -319,6 +320,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVCtlArrRetbuf = New Collection
     Set NVKeyCmp = New Collection
     Set NVAbsGlobalCmp = New Collection
+    Set NVBoolVarCtl = New Collection
     Set NVSelConst = New Collection
     Set NVSelConstSkip = New Collection
     Set NVLocalVtName = New Collection
@@ -459,6 +461,12 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'procs with the `mov di,word[param]` anchor; only the 16-bit case compares).
     NativeDetectKeyCompares col
     NativeDetectAbsGlobalTests col
+    'Resolve a control default-property read used AS a condition (`If optClosed Then`):
+    'control accessor -> VT_DISPATCH Variant -> __vbaBoolVarNull (CBool) -> test r16 ; jcc,
+    'which the generic decoder drops to `If eax <> 0`.  Bind `CBool(Form.control)` at the
+    'test VA.  Strictly VA-scoped (changes no register state); verified against the
+    '__vbaBoolVarNull call so an unrelated 16-bit test cannot match.
+    NativeDetectBoolVarControl col
 
     'Recognise the branchless select-of-two-constants idiom (setcc/dec/and/add) so a
     'two-constant If/Else (modMap_Direction = 4 / = 1) reconstructs as IIf(cond, c1, c2)
@@ -2418,6 +2426,268 @@ Private Sub NativeDetectAbsGlobalTests(col As Collection)
 done:
 End Sub
 
+Private Sub NativeDetectBoolVarControl(col As Collection)
+    'A control's DEFAULT property read AS A CONDITION (`If optClosed Then`, an
+    'OptionButton/CheckBox .Value).  VB6 compiles it as: fetch the control via a form
+    'accessor (`call [formVt+off]` -> eax), store it into a VARIANT's data field and
+    'set its vt = VT_DISPATCH (9), CBool it (`call __vbaBoolVarNull` -> ax), copy the
+    'BOOL to a 16-bit register (`mov di,ax`), then `test di,di ; jcc`.  The 16-bit
+    'register test + the Variant coercion both defeat the generic compare decoder, so
+    'it leaked as `If eax <> 0`.  This pre-pass recognises the exact shape and records,
+    'at the `test r16,r16` VA, `CBool(Form.control)` so the Jcc renders
+    '`If CBool(frmAppealAdmin.optClosed) <> 0`.  VA-scoped: it changes NO register
+    'state.  The middle call is VERIFIED to resolve to __vbaBoolVar(Null) (direct
+    '`call [iat]` or a cached `call reg`), so an unrelated control-accessor + 16-bit
+    'test cannot match.
+    On Error GoTo done
+    Dim n As Long, k As Long, arr() As CInstruction, inst As CInstruction
+    n = col.Count
+    If n < 4 Then Exit Sub
+    ReDim arr(n - 1): k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+
+    Dim off As Long, ctl As String, kk As Long, hi As Long
+    For k = 0 To n - 1
+        If Not NativeIsControlAccessorCall(arr(k), off) Then GoTo nextk
+        ctl = NativeControlByOffset(off)
+        If Len(ctl) = 0 Or Len(NVForm) = 0 Then GoTo nextk
+        'Only an OptionButton/CheckBox has a Boolean DEFAULT property (Value) that
+        '__vbaBoolVarNull coerces unambiguously.  A TextBox/Label/... default is a
+        'String, so `CBool(<that control>)` would be plausible-but-wrong - leave it raw.
+        If Not NativeControlGuidIsBoolDefault(off) Then GoTo nextk
+        'VERIFY the accessor's result (eax = the control) is what gets CBool'd: it must
+        'be stored into a Variant DATA slot ([ebp+dataDisp]) whose vt-tag ([ebp+dataDisp-8])
+        'is set to VT_DISPATCH, with eax NOT clobbered in between - then CBool'd (BoolVar)
+        'and tested.  Without this an accessor that merely PRECEDES an unrelated CBool was
+        'mis-attributed (a Label CBool'd, plausible-but-wrong).
+        Dim gotStore As Boolean, gotVt As Boolean, gotBool As Boolean
+        Dim dataDisp As Long, vtDisp As Long, r16 As Long, testVa As Long
+        gotStore = False: gotVt = False: gotBool = False: r16 = -1: testVa = 0
+        hi = k + 12: If hi > n - 1 Then hi = n - 1
+        For kk = k + 1 To hi
+            If Not gotStore Then
+                If NativeIsMovLocalFromEax(arr(kk), dataDisp) Then
+                    gotStore = True
+                ElseIf NativeInstDestReg(arr(kk)) = 0 Or NativeIsAnyCall(arr(kk)) Then
+                    Exit For                       'eax (the control) clobbered before the store
+                End If
+            ElseIf Not gotVt Then
+                If NativeIsMovVtDispatchD(arr(kk), vtDisp) Then
+                    If vtDisp = dataDisp - 8 Then gotVt = True Else Exit For
+                End If
+            ElseIf Not gotBool Then
+                If NativeIsHelperCall(arr(kk), "BoolVar", arr, kk) Then gotBool = True
+            Else
+                If NativeIsMovR16FromAx(arr(kk), r16) Then
+                    Dim m As Long, hm As Long
+                    hm = kk + 5: If hm > n - 1 Then hm = n - 1
+                    For m = kk + 1 To hm
+                        If NativeIsTestR16(arr(m), r16) Then testVa = arr(m).va: Exit For
+                    Next m
+                    Exit For
+                End If
+            End If
+        Next kk
+        If testVa <> 0 Then NativeColPut NVBoolVarCtl, "T" & testVa, "CBool(" & NVForm & "." & ctl & ")"
+nextk:
+    Next k
+done:
+End Sub
+
+Private Function NativeControlGuidIsBoolDefault(ByVal off As Long) As Boolean
+    'True when the control at this form-accessor offset is an OptionButton or CheckBox -
+    'the intrinsic VB6 controls whose DEFAULT property is the Boolean Value that
+    '__vbaBoolVarNull coerces.  (Verified GUIDs from VB6's control set; the family is
+    '{33AD4Exx-6699-11CF-B70C-00AA0060D393}.)  A control whose default is a String or
+    'numeric (TextBox / Label / ...) would yield a plausible-but-wrong `CBool(<control>)`,
+    'so it is rejected and the condition stays raw.
+    'gControlNameArray stores the control's COCLASS GUID (verified empirically on the
+    'rpgwo Client2.exe controls): OptionButton {33AD4F00-...}, CheckBox {33AD4EF8-...}
+    '(TextBox is {33AD4EE0-...}, correctly excluded).  The intrinsic-control family is
+    '{33AD4Exx-6699-11CF-B70C-00AA0060D393}.
+    Dim g As String
+    g = UCase$(NativeGuidByOffset(off))
+    NativeControlGuidIsBoolDefault = (g = "{33AD4F00-6699-11CF-B70C-00AA0060D393}" _
+                                  Or g = "{33AD4EF8-6699-11CF-B70C-00AA0060D393}")
+End Function
+
+Private Function NativeIsControlAccessorCall(inst As CInstruction, ByRef off As Long) As Boolean
+    'Match `call [reg + disp32]` (FF /2, mod=2) - a form control accessor.  Sets off to
+    'the disp32 (the caller gates it through NativeControlByOffset).
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op <> &HFF Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    If ((modrm \ 8) And 7) <> 2 Then GoTo no       'CALL r/m (/2)
+    If ((modrm \ &H40) And 3) <> 2 Then GoTo no    'mod=2 -> [reg + disp32]
+    If (modrm And 7) = 4 Then GoTo no              'rm=4 = SIB, not a plain [reg+disp]
+    off = NativeDumpInt32(dump, i + 2)
+    NativeIsControlAccessorCall = (off > 0)
+    Exit Function
+no:
+    NativeIsControlAccessorCall = False
+End Function
+
+Private Function NativeIsMovVtDispatchD(inst As CInstruction, ByRef vtDisp As Long) As Boolean
+    'Match `mov dword ptr [ebp + disp], 9` (C7 /0, imm32 = VT_DISPATCH) - the Variant
+    'type-tag store that wraps the control object for the CBool coercion.  Returns the
+    'ebp-relative displacement of the type-tag slot (the Variant base).
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long, md As Long, immPos As Long, isAbs As Boolean
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op <> &HC7 Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    If ((modrm \ 8) And 7) <> 0 Then GoTo no       'C7 /0 = mov r/m, imm32
+    md = (modrm \ &H40) And 3
+    If (modrm And 7) <> 5 Then GoTo no             'base must be ebp ([ebp+disp])
+    Select Case md
+        Case 1: immPos = i + 3                     'disp8
+        Case 2: immPos = i + 6                     'disp32
+        Case Else: GoTo no
+    End Select
+    If NativeDumpInt32(dump, immPos) <> 9 Then GoTo no
+    If Not NativeDecodeDisp(dump, vtDisp, isAbs) Then GoTo no
+    If isAbs Then GoTo no
+    NativeIsMovVtDispatchD = True
+    Exit Function
+no:
+    NativeIsMovVtDispatchD = False
+End Function
+
+Private Function NativeIsMovLocalFromEax(inst As CInstruction, ByRef disp As Long) As Boolean
+    'Match `mov [ebp + disp], eax` (89 /0, base ebp, no index).  Sets disp (signed).
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long, isAbs As Boolean
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If NativeHas66(dump) Then GoTo no
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op <> &H89 Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    If ((modrm \ 8) And 7) <> 0 Then GoTo no       'reg field = 0 = eax (the source)
+    If ((modrm \ &H40) And 3) = 3 Then GoTo no     'must be a memory destination
+    If NativeMemBase(dump) <> 5 Then GoTo no       'base ebp
+    If NativeMemIndex(dump) >= 0 Then GoTo no      'no index
+    If Not NativeDecodeDisp(dump, disp, isAbs) Then GoTo no
+    If isAbs Then GoTo no
+    NativeIsMovLocalFromEax = True
+    Exit Function
+no:
+    NativeIsMovLocalFromEax = False
+End Function
+
+Private Function NativeIsAnyCall(inst As CInstruction) As Boolean
+    'True for a CALL (E8 rel32, or FF /2 indirect) - used to detect eax being clobbered.
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op = &HE8 Then NativeIsAnyCall = True: Exit Function
+    If op = &HFF Then
+        modrm = NativeDumpByte(dump, i + 1)
+        If ((modrm \ 8) And 7) = 2 Then NativeIsAnyCall = True
+    End If
+no:
+End Function
+
+Private Function NativeIsHelperCall(inst As CInstruction, ByVal want As String, arr() As CInstruction, ByVal idx As Long) As Boolean
+    'True when inst is a CALL whose target resolves to a runtime helper whose name
+    'contains `want`.  Handles a direct `call [iat]` (FF /2 mod=0 rm=5) and a cached
+    '`call reg` (FF /2 mod=3) by back-scanning for the reg's `mov reg,[iat]` load.
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long, md As Long, rm As Long, iat As Long
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op <> &HFF Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    If ((modrm \ 8) And 7) <> 2 Then GoTo no       'CALL r/m (/2)
+    md = (modrm \ &H40) And 3: rm = modrm And 7
+    If md = 0 And rm = 5 Then
+        iat = NativeDumpInt32(dump, i + 2)         'call [disp32] = call [iat]
+    ElseIf md = 3 Then
+        iat = NativeRegIatLoad(arr, idx, rm)       'call reg -> its cached IAT load
+    Else
+        GoTo no
+    End If
+    If iat = 0 Then GoTo no
+    NativeIsHelperCall = (InStr(dsmNative.GetApiByIatVa(iat), want) > 0)
+    Exit Function
+no:
+    NativeIsHelperCall = False
+End Function
+
+Private Function NativeRegIatLoad(arr() As CInstruction, ByVal idx As Long, ByVal reg As Long) As Long
+    'Back-scan from idx for `mov reg,[iat]` (8B /r, mod=0 rm=5 disp32) that cached an
+    'import pointer into reg; return the IAT VA.  Stops if reg is overwritten first.
+    Dim j As Long, lo As Long, dump As String, n As Long, i As Long, op As Long, modrm As Long
+    lo = idx - 40: If lo < 0 Then lo = 0
+    For j = idx - 1 To lo Step -1
+        dump = Replace(arr(j).dump, " ", "")
+        n = Len(dump) \ 2
+        i = NativeOpStart(dump, n)
+        op = NativeDumpByte(dump, i)
+        If op = &H8B Then
+            modrm = NativeDumpByte(dump, i + 1)
+            If ((modrm \ 8) And 7) = reg And (modrm And 7) = 5 And ((modrm \ &H40) And 3) = 0 Then
+                NativeRegIatLoad = NativeDumpInt32(dump, i + 2)
+                Exit Function
+            End If
+        End If
+        If NativeInstDestReg(arr(j)) = reg Then Exit Function   'reg clobbered before its IAT load
+    Next j
+End Function
+
+Private Function NativeIsMovR16FromAx(inst As CInstruction, ByRef r16 As Long) As Boolean
+    'Match `mov r16, ax` (0x66 + 0x8B, mod=3, rm=0=ax) - the BOOL result copied from
+    'the accumulator into a 16-bit register before the test.
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If Not NativeHas66(dump) Then GoTo no
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op <> &H8B Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    If ((modrm \ &H40) And 3) <> 3 Then GoTo no    'mod=3 reg-reg
+    If (modrm And 7) <> 0 Then GoTo no             'rm = ax (source)
+    r16 = (modrm \ 8) And 7
+    NativeIsMovR16FromAx = True
+    Exit Function
+no:
+    NativeIsMovR16FromAx = False
+End Function
+
+Private Function NativeIsTestR16(inst As CInstruction, ByVal r16 As Long) As Boolean
+    'Match `test r16, r16` (0x66 + 0x85, mod=3, reg=rm=r16).
+    Dim dump As String, n As Long, i As Long, op As Long, modrm As Long
+    On Error GoTo no
+    dump = Replace(inst.dump, " ", "")
+    n = Len(dump) \ 2
+    If Not NativeHas66(dump) Then GoTo no
+    i = NativeOpStart(dump, n)
+    op = NativeDumpByte(dump, i)
+    If op <> &H85 Then GoTo no
+    modrm = NativeDumpByte(dump, i + 1)
+    If ((modrm \ &H40) And 3) <> 3 Then GoTo no
+    If ((modrm \ 8) And 7) = r16 And (modrm And 7) = r16 Then NativeIsTestR16 = True
+    Exit Function
+no:
+    NativeIsTestR16 = False
+End Function
+
 Private Function NativeIsMovR16FromMem(inst As CInstruction, ByRef destReg As Long, ByRef baseReg As Long) As Boolean
     'Match `mov r16, word[base]` (0x66 prefix + 0x8B + memory operand); set destReg
     '(the loaded 16-bit register) and baseReg (the memory base register).
@@ -3531,6 +3801,15 @@ Private Function NativeProcessInst(inst As CInstruction) As String
         agRec = NativeColGet(NVAbsGlobalCmp, "T" & inst.va)
         If Len(agRec) > 0 Then
             NVCmpL = agRec: NVCmpR = "0": NVCmpIsTest = True: NVCmpIsBool = False: NVCmpSet = True
+            Exit Function
+        End If
+        'A control's default property read AS a condition (`If optClosed Then`):
+        'the pre-pass bound `CBool(Form.control)` at this `test r16,r16` VA - render it
+        'directly (the 16-bit register + Variant coercion defeat the generic decode).
+        Dim bvRec As String
+        bvRec = NativeColGet(NVBoolVarCtl, "T" & inst.va)
+        If Len(bvRec) > 0 Then
+            NVCmpL = bvRec: NVCmpR = "0": NVCmpIsTest = True: NVCmpIsBool = False: NVCmpSet = True
             Exit Function
         End If
         NativeDecodeCompare inst, mn
