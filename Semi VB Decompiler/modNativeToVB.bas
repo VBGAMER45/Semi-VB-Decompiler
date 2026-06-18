@@ -3926,6 +3926,35 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         End If
                     End If
                 End If
+                'A built-in Form method called on ANOTHER form's predeclared instance
+                '(`frmAbout.Show`): the `this` is a form-instance global, not Me, so the
+                'Me path above (correctly) skipped it.  Resolve the form name from the
+                'global (gFormInstGlobal) and render `<form>.<method>` - a strong, specific
+                'signal (the global maps to a real form), so it never mis-fires.
+                If ocb >= 0 And ocb <= 7 And Len(fmeth) = 0 Then
+                    Dim fmgThis As String, fmgVa As Long, fmgForm As String
+                    If NVPushTop >= 1 Then fmgThis = NVPushImm(NVPushTop - 1)
+                    If Left$(fmgThis, 7) = "global_" Then
+                        fmgVa = NativeGlobalTokVa(fmgThis)
+                        If fmgVa <> 0 Then fmgForm = FormNameByInstGlobal(fmgVa)
+                    End If
+                    If Len(fmgForm) > 0 Then
+                        fmeth = NativeFormMethodByOffset(disp)
+                        If Len(fmeth) > 0 Then
+                            Dim fmgArg As String
+                            If NativeFormMethodHasArg(disp) And NVPushTop >= 2 Then fmgArg = NVPushImm(NVPushTop - 2)
+                            NVPushTop = 0
+                            NVReg(0) = "": NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                            NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                            If Len(fmgArg) > 0 Then
+                                NativeProcessInst = ind & fmgForm & "." & fmeth & " " & fmgArg & vbCrLf
+                            Else
+                                NativeProcessInst = ind & fmgForm & "." & fmeth & vbCrLf
+                            End If
+                            Exit Function
+                        End If
+                    End If
+                End If
                 'A form calling its own method: call [vtable + 0x6F8 + slot*4].
                 'Checked first: requiring a real gFormVtable slot is a stronger
                 'signal than the NVBase control heuristic (which the same form-method
