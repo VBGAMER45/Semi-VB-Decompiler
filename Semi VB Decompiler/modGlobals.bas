@@ -693,6 +693,14 @@ Global gWin32ConstEmitted As Boolean
 Global gUDTDesc As Collection
 Global gUDTEmitted As Boolean
 
+'Fixed-length string FIELDS recovered for descriptor-less (byte-buffer) UDTs by
+'scanning __vbaStrFixstr/__vbaLsetFixstr call sites: each carries the field offset
+'(in the lea) and the fixed length (the pushed count), so a byte-buffer UDT can show
+'`field_<off> As String * <len>` instead of opaque bytes.  Keyed by array identity
+'("G"&globalVA or "F"&MeFieldOffset, matching NativeRegisterUDTBySize); item = a
+'";"-delimited "off:len" list.
+Global gUDTStrFields As Collection
+
 
 'For Controls
 Public Type typeStandardControlSize

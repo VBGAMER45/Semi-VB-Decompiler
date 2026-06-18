@@ -7853,26 +7853,95 @@ Public Sub NativeRegisterUDTBySize(ByVal sizeStr As String, ByVal arrayPtr As St
     'incl. Variant).  Named/keyed by the array variable's ADDRESS (so it reads like the
     'descriptor UDTs UDT_<va> and dedups per array), falling back to the ReDim call site
     'when the array is a form field (no module-level VA).  The size is kept in the name.
-    Dim n As Long, key As String, typeName As String, body As String, tmp As String, addr As String
+    Dim n As Long, key As String, typeName As String, body As String, tmp As String
+    Dim gva As String, foff As String, arrId As String, addrTok As String
     If Not IsNumeric(Trim$(sizeStr)) Then Exit Sub
     n = CLng(Trim$(sizeStr))
     If n <= 16 Or n > 65535 Then Exit Sub
     If gUDTDesc Is Nothing Then Set gUDTDesc = New Collection
-    addr = NativeExtractGlobalHex(arrayPtr)
-    If Len(addr) = 0 Then addr = Right$("00000000" & Hex$(callVa), 8)
-    key = "U" & addr
+    'Array identity (matches NativeDetectUDTStringFields): "G"&globalVA for a module
+    'global, "F"&MeFieldOffset for a form field.  The display address in the name is the
+    'global VA, else the ReDim call site (a real code address).
+    gva = NativeExtractGlobalHex(arrayPtr)
+    If Len(gva) > 0 Then
+        arrId = "G" & gva: addrTok = gva
+    Else
+        foff = NativeExtractFieldOffset(arrayPtr)
+        addrTok = Right$("00000000" & Hex$(callVa), 8)
+        If Len(foff) > 0 Then arrId = "F" & foff Else arrId = "C" & Hex$(callVa)
+    End If
+    key = "U" & arrId
     On Error Resume Next
     tmp = "": tmp = gUDTDesc.Item(key)
     On Error GoTo 0
     If Len(tmp) > 0 Then Exit Sub
-    typeName = "UDT_" & addr & "_" & n & "Bytes"
+    typeName = "UDT_" & addrTok & "_" & n & "Bytes"
     body = "Type " & typeName & vbCrLf & _
-           "    bStruc(1 To " & n & ") As Byte" & vbCrLf & _
+           NativeRenderUDTBody(n, NativeColGet(gUDTStrFields, arrId)) & _
            "End Type" & vbCrLf & vbCrLf
     On Error Resume Next
     gUDTDesc.Add body, key
     On Error GoTo 0
 End Sub
+
+Private Function NativeRenderUDTBody(ByVal n As Long, ByVal fieldsStr As String) As String
+    'Render a byte-buffer UDT body, placing each recovered fixed-string field
+    '(`field_<off> As String * <len>`) at its offset and byte-padding the gaps.  Gaps are
+    'computed from the NEXT detected offset, and a string field advances by 2*len (its
+    'in-memory Unicode size), so the total stays exactly n even when a field is really an
+    'array (its remainder is absorbed into the following byte gap).  Falls back to a single
+    'bStruc(1 To n) when there are no string fields or the layout is inconsistent.
+    Dim parts() As String, offs() As Long, lens() As Long, c As Long, k As Long, m As Long, cp As Long
+    Dim res As String, pos As Long
+    If Len(fieldsStr) = 0 Then NativeRenderUDTBody = "    bStruc(1 To " & n & ") As Byte" & vbCrLf: Exit Function
+    parts = Split(fieldsStr, ";")
+    ReDim offs(UBound(parts)): ReDim lens(UBound(parts)): c = 0
+    For k = 0 To UBound(parts)
+        cp = InStr(parts(k), ":")
+        If cp > 0 Then offs(c) = CLng(Left$(parts(k), cp - 1)): lens(c) = CLng(Mid$(parts(k), cp + 1)): c = c + 1
+    Next
+    If c = 0 Then NativeRenderUDTBody = "    bStruc(1 To " & n & ") As Byte" & vbCrLf: Exit Function
+    For k = 0 To c - 2
+        For m = 0 To c - 2 - k
+            If offs(m) > offs(m + 1) Then
+                Dim t1 As Long
+                t1 = offs(m): offs(m) = offs(m + 1): offs(m + 1) = t1
+                t1 = lens(m): lens(m) = lens(m + 1): lens(m + 1) = t1
+            End If
+        Next
+    Next
+    pos = 0
+    For k = 0 To c - 1
+        If offs(k) < pos Then GoTo inconsistent
+        If offs(k) > pos Then
+            res = res & "    field_" & Hex$(pos) & "(1 To " & (offs(k) - pos) & ") As Byte" & vbCrLf
+            pos = offs(k)
+        End If
+        res = res & "    field_" & Hex$(pos) & " As String * " & lens(k) & vbCrLf
+        pos = pos + lens(k) * 2
+        If pos > n Then GoTo inconsistent
+    Next
+    If pos < n Then res = res & "    field_" & Hex$(pos) & "(1 To " & (n - pos) & ") As Byte" & vbCrLf
+    NativeRenderUDTBody = res
+    Exit Function
+inconsistent:
+    NativeRenderUDTBody = "    bStruc(1 To " & n & ") As Byte" & vbCrLf
+End Function
+
+Private Function NativeExtractFieldOffset(ByVal s As String) As String
+    'A form-field array's __vbaRedim arrayPtr renders "(arg_8 + NN)" (NN decimal = the Me
+    'field offset); return NN as hex (matching the [esi+disp] decode), else "".
+    Dim p As Long, i As Long, ch As String, num As String
+    p = InStr(s, "arg_8 + ")
+    If p = 0 Then Exit Function
+    i = p + 8
+    Do While i <= Len(s)
+        ch = Mid$(s, i, 1)
+        If ch >= "0" And ch <= "9" Then num = num & ch Else Exit Do
+        i = i + 1
+    Loop
+    If Len(num) > 0 Then NativeExtractFieldOffset = Hex$(CLng(num))
+End Function
 
 Private Function NativeExtractGlobalHex(ByVal s As String) As String
     'Extract the 8-hex address from a `global_XXXXXXXX` token (the array variable's VA),
@@ -7985,6 +8054,112 @@ Private Function NativeGetByte(ByVal fp As Integer, ByVal rva As Long) As Long
     Dim b As Byte
     Get #fp, rva + 1, b
     NativeGetByte = b
+End Function
+
+Public Sub NativeDetectUDTStringFields()
+    'Recover fixed-length string FIELDS of descriptor-less UDTs by scanning the code for
+    '__vbaStrFixstr / __vbaLsetFixstr calls.  Each compiles to a fixed idiom:
+    '   mov  R1, [arrayBase]        ; the UDT array (Me+fieldOff, or a global)
+    '   mov  R2, [R1 + 0x0C]        ; SAFEARRAY pvData (struct offset 0x0C)
+    '   lea  R3, [R2 + idx + disp]  ; field address - disp = the field's byte offset
+    '   push <len>                  ; the fixed-string length -> As String * len
+    '   call __vbaStrFixstr/Lset
+    'so the field offset + length + owning array are all recoverable.  Populates
+    'gUDTStrFields (arrayId -> "off:len;...") keyed the same way NativeRegisterUDTBySize
+    'keys its byte-buffer UDTs, so the typed fields drop into the right Type at emit.
+    Dim fp As Integer, sz As Long, i As Long, tgt As Long, nm As String
+    Dim buf() As Byte, cache As Collection
+    Set gUDTStrFields = New Collection
+    Set cache = New Collection
+    'This pre-pass runs before the first proc decompile lazily creates dsmNative.
+    If dsmNative Is Nothing Then Set dsmNative = New CDisassembler
+    On Error GoTo done
+    fp = FreeFile
+    Open SFilePath For Binary Access Read As #fp
+    sz = LOF(fp)
+    If sz < &H1008 Then Close fp: Exit Sub
+    ReDim buf(sz - 1)
+    Get #fp, 1, buf
+    Close fp
+    For i = &H1000 To sz - 8
+        If buf(i) = &HFF And buf(i + 1) = &H15 Then
+            tgt = NativeBufDword(buf, i + 2)
+            Dim ck As String, isFix As Long
+            ck = "T" & tgt: isFix = -1
+            On Error Resume Next
+            isFix = cache.Item(ck)
+            On Error GoTo done
+            If isFix = -1 Then
+                nm = ""
+                If tgt >= OptHeader.ImageBase Then nm = dsmNative.GetApiByIatVa(tgt)
+                isFix = IIf(InStr(nm, "Fixstr") > 0 Or InStr(nm, "FixStr") > 0, 1, 0)
+                cache.Add isFix, ck
+            End If
+            If isFix = 1 Then NativeDecodeFixstrCall buf, i
+        End If
+    Next
+    Exit Sub
+done:
+    On Error Resume Next
+    Close fp
+End Sub
+
+Private Sub NativeDecodeFixstrCall(ByRef buf() As Byte, ByVal callOff As Long)
+    'Back-scan the <=32 bytes before a Fixstr call for its length (push), field offset
+    '(lea disp) and owning array (the mov from [Me+off] / [global]).  All three required.
+    Dim j As Long, ln As Long, off As Long, arrId As String
+    Dim gotLn As Boolean, gotOff As Boolean, gotArr As Boolean, md As Long, pv As Long
+    ln = -1: off = -1: arrId = ""
+    For j = callOff - 1 To callOff - 32 Step -1
+        If j < 1 Then Exit For
+        If Not gotLn And buf(j) = &H6A Then ln = buf(j + 1): gotLn = True
+        If Not gotLn And buf(j) = &H68 Then
+            pv = NativeBufDword(buf, j + 1)
+            If pv > 0 And pv < 32768 Then ln = pv: gotLn = True   'a real length (not a string-literal ptr)
+        End If
+        If Not gotOff And buf(j) = &H8D Then                      'lea reg,[base+idx+disp]
+            md = buf(j + 1)
+            If (md And &H7) = 4 Then                              'SIB form
+                If (md And &HC0) = &H40 Then off = buf(j + 3): gotOff = True
+                If (md And &HC0) = &H80 Then off = NativeBufDword(buf, j + 3): gotOff = True
+            End If
+        End If
+        If Not gotArr And buf(j) = &H8B Then                      'mov reg,[Me+off] / [global]
+            md = buf(j + 1)
+            If (md And &HC7) = &H46 Then arrId = "F" & Hex$(buf(j + 2)): gotArr = True            'mod01 rm110(esi) disp8
+            If (md And &HC7) = &H47 Then arrId = "F" & Hex$(buf(j + 2)): gotArr = True            'mod01 rm111(edi) disp8
+            If (md And &HC7) = &H86 Then arrId = "F" & Hex$(NativeBufDword(buf, j + 2)): gotArr = True   'mod10 rm110 disp32
+            If (md And &HC7) = &H5 Then arrId = "G" & Right$("00000000" & Hex$(NativeBufDword(buf, j + 2)), 8): gotArr = True  'mod00 rm101 [abs]
+        End If
+        If Not gotArr And buf(j) = &HA1 Then                      'mov eax,[moffs32] (global)
+            arrId = "G" & Right$("00000000" & Hex$(NativeBufDword(buf, j + 1)), 8): gotArr = True
+        End If
+    Next
+    If gotLn And gotOff And gotArr And ln > 0 And ln < 32768 And off >= 0 And off < 65536 Then
+        NativeAddUDTStrField arrId, off, ln
+    End If
+End Sub
+
+Private Sub NativeAddUDTStrField(ByVal arrId As String, ByVal off As Long, ByVal ln As Long)
+    'Append "off:len" to gUDTStrFields(arrId), skipping a duplicate offset.
+    Dim cur As String, entry As String
+    If gUDTStrFields Is Nothing Then Set gUDTStrFields = New Collection
+    cur = NativeColGet(gUDTStrFields, arrId)
+    entry = off & ":" & ln
+    If InStr(";" & cur & ";", ";" & off & ":") > 0 Then Exit Sub      'offset already recorded
+    If Len(cur) > 0 Then cur = cur & ";"
+    NativeColPut gUDTStrFields, arrId, cur & entry
+End Sub
+
+Private Function NativeBufDword(ByRef buf() As Byte, ByVal i As Long) As Long
+    'Little-endian DWORD from a byte buffer, returned as a (possibly negative) Long.
+    'Computed in Double then wrapped to signed Long so a top byte >= 0x80 (which would
+    'overflow the Long multiply) does not raise - the whole-file scan hits such bytes.
+    If i < 0 Or i + 3 > UBound(buf) Then Exit Function
+    Dim v As Double
+    v = buf(i) + buf(i + 1) * 256# + buf(i + 2) * 65536# + buf(i + 3) * 16777216#
+    If v >= 2147483648# Then v = v - 4294967296#
+    NativeBufDword = CLng(v)
 End Function
 
 Private Function NativeStrLitArgs() As String
