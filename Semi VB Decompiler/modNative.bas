@@ -869,6 +869,7 @@ Public Sub BuildNativeCodeCache()
     Set gNativeDismCache = New Collection
     Set gUsedWin32Const = New Collection            'reset the recognised-constant set for this run
     Set gUDTDesc = New Collection                   'reset recovered UDT record descriptors (harvested during this decompile pass)
+    Set gNativeGlobalClass = New Collection         'reset the recovered global->class map for this run
     modNativeToVB.NativeDetectUDTStringFields        'scan __vbaStrFixstr/Lset sites -> fixed-string fields of descriptor-less UDTs (must run before the per-proc __vbaRedim harvest renders the Type)
     Dim objDism() As String
     Dim ub As Long

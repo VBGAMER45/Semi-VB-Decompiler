@@ -3740,7 +3740,19 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                                 'a statement keeps eax (its call surfaces in the following
                                 'HRESULT check, e.g. If field_34.LoadBitmap(..) = 0).
                                 If Len(umKind) = 0 Then NativeTryMethodKind umAddr, umKind
-                                If InStr(umKind, "Get") > 0 Then NVReg(0) = ""
+                                If InStr(umKind, "Get") > 0 Then
+                                    NVReg(0) = ""
+                                Else
+                                    'A Function called as a statement: keep eax for a
+                                    'following HRESULT check (`If obj.Method() = 0`), but
+                                    'ALSO arm a deferred Call so it EMITS `Call obj.Method(args)`
+                                    'when the result is NOT consumed - otherwise the resolved
+                                    'call silently dropped (e.g. global_0055D5A0.Send_Data(..)
+                                    'before a Me.Hide).  The main loop clears the pending call
+                                    'if eax IS consumed, so the HRESULT-check inline (clsBitmap
+                                    'If field_34.LoadBitmap(..)=0) is unchanged.
+                                    NVPendingCall = "Call " & umVal
+                                End If
                                 Exit Function           'value flows to the consumer
                             End If
                             NVPushTop = 0
@@ -6421,20 +6433,19 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     'at its __vbaNew auto-instantiation) tags the register as that
                     'object pointer, so a following `mov vt,[obj]; call [vt+off]`
                     'resolves to obj.Method.
+                    'Type the register holding this module-global so a following
+                    '`mov vt,[obj]; call [vt+off]` resolves to obj.Method.  Priority:
+                    '  1. FormNameByInstGlobal - a REGISTERED form-instance global; definitive
+                    '     (and overrides a per-proc NVObjClass a coincidental same-address push
+                    '     may have mis-set, now that BSS globals are recognised).
+                    '  2. NVObjClass - a user-class instance typed at its __vbaNew in THIS proc.
+                    '  3. gNativeGlobalClass - a `Public X As <Class>` proven by a resolved call
+                    '     elsewhere (cross-proc), e.g. global_0055D5A0 As frmClient.
                     Dim gcls As String
-                    gcls = NativeColGet(NVObjClass, "G" & disp)
-                    If Len(gcls) > 0 Then
-                        NVRegObjType(reg) = gcls: NVRegObjInst(reg) = NVReg(reg)
-                    Else
-                        'A FORM's predeclared-instance global (e.g. `frmClient`, a module
-                        'global VB auto-creates): type the register as that form so a
-                        'following `mov vt,[obj]; call [vt+off]` resolves to the form's
-                        'public method (frmClient.UnkVCall_0768h -> frmClient.<method>),
-                        'via the form vtable map populated from the FuncDesc offsets.
-                        Dim gfrm As String
-                        gfrm = FormNameByInstGlobal(disp)
-                        If Len(gfrm) > 0 Then NVRegObjType(reg) = gfrm: NVRegObjInst(reg) = gfrm
-                    End If
+                    gcls = FormNameByInstGlobal(disp)
+                    If Len(gcls) = 0 Then gcls = NativeColGet(NVObjClass, "G" & disp)
+                    If Len(gcls) = 0 And Not gNativeGlobalClass Is Nothing Then gcls = NativeColGet(gNativeGlobalClass, "g" & disp)
+                    If Len(gcls) > 0 Then NVRegObjType(reg) = gcls: NVRegObjInst(reg) = NVReg(reg)
                 ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 Then
                     NVRegObjVt(reg) = NVRegObjType(bse)
                     NVRegObjVtGuid(reg) = NVRegObjGuid(bse)   'deref of a control pointer -> its vtable carries the GUID
@@ -8033,12 +8044,19 @@ Private Function NativeIsGlobalAddr(ByVal va As Long) As Boolean
     'as global_XXXXXXXX rather than a bare number.  Section fields are unsigned
     'DWORDs held in Doubles; test the IMAGE_SCN_MEM_EXECUTE bit (0x20000000) by
     'division to avoid a Long overflow on data-section characteristics (0xC0000040).
-    Dim rva As Long, k As Long
+    Dim rva As Long, k As Long, secEnd As Long
     If va < OptHeader.ImageBase Then Exit Function
     rva = va - OptHeader.ImageBase
     For k = 0 To MAXSECTIONS
         If SecHeader(k).SizeRawData > 0 And SecHeader(k).Address > 0 Then
-            If rva >= SecHeader(k).Address And rva < SecHeader(k).Address + SecHeader(k).SizeRawData Then
+            'Bound by the section's VIRTUAL size (Misc), not SizeRawData: VB6 module
+            'globals/form instances live in BSS - the uninitialised tail of .data that
+            'is allocated in memory (VirtualSize) but NOT stored on disk (SizeRawData),
+            'so a SizeRawData bound wrongly rejects them (e.g. global_0055D5A0), leaving
+            'their method calls untyped (global.UnkVCall_<off> instead of global.Member).
+            secEnd = SecHeader(k).SizeRawData
+            If SecHeader(k).Misc > secEnd Then secEnd = SecHeader(k).Misc
+            If rva >= SecHeader(k).Address And rva < SecHeader(k).Address + secEnd Then
                 NativeIsGlobalAddr = ((Int(SecHeader(k).Properties / &H20000000) Mod 2) = 0)
                 Exit Function
             End If
