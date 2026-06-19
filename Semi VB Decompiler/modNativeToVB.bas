@@ -198,6 +198,7 @@ Private NVRegObjInst(7) As String  'receiver expression for a register holding a
 Private NVRegFieldCls(7) As String 'class of the As-New object field a register's ADDRESS points to (from `lea reg,[Me+off]`); the next `mov obj,[reg]` deref tags obj as that class
 Private NVRegFieldRecv(7) As String 'receiver expr (field_<off>) for that field, carried to the dereffed object so its method calls render field_<off>.Method
 Private NVObjClass As Collection   'key "G"&globalVA -> user class name of the object instance stored at that global (typed at the __vbaNew auto-instantiation)
+Private NVObjClassIndirect As Collection 'key "I"&globalName -> class of a PREDECLARED-instance As-New whose pointer-global is one indirection deeper (the global holds &slot, object at [[global]]); the global load tags the reg as a field-address (NVRegFieldCls) whose deref is the object
 Private NVLocalObjType As Collection 'key "D"&localDisp -> user class created INTO that local by __vbaNew2(ObjInfo, &local); so var_X.Member resolves via the class vtable map
 Private NVNewEmitted As Collection 'per-proc: local disps that already emitted `Set var_X = New <class>` - suppress the repeated auto-instantiation (As New) guards before each use
 Private NVPropDir As Collection      'key "P"&callVA -> "get"/"put": data-flow direction of a property accessor call (its by-ref local read AFTER = get, else put), since VB6 FuncDesc flags Get and Let identically
@@ -291,6 +292,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Dim r As Long
     For r = 0 To 7: NVReg(r) = "": NVR16Val(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegAddrDisp(r) = 0: NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": NVRegObjInst(r) = "": NVRegFieldCls(r) = "": NVRegFieldRecv(r) = "": Next
     Set NVObjClass = New Collection
+    Set NVObjClassIndirect = New Collection
     For r = 0 To 7: NVRecentPush(r) = 0: Next
     NVRecentTop = 0
     Set NVLocal = New Collection
@@ -492,6 +494,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'Decode late-bound dispatch calls (__vbaLateIdCall): collect each call's DISPID
     'so it can resolve to obj.Member via the control's OCX typelib at render time.
     NativeDetectLateCalls col
+
+    'Pre-record INDIRECT predeclared-instance As-New globals (`mov eax,[ptrGlobal]; push
+    'eax; push ObjInfo; call __vbaNew2`) so the narrowly-gated 0xA1 handler types their
+    'deref (clsBitmap.LoadBitmap via a pointer-to-pointer global).
+    NativeDetectIndirectNew col
 
     'Reconstruct control-array element accesses (lblSkillName(i)): for each element
     'accessor `call [arrayVt + 0x40]` whose receiver back-traces to an is-array form
@@ -2945,6 +2952,63 @@ Private Sub NativeDetectLateCalls(col As Collection)
         Next jb
 nextk:
     Next k
+done:
+End Sub
+
+Private Sub NativeDetectIndirectNew(col As Collection)
+    'A PREDECLARED-instance class reached INDIRECTLY: its instance pointer lives one level
+    'deeper than a normal As-New global (a pointer-to-pointer-to-object), built by
+    '    mov eax,[ptrGlobal]   (0xA1)      ; eax = &instance-slot
+    '    cmp [eax],0 ; jne already         ; As-New guard
+    '    push eax ; push <ObjInfo> ; call __vbaNew2
+    'The render-time value model can't recover ptrGlobal from the 0xA1 load (eax-only short
+    'form) in order, so pre-record ptrGlobal -> class here.  The 0xA1 handler (narrowly gated
+    'to these globals) then tags eax as a field-address whose deref is the object, so a later
+    '`mov obj,[eax]; mov vt,[obj]; call [vt+off]` resolves (clsBitmap.LoadBitmap).
+    On Error GoTo done
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count: If n < 4 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1): k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    Dim i As Long, j As Long
+    For i = 3 To n - 1
+        If (arr(i).cmdType And C_TYPEMASK) <> C_CAL Then GoTo nexti
+        If InStr(NativeResolveCallApi(arr, i), "__vbaNew2") = 0 Then GoTo nexti
+        'Within the ~8 instructions before the call: the ObjInfo push (resolves to a class),
+        'a `push eax` (@dest), and the `mov eax,[gA]` (0xA1) that loaded the pointer-global.
+        Dim oiVA As Long, gA As Long, sawPushEax As Boolean
+        oiVA = 0: gA = 0: sawPushEax = False
+        For j = i - 1 To i - 8 Step -1
+            If j < 0 Then Exit For
+            Dim dj As String, sj As Long, opj As Long
+            dj = Replace(arr(j).dump, " ", ""): sj = NativeOpStart(dj, Len(dj) \ 2)
+            If Len(dj) \ 2 <= sj Then GoTo nextj
+            opj = NativeDumpByte(dj, sj)
+            If opj = &H68 And Len(dj) \ 2 >= sj + 5 Then
+                Dim immj As Long: immj = NativeDumpInt32(dj, sj + 1)
+                If oiVA = 0 And Len(NativeClassFromObjInfo(immj)) > 0 Then oiVA = immj
+            ElseIf opj = &H50 Then
+                sawPushEax = True
+            ElseIf opj = &HA1 And Len(dj) \ 2 >= sj + 5 Then
+                gA = NativeDumpInt32(dj, sj + 1)
+            End If
+nextj:
+        Next j
+        If oiVA <> 0 And sawPushEax And gA <> 0 And NativeIsGlobalAddr(gA) Then
+            'Gate to user CLASS instances (clsBitmap) only - NOT forms.  A form instance
+            'global (frmServerIP) reached this way feeds _Global.Load/Unload, where the arg
+            'should render as the form name; tagging it instead changes the arg to the bare
+            'global and perturbs unrelated form-receiver renderings.  Classes are the safe,
+            'targeted case (the predeclared clsBitmap.LoadBitmap this task is about).
+            Dim icn As String
+            icn = NativeClassFromObjInfo(oiVA)
+            If Len(icn) > 0 And NativeOwnerIsClass(icn) Then
+                NativeColPut NVObjClassIndirect, "I" & NativeGlobalName(gA), icn
+            End If
+        End If
+nexti:
+    Next i
 done:
 End Sub
 
@@ -6546,6 +6610,10 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 Next
                 If ndDisp < 0 Then NativeColPut NVLocalObjType, "D" & ndDisp, ncls
             End If
+            'INDIRECT predeclared-instance As-New (`mov eax,[ptrGlobal]; push eax; push
+            'ObjInfo; call __vbaNew2`) is pre-recorded into NVObjClassIndirect by the
+            'NativeDetectIndirectNew pre-pass (the @dest global arrives via a 0xA1 load that
+            'the render-time value model can't see in order from here).
             NVPushTop = 0
             If Len(ncls) > 0 Then
                 If ngObj <> 0 Then NativeColPut NVObjClass, "G" & ngObj, ncls
@@ -8378,7 +8446,17 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     gcls = FormNameByInstGlobal(disp)
                     If Len(gcls) = 0 Then gcls = NativeColGet(NVObjClass, "G" & disp)
                     If Len(gcls) = 0 And Not gNativeGlobalClass Is Nothing Then gcls = NativeColGet(gNativeGlobalClass, "g" & disp)
-                    If Len(gcls) > 0 Then NVRegObjType(reg) = gcls: NVRegObjInst(reg) = NVReg(reg)
+                    If Len(gcls) > 0 Then
+                        NVRegObjType(reg) = gcls: NVRegObjInst(reg) = NVReg(reg)
+                    Else
+                        'A PREDECLARED-instance pointer-global (NVObjClassIndirect): this load
+                        'gives the &slot, and the object is one deref deeper - tag the register
+                        'as a field-ADDRESS (like an As-New field &Me.field) so the following
+                        '`mov obj,[reg]` deref types obj as the class (clsBitmap.LoadBitmap).
+                        Dim icls As String
+                        icls = NativeColGet(NVObjClassIndirect, "I" & NVReg(reg))
+                        If Len(icls) > 0 Then NVRegFieldCls(reg) = icls: NVRegFieldRecv(reg) = icls
+                    End If
                 ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 Then
                     NVRegObjVt(reg) = hadObjType              'deref of a control pointer -> its vtable
                     NVRegObjVtGuid(reg) = hadObjGuid          'the control GUID rides on the vtable (resolves the method)
@@ -8490,6 +8568,25 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                             NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = ""
                         End If
                     End If
+                End If
+            End If
+        Case &HA1                       'mov eax, moffs32 (short form of mov eax,[abs])
+            'NativeTrackReg otherwise ignores 0xA1.  Handle ONLY a global pre-identified as
+            'an INDIRECT predeclared-instance pointer (NVObjClassIndirect, from the
+            'NativeDetectIndirectNew pre-pass): tag eax as a field-ADDRESS whose deref is the
+            'object, so `mov eax,[ptrGlobal]; mov obj,[eax]` types obj (clsBitmap.LoadBitmap).
+            'NARROWLY gated - a general 0xA1=global tracking re-introduces the modPlayer SIB
+            'pointer-detection regression noted in NEXT_TASKS (a separate, larger effort).
+            Dim a1disp As Long, a1nm As String, a1icls As String
+            a1disp = NativeDumpInt32(dump, i + 1)
+            If NativeIsGlobalAddr(a1disp) Then
+                a1nm = NativeGlobalName(a1disp)
+                a1icls = NativeColGet(NVObjClassIndirect, "I" & a1nm)
+                If Len(a1icls) > 0 Then
+                    NVReg(0) = a1nm
+                    NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                    NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = "": NVRegObjInst(0) = ""
+                    NVRegFieldCls(0) = a1icls: NVRegFieldRecv(0) = a1icls
                 End If
             End If
         Case &H8D                       'lea r32, [mem]  (address-of / ptr arithmetic)
