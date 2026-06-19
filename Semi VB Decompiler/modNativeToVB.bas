@@ -10109,6 +10109,12 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
     Dim fpu(15) As String, ftop As Long, fpPending As Boolean
     Dim slotExpr As Collection: Set slotExpr = New Collection
     Dim regF As Long, rir As Boolean, rmR As Long, rmD As Long, rmDr As Boolean, fop As String
+    'Intrinsic-call support: lastStackArg is the value an immediately preceding
+    '`fstp [esp]` parked for the next stack-arg helper (chained calls like
+    'Sin(DegToRad(x))); pushCnt counts pushed dwords since the last call so an E8
+    'user call's arity is known (only a unary 1-Double call is modelled).
+    Dim lastStackArg As String, pushCnt As Long, mnm As String, vbOp As String, mcat As Long
+    Dim ffReg As Long, callA As String, utgt As Long, modrm As Long
     For Each inst In col
         dump = UCase$(Replace(inst.dump, " ", ""))
         n = Len(dump) \ 2
@@ -10151,6 +10157,9 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
                 ElseIf regF = 3 Then                  'fstp m64 -> pop ST(0) into the scratch slot
                     If ftop = 0 Then GoTo bail
                     ftop = ftop - 1: NativeColPut slotExpr, "S" & rmD, fpu(ftop)
+                    'A pop to [esp] (disp 0) parks the value as the next stack-arg
+                    'helper's operand - the chained `fstp [esp]; call Sin` idiom.
+                    If rmD = 0 Then lastStackArg = fpu(ftop)
                 Else
                     GoTo bail
                 End If
@@ -10180,6 +10189,57 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
                 If NativeDumpByte(dump, i + 1) = &HE0 Then fpPending = True Else GoTo bail
             Case &HA8                                 'test al, imm8 - VB6's post-op FP exception check
                 If fpPending Then fpPending = False Else GoTo bail
+            Case &H50 To &H57                         'push reg - argument marshalling (count the dwords)
+                pushCnt = pushCnt + 1
+            Case &H68                                 'push imm32 - argument marshalling
+                pushCnt = pushCnt + 1
+            Case &H6A                                 'push imm8 - argument marshalling
+                pushCnt = pushCnt + 1
+            Case &H83, &H81                           'add/sub r/m, imm - only an esp stack-alloc is expected
+                modrm = NativeDumpByte(dump, i + 1)
+                If Not ((modrm And 7) = 4 And ((modrm \ &H40) And 3) = 3) Then GoTo bail
+            Case &HFF                                 'push [mem] (/6) or call [abs] (/2)
+                modrm = NativeDumpByte(dump, i + 1)
+                ffReg = (modrm \ 8) And 7
+                If ffReg = 6 Then
+                    pushCnt = pushCnt + 1             'push r/m - argument marshalling
+                ElseIf ffReg = 2 Then                 'call [abs] -> a runtime math helper
+                    mnm = NativeApiName(inst)
+                    If Len(mnm) = 0 Then GoTo bail
+                    If Not NativeFLMathOp(mnm, vbOp, mcat) Then GoTo bail
+                    Select Case mcat
+                        Case 1                        'FPU-stack unary (Int/Fix): operand already on ST(0)
+                            If ftop = 0 Then GoTo bail
+                            fpu(ftop - 1) = vbOp & "(" & fpu(ftop - 1) & ")"
+                        Case 2                        'x86-stack unary (Sin/Cos/Exp...): operand = chain or 1st param
+                            If ftop > 15 Then GoTo bail
+                            If Len(lastStackArg) > 0 Then callA = lastStackArg Else callA = "arg_8"
+                            fpu(ftop) = vbOp & "(" & callA & ")": ftop = ftop + 1
+                            lastStackArg = ""
+                        Case 3                        'x86-stack binary power: base ^ exponent (the two params)
+                            If ftop > 15 Then GoTo bail
+                            fpu(ftop) = "(arg_8 ^ arg_10)": ftop = ftop + 1
+                    End Select
+                    pushCnt = 0
+                Else
+                    GoTo bail
+                End If
+            Case &HE8                                 'call rel32 -> a user Double-returning helper (DegToRad...)
+                'Only a UNARY call chains cleanly: either a chained value parked by a
+                'preceding fstp [esp] (lastStackArg), or one Double pushed as 2 dwords.
+                'Bail on any other arity (e.g. Square's MathMul(v, v) = 4 pushes) - safe.
+                If ftop > 15 Then GoTo bail
+                If Len(lastStackArg) > 0 And pushCnt = 0 Then
+                    callA = lastStackArg          'unary chained: RadToDeg(Atn(x))
+                ElseIf Len(lastStackArg) = 0 And pushCnt = 2 Then
+                    callA = "arg_8"               'unary pushed: DegToRad(x)
+                Else
+                    GoTo bail                     'binary/n-ary (MathSub(90, x), MathAdd(..,..)) -> safe
+                End If
+                utgt = NativeCallTarget(inst)
+                If utgt = 0 Then GoTo bail
+                fpu(ftop) = NativeFLProcName(utgt) & "(" & callA & ")": ftop = ftop + 1
+                lastStackArg = "": pushCnt = 0
             Case &HC3, &HC2                           'ret / ret N -> done
                 Exit For
             Case Else
@@ -10219,6 +10279,51 @@ Private Function NativeDoubleParams(ByVal retN As Long) As String
         s = s & "arg_" & Hex$(off) & " As Double"
     Next
     NativeDoubleParams = s
+End Function
+
+Private Function NativeFLMathOp(ByVal nm As String, ByRef vbOp As String, ByRef cat As Long) As Boolean
+    'Map a resolved IAT helper name to its VB math operator/function and arg convention:
+    '  cat 1 = FPU-stack unary (operand is already on ST(0): __vbaFPInt/__vbaFPFix)
+    '  cat 2 = x86-stack unary (operand pushed / chained: the CRT trig/exp/log/sqrt)
+    '  cat 3 = x86-stack binary power (__vbaPowerR8 -> base ^ exponent)
+    'Returns False (cat 0) for any other call, so the body bails and stays empty.
+    'The CRT trig/exp/log/sqrt helpers resolve to their DESCRIPTION ("Sin()", "Exp()" -
+    'with parens) via the ordinal table, so strip a trailing "()" before matching.
+    Dim u As String
+    cat = 0
+    u = nm
+    If Right$(u, 2) = "()" Then u = Left$(u, Len(u) - 2)
+    If InStr(u, "FPInt") > 0 Then
+        vbOp = "Int": cat = 1
+    ElseIf InStr(u, "FPFix") > 0 Then
+        vbOp = "Fix": cat = 1
+    ElseIf InStr(u, "PowerR8") > 0 Then
+        vbOp = "^": cat = 3
+    Else
+        Select Case UCase$(u)
+            Case "SIN", "RTCSIN": vbOp = "Sin": cat = 2
+            Case "COS", "RTCCOS": vbOp = "Cos": cat = 2
+            Case "TAN", "RTCTAN": vbOp = "Tan": cat = 2
+            Case "ATN", "ATAN", "RTCATN": vbOp = "Atn": cat = 2
+            Case "EXP", "RTCEXP": vbOp = "Exp": cat = 2
+            Case "LOG", "RTCLOG": vbOp = "Log": cat = 2
+            Case "SQR", "SQRT", "RTCSQR": vbOp = "Sqr": cat = 2
+        End Select
+    End If
+    NativeFLMathOp = (cat > 0)
+End Function
+
+Private Function NativeFLProcName(ByVal va As Long) As String
+    'Bare callee name for a frameless chained call (DegToRad...): the proc name with
+    'any owner qualifier and parameter signature stripped, so it reads proc_<va>.
+    Dim s As String, p As Long
+    s = NativeProcName(va)
+    p = InStr(s, "(")
+    If p > 0 Then s = Trim$(Left$(s, p - 1))
+    p = InStrRev(s, ".")
+    If p > 0 Then s = Mid$(s, p + 1)
+    If Len(s) = 0 Then s = "proc_" & Hex$(va)
+    NativeFLProcName = s
 End Function
 
 'Decode a ModRM (+SIB+disp) operand at byte `idx`.  Fills regField and the r/m.
