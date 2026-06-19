@@ -1039,7 +1039,17 @@ Public Sub BuildNativeCodeCache()
     total = ub
     ReDim objNames(64): ReDim objCode(64): ReDim objDism(64): objCount = 0
 
+    'Per-proc rendered body + its owning-object index, kept SEPARATE (not yet
+    'concatenated) so a helper proc can be re-rendered after cross-proc object-
+    'parameter typing (NativeBuildParamObjClasses) without disturbing the rest.
+    Dim procBody() As String, procObjIdx() As Long
+    ReDim procBody(ub): ReDim procObjIdx(ub)
+
+    'PASS A: render every proc.  gParamObjClass is still Nothing here, so this pass
+    'is byte-identical to the single-pass behaviour (no param object-typing yet).
+    Set gParamObjClass = Nothing
     For p = 0 To ub - 1
+        procObjIdx(p) = -1
         If CancelDecompile = True Then Exit For
         addr = gNativeProcArray(p).offset
         If addr = 0 Then GoTo nextProc
@@ -1068,15 +1078,36 @@ Public Sub BuildNativeCodeCache()
         frmMain.txtStatus.Refresh
         DoEvents
 
-        body = modNativeToVB.DecompileNativeProcToVB(addr)
-        objCode(found) = objCode(found) & body & vbCrLf
+        procBody(p) = modNativeToVB.DecompileNativeProcToVB(addr)
+        procObjIdx(p) = found
         'Raw disassembly captured during the decompile above (no re-disassembly).
         objDism(found) = objDism(found) & _
             "; ---------------------------------------------" & vbCrLf & _
             "; " & sn & "  (" & Hex$(addr) & "h)" & vbCrLf & _
-            "; ---------------------------------------------" & vbCrLf & _
             modNativeToVB.NVLastDisasmText & vbCrLf
 nextProc:
+    Next p
+
+    'PROPAGATE: type object parameters from the class their callers pass, then
+    'RE-RENDER only the helper procs that gained a typed param (a tiny set), so
+    'their `arg_X.UnkVCall_<off>h` resolves to `arg_X.Method`.
+    If Not CancelDecompile Then
+        modNativeToVB.NativeBuildParamObjClasses procBody
+        If Not gParamObjClass Is Nothing Then
+            For p = 0 To ub - 1
+                addr = gNativeProcArray(p).offset
+                If addr <> 0 And procObjIdx(p) >= 0 Then
+                    If modNativeToVB.NativeHasParamObjClass(addr) Then
+                        procBody(p) = modNativeToVB.DecompileNativeProcToVB(addr)
+                    End If
+                End If
+            Next p
+        End If
+    End If
+
+    'Concatenate the (possibly re-rendered) bodies into each object's cached code.
+    For p = 0 To ub - 1
+        If procObjIdx(p) >= 0 Then objCode(procObjIdx(p)) = objCode(procObjIdx(p)) & procBody(p) & vbCrLf
     Next p
 
     For oi = 0 To objCount - 1

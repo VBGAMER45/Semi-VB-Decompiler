@@ -200,6 +200,7 @@ Private NVRegFieldRecv(7) As String 'receiver expr (field_<off>) for that field,
 Private NVObjClass As Collection   'key "G"&globalVA -> user class name of the object instance stored at that global (typed at the __vbaNew auto-instantiation)
 Private NVObjClassIndirect As Collection 'key "I"&globalName -> class of a PREDECLARED-instance As-New whose pointer-global is one indirection deeper (the global holds &slot, object at [[global]]); the global load tags the reg as a field-address (NVRegFieldCls) whose deref is the object
 Private NVLocalObjType As Collection 'key "D"&localDisp -> user class created INTO that local by __vbaNew2(ObjInfo, &local); so var_X.Member resolves via the class vtable map
+Private NVParamObjClass As Collection 'key "P"&paramDisp -> user class of an OBJECT parameter, inferred cross-proc from the class the callers pass (gParamObjClass, built by NativeBuildParamObjClasses).  Loaded per-proc; tags the param register on load so arg_X.UnkVCall_<off> resolves to arg_X.Method.  Nothing during the first render pass.
 Private NVNewEmitted As Collection 'per-proc: local disps that already emitted `Set var_X = New <class>` - suppress the repeated auto-instantiation (As New) guards before each use
 Private NVPropDir As Collection      'key "P"&callVA -> "get"/"put": data-flow direction of a property accessor call (its by-ref local read AFTER = get, else put), since VB6 FuncDesc flags Get and Let identically
 Private NVVarTstBind As Collection    'key "P"&callVA -> "1": a __vbaVarTst* relational whose VARIANT_BOOL result is stored to a MEMORY LOCAL (safe to fold to `If (a <op> b)`); the register-stored form is left unmarked so it keeps a visible Call
@@ -254,6 +255,8 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
 
     'The procedure list hands back an address a few bytes into the prologue
     '(the SEH setup), so snap back to the real "push ebp / mov ebp,esp" entry.
+    Dim addrOrig As Long
+    addrOrig = addr                             'pre-snap address - the key gParamObjClass uses
     addr = NativeSnapEntry(addr)
 
     'Read up to 8 KB of the procedure from the image
@@ -293,6 +296,22 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     For r = 0 To 7: NVReg(r) = "": NVR16Val(r) = "": NVRegIsAddr(r) = False: NVRegAddr(r) = "": NVRegAddrDisp(r) = 0: NVRegIsMe(r) = False: NVRegIsFormVt(r) = False: NVRegObjType(r) = "": NVRegObjVt(r) = "": NVRegObjGuid(r) = "": NVRegObjVtGuid(r) = "": NVRegObjInst(r) = "": NVRegFieldCls(r) = "": NVRegFieldRecv(r) = "": Next
     Set NVObjClass = New Collection
     Set NVObjClassIndirect = New Collection
+    'Load this proc's cross-proc-inferred OBJECT-parameter classes (built by
+    'NativeBuildParamObjClasses after the first render pass).  Packed per-address as
+    '"disp=cls|disp=cls"; expand into the per-proc "P"&disp lookup the param-load
+    'object-tagging consults.  Nothing/empty on the first pass -> no effect.
+    Set NVParamObjClass = New Collection
+    If Not gParamObjClass Is Nothing Then
+        Dim pocPacked As String, pocPair() As String, pocI As Long, pocEq As Long
+        pocPacked = NativeColGet(gParamObjClass, "A" & addrOrig)
+        If Len(pocPacked) > 0 Then
+            pocPair = Split(pocPacked, "|")
+            For pocI = 0 To UBound(pocPair)
+                pocEq = InStr(pocPair(pocI), "=")
+                If pocEq > 0 Then NativeColPut NVParamObjClass, "P" & Left$(pocPair(pocI), pocEq - 1), Mid$(pocPair(pocI), pocEq + 1)
+            Next
+        End If
+    End If
     For r = 0 To 7: NVRecentPush(r) = 0: Next
     NVRecentTop = 0
     Set NVLocal = New Collection
@@ -4986,7 +5005,7 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                             'unconsumed local and vanishing.  Scoped to local-instance
                             'receivers (umRecv "var_") so As-New FIELD receivers (clsBitmap
                             'field_X, whose gets are consumed inline) keep their current fold.
-                            If Len(umRetbuf) > 0 And (Left$(umRecv, 4) = "var_" Or Left$(umRecv, 6) = "field_") And Left$(umRetbuf, 4) = "var_" _
+                            If Len(umRetbuf) > 0 And (Left$(umRecv, 4) = "var_" Or Left$(umRecv, 6) = "field_" Or Left$(umRecv, 4) = "arg_") And Left$(umRetbuf, 4) = "var_" _
                                And InStr(umKind, "Property") > 0 Then
                                 'A property accessor on a LOCAL class-instance (As New /
                                 'predeclared, e.g. pktCreate).  VB6 flags Get and Let alike,
@@ -8468,6 +8487,20 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     Dim ffcls As String
                     ffcls = NativeColGet(gFormFieldClass, NVForm & ":" & disp)
                     If Len(ffcls) > 0 Then NVRegObjType(reg) = ffcls: NVRegObjInst(reg) = ffcls
+                ElseIf Not isAbs And bse = 5 And disp >= 8 And disp <= &H200 And Not NVParamObjClass Is Nothing Then
+                    'Loading an OBJECT PARAMETER whose class the cross-proc propagation
+                    'pass (NativeBuildParamObjClasses) inferred from the class the callers
+                    'consistently pass.  A VB6 object param is ByRef by default, so [ebp+off]
+                    'is a POINTER to the object variable (`mov ebx,[ebp+8]; mov edi,[ebx]` =
+                    'object; `mov eax,[edi]` = vtable) - the SAME two-deref shape as an As-New
+                    'field ADDRESS.  So tag the register as a field-address (NVRegFieldCls):
+                    'the first deref yields the object (NVRegObjType), the second the vtable
+                    '(NVRegObjVt), and `call [vt+off]` resolves to arg_X.Method.  The receiver
+                    'is the honest param arg_X.  (A ByVal object param would simply miss -
+                    'safe, never a wrong name.)
+                    Dim pocls As String
+                    pocls = NativeColGet(NVParamObjClass, "P" & disp)
+                    If Len(pocls) > 0 Then NVRegFieldCls(reg) = pocls: NVRegFieldRecv(reg) = "arg_" & Hex$(disp)
                 End If
             End If
         Case &H88                       'mov r/m8, r8  (byte store)
@@ -9544,6 +9577,390 @@ Private Function NativeClassMethodAddr(ByVal className As String, ByVal off As L
     On Error Resume Next
     v = gFormVtable(className & ":off" & off)
     If Err.Number = 0 Then NativeClassMethodAddr = CLng(v)
+End Function
+
+Public Function NativeClassHasMethodAt(ByVal className As String, ByVal off As Long) As Boolean
+    'True when className's vtable has a real user method at offset `off` (>= 0x1C).
+    'Used by NativeBuildParamObjClasses to VALIDATE a propagated object-param class:
+    'only type a param As <class> when the class actually owns the method the helper
+    'calls at that offset - so a mis-matched/struct-base arg (no such slot) is rejected
+    'and never produces a wrong method name.
+    If off < &H1C Then Exit Function
+    NativeClassHasMethodAt = (NativeClassMethodAddr(className, off) <> 0)
+End Function
+
+Public Function NativeHasParamObjClass(ByVal addr As Long) As Boolean
+    'True when the propagation pass typed at least one object parameter of the proc
+    'at `addr` (so BuildNativeCodeCache re-renders it to resolve arg_X.Method).
+    If gParamObjClass Is Nothing Then Exit Function
+    NativeHasParamObjClass = (Len(NativeColGet(gParamObjClass, "A" & addr)) > 0)
+End Function
+
+Public Sub NativeBuildParamObjClasses(procBody() As String)
+    'Cross-proc OBJECT-parameter typing (DEFERRED_PLANS #6, the object variant).  A
+    'helper/module proc that calls vtable methods on an object PARAMETER renders
+    'arg_X.UnkVCall_<off>h because the param's class is stripped from typeinfo.  Recover
+    'it from the class the CALLERS consistently pass at that argument position, then
+    'record gParamObjClass("A"&helperAddr) = "disp=cls|disp=cls" so a re-render resolves
+    'arg_X.Method.  CONSERVATIVE (no guessing): requires a SINGLE class across every
+    'caller AND that the class owns a method at the called offset (NativeClassHasMethodAt)
+    '- so a polymorphic helper, an unresolved arg, or a struct-base arg_X (no such slot)
+    'is left untyped.  Restricted to proc_<hex>-named helpers and cls-prefixed classes
+    '(matches both benchmarks; never mistypes a non-class arg).
+    On Error GoTo done
+    Dim ub As Long
+    ub = -1: ub = UBound(gNativeProcArray)
+    If ub < 1 Then Exit Sub
+
+    'PHASE 1 - index object-param helpers (by proc_<hex> name).
+    Dim hObjP As Collection, hAddr As Collection
+    Set hObjP = New Collection: Set hAddr = New Collection      'name -> "idx;disp;minoff|..." / name -> addr
+    Dim hNames() As String, hN As Long
+    ReDim hNames(63): hN = 0
+    Dim p As Long
+    For p = 0 To ub - 1
+        If gNativeProcArray(p).offset = 0 Then GoTo nextP1
+        If Len(procBody(p)) = 0 Then GoTo nextP1
+        Dim hdr As String, pname As String, packedParams As String
+        hdr = NativeProcHeaderLine(procBody(p))
+        pname = NativeProcNameFromHeader(hdr)
+        If Left$(pname, 5) <> "proc_" Then GoTo nextP1
+        packedParams = NativeProcParamTokens(hdr)
+        If Len(packedParams) = 0 Then GoTo nextP1
+        Dim packedObj As String
+        packedObj = NativeScanObjParamUses(procBody(p), packedParams)
+        If Len(packedObj) = 0 Then GoTo nextP1
+        NativeColPut hObjP, pname, packedObj
+        NativeColPut hAddr, pname, CStr(gNativeProcArray(p).offset)
+        If hN > UBound(hNames) Then ReDim Preserve hNames(hN + 63)
+        hNames(hN) = pname: hN = hN + 1
+nextP1:
+    Next p
+    If hN = 0 Then Exit Sub
+
+    'PHASE 2 - scan every proc body for call sites; vote a class per (helper#paramIdx).
+    Dim votes As Collection
+    Set votes = New Collection
+    For p = 0 To ub - 1
+        If gNativeProcArray(p).offset = 0 Then GoTo nextP2
+        If Len(procBody(p)) = 0 Then GoTo nextP2
+        NativeVoteCallSites procBody(p), NativeFormOf(gNativeProcArray(p).offset), hObjP, votes
+nextP2:
+    Next p
+
+    'PHASE 3 - consensus + method-existence validation -> gParamObjClass.
+    Set gParamObjClass = New Collection
+    Dim hi As Long
+    For hi = 0 To hN - 1
+        Dim nm As String, packed As String, parts() As String, pi As Long, accP As String
+        nm = hNames(hi)
+        packed = NativeColGet(hObjP, nm)
+        parts = Split(packed, "|")
+        accP = ""
+        For pi = 0 To UBound(parts)
+            Dim f3() As String, vIdx As Long, vDisp As Long, vOff As Long, cls As String
+            f3 = Split(parts(pi), ";")              'idx ; disp ; minoff
+            If UBound(f3) >= 2 Then
+                vIdx = CLng(f3(0)): vDisp = CLng(f3(1)): vOff = CLng(f3(2))
+                cls = NativeColGet(votes, nm & "#" & vIdx)
+                If Len(cls) > 0 And cls <> "?" And Left$(cls, 3) = "cls" Then
+                    If NativeClassHasMethodAt(cls, vOff) Then
+                        If Len(accP) > 0 Then accP = accP & "|"
+                        accP = accP & vDisp & "=" & cls
+                    End If
+                End If
+            End If
+        Next pi
+        If Len(accP) > 0 Then NativeColPut gParamObjClass, "A" & NativeColGet(hAddr, nm), accP
+    Next hi
+    If gParamObjClass.Count = 0 Then Set gParamObjClass = Nothing
+done:
+End Sub
+
+Private Function NativeProcHeaderLine(ByVal body As String) As String
+    'The proc's signature line (the first Private/Public Sub/Function/Property line).
+    Dim ln() As String, i As Long
+    ln = Split(body, vbCrLf)
+    For i = 0 To UBound(ln)
+        If NativeIsProcHeaderLine(ln(i)) Then NativeProcHeaderLine = ln(i): Exit Function
+    Next
+End Function
+
+Private Function NativeProcNameFromHeader(ByVal hdr As String) As String
+    'Extract the procedure name (token before the "(") from a header line.
+    Dim op As Long, i As Long, st As Long
+    op = InStr(hdr, "(")
+    If op = 0 Then Exit Function
+    st = op - 1
+    Do While st >= 1
+        If Not NativeIsTokChar(Mid$(hdr, st, 1)) Then Exit Do
+        st = st - 1
+    Loop
+    NativeProcNameFromHeader = Mid$(hdr, st + 1, op - st - 1)
+End Function
+
+Private Function NativeProcParamTokens(ByVal hdr As String) As String
+    'The header's parameter tokens (first word of each comma part), "|"-joined.
+    'Empty when the proc has no parameters.
+    Dim op As Long, cp As Long, inner As String, parts() As String, i As Long, tk As String, outp As String
+    op = InStr(hdr, "(")
+    If op = 0 Then Exit Function
+    cp = NativeMatchCloseParen(hdr, op)
+    If cp <= op + 1 Then Exit Function
+    inner = Mid$(hdr, op + 1, cp - op - 1)
+    parts = NativeTopSplitArgs(inner)
+    For i = 0 To UBound(parts)
+        tk = Trim$(parts(i))
+        If InStr(tk, " ") > 0 Then tk = Left$(tk, InStr(tk, " ") - 1)
+        If Len(tk) > 0 Then
+            If Len(outp) > 0 Then outp = outp & "|"
+            outp = outp & tk
+        End If
+    Next
+    NativeProcParamTokens = outp
+End Function
+
+Private Function NativeScanObjParamUses(ByVal body As String, ByVal packedParams As String) As String
+    'Find arg_<hex>.UnkVCall_<off>h uses whose receiver is a PARAMETER; return
+    '"idx;disp;minoff|..." for each such object param (idx = position in the param list,
+    'disp = ebp offset, minoff = smallest called vtable offset, all decimal).
+    Dim params() As String
+    params = Split(packedParams, "|")
+    Dim minOff As Collection
+    Set minOff = New Collection                 '"idx" -> min offset (decimal)
+    Dim pos As Long, recv As String, offHex As String, offv As Long, idx As Long, prev As String
+    pos = InStr(1, body, ".UnkVCall_")
+    Do While pos > 0
+        recv = NativeTokenBefore(body, pos)     'token before the "."
+        If Left$(recv, 4) = "arg_" Then
+            idx = NativeIndexInList(params, recv)
+            If idx >= 0 Then
+                offHex = Mid$(body, pos + 10, 8)        '".UnkVCall_" is 10 chars; then 8 hex
+                offv = NativeHexToLong(offHex)
+                If offv >= &H1C Then
+                    prev = NativeColGet(minOff, "I" & idx)
+                    If Len(prev) = 0 Then
+                        NativeColPut minOff, "I" & idx, CStr(offv)
+                    ElseIf offv < CLng(prev) Then
+                        NativeColPut minOff, "I" & idx, CStr(offv)
+                    End If
+                End If
+            End If
+        End If
+        pos = InStr(pos + 1, body, ".UnkVCall_")
+    Loop
+    'serialise
+    Dim i As Long, mo As String, dispv As Long, outp As String
+    For i = 0 To UBound(params)
+        mo = NativeColGet(minOff, "I" & i)
+        If Len(mo) > 0 Then
+            dispv = NativeArgDispFromToken(params(i))
+            If dispv > 0 Then
+                If Len(outp) > 0 Then outp = outp & "|"
+                outp = outp & i & ";" & dispv & ";" & mo
+            End If
+        End If
+    Next
+    NativeScanObjParamUses = outp
+End Function
+
+Private Sub NativeVoteCallSites(ByVal body As String, ByVal callerForm As String, hObjP As Collection, votes As Collection)
+    'Scan body for calls to known object-param helpers; for each object param, resolve
+    'the position-matched argument's class and vote it (a conflicting / unresolved arg
+    'votes "?", which disqualifies that param).
+    Dim ln() As String, li As Long, s As String, pos As Long, nm As String, op As Long, cp As Long
+    Dim inner As String, args() As String, packed As String, parts() As String, k As Long
+    ln = Split(body, vbCrLf)
+    For li = 0 To UBound(ln)
+        s = ln(li)
+        If NativeIsProcHeaderLine(s) Then GoTo nextLn     'never read a definition as a call
+        pos = InStr(1, s, "proc_")
+        Do While pos > 0
+            nm = NativeProcNameRun(s, pos)                'proc_<hex>
+            op = pos + Len(nm)
+            If Len(nm) > 5 And Mid$(s, op, 1) = "(" Then
+                packed = NativeColGet(hObjP, nm)
+                If Len(packed) > 0 Then
+                    cp = NativeMatchCloseParen(s, op)
+                    If cp > op Then
+                        inner = Mid$(s, op + 1, cp - op - 1)
+                        args = NativeTopSplitArgs(inner)
+                        parts = Split(packed, "|")
+                        For k = 0 To UBound(parts)
+                            Dim f3() As String, aIdx As Long, cls As String
+                            f3 = Split(parts(k), ";")
+                            aIdx = CLng(f3(0))
+                            If aIdx <= UBound(args) Then
+                                cls = NativeResolveArgClass(body, callerForm, Trim$(args(aIdx)))
+                            Else
+                                cls = ""
+                            End If
+                            NativeAddVote votes, nm & "#" & aIdx, cls
+                        Next k
+                    End If
+                End If
+            End If
+            pos = InStr(pos + 1, s, "proc_")
+        Loop
+nextLn:
+    Next li
+End Sub
+
+Private Sub NativeAddVote(votes As Collection, ByVal key As String, ByVal cls As String)
+    'Accumulate a class vote: first vote sets it; a different class or an unresolved
+    'arg ("") collapses it to "?" (disqualified - no single trustworthy class).
+    Dim cur As String
+    cur = NativeColGet(votes, key)
+    If Len(cls) = 0 Then
+        NativeColPut votes, key, "?"
+    ElseIf Len(cur) = 0 Then
+        NativeColPut votes, key, cls
+    ElseIf cur <> cls Then
+        NativeColPut votes, key, "?"
+    End If
+End Sub
+
+Private Function NativeResolveArgClass(ByVal body As String, ByVal callerForm As String, ByVal tok As String) As String
+    'Resolve a call argument token to a user class: a local typed via Dim/Set ... New,
+    'or an As-New form/class FIELD (gFormFieldClass).  "" when not a resolvable object.
+    If Left$(tok, 4) = "var_" Then
+        NativeResolveArgClass = NativeLocalVarClassInBody(body, tok)
+    ElseIf Left$(tok, 6) = "field_" Then
+        Dim foff As Long
+        foff = NativeHexToLong(Mid$(tok, 7))
+        If foff > 0 And Not gFormFieldClass Is Nothing And Len(callerForm) > 0 Then
+            NativeResolveArgClass = NativeColGet(gFormFieldClass, callerForm & ":" & foff)
+        End If
+    End If
+End Function
+
+Private Function NativeLocalVarClassInBody(ByVal body As String, ByVal tok As String) As String
+    'Find `Dim <tok> As [New] cls...` or `Set <tok> = New cls...` in the body and
+    'return the cls-prefixed class name (only "cls" classes, never As Long/String/etc).
+    Dim ln() As String, i As Long, s As String, c As String
+    ln = Split(body, vbCrLf)
+    For i = 0 To UBound(ln)
+        s = ln(i)
+        If InStr(s, tok) > 0 Then
+            If InStr(s, "New cls") > 0 Then
+                c = NativeClassWordAfter(s, "New ")
+                If Left$(c, 3) = "cls" Then NativeLocalVarClassInBody = c: Exit Function
+            End If
+            If InStr(s, " As cls") > 0 Then
+                c = NativeClassWordAfter(s, " As ")
+                If Left$(c, 3) = "cls" Then NativeLocalVarClassInBody = c: Exit Function
+            End If
+        End If
+    Next
+End Function
+
+Private Function NativeClassWordAfter(ByVal s As String, ByVal marker As String) As String
+    'The identifier immediately following `marker` in s.
+    Dim mp As Long, st As Long, en As Long
+    mp = InStr(s, marker)
+    If mp = 0 Then Exit Function
+    st = mp + Len(marker)
+    en = st
+    Do While en <= Len(s)
+        If Not NativeIsTokChar(Mid$(s, en, 1)) Then Exit Do
+        en = en + 1
+    Loop
+    NativeClassWordAfter = Mid$(s, st, en - st)
+End Function
+
+Private Function NativeProcNameRun(ByVal s As String, ByVal startPos As Long) As String
+    '"proc_" + the run of hex digits following it (the synthetic proc name).
+    Dim i As Long, ch As String
+    i = startPos + 5                                'past "proc_"
+    Do While i <= Len(s)
+        ch = Mid$(s, i, 1)
+        If Not ((ch >= "0" And ch <= "9") Or (UCase$(ch) >= "A" And UCase$(ch) <= "F")) Then Exit Do
+        i = i + 1
+    Loop
+    NativeProcNameRun = Mid$(s, startPos, i - startPos)
+End Function
+
+Private Function NativeTokenBefore(ByVal s As String, ByVal pos As Long) As String
+    'The identifier token ending at pos-1 (pos points at the "." of ".UnkVCall_").
+    Dim en As Long, st As Long
+    en = pos - 1
+    st = en
+    Do While st >= 1
+        If Not NativeIsTokChar(Mid$(s, st, 1)) Then Exit Do
+        st = st - 1
+    Loop
+    NativeTokenBefore = Mid$(s, st + 1, en - st)
+End Function
+
+Private Function NativeIsTokChar(ByVal ch As String) As Boolean
+    NativeIsTokChar = (ch >= "0" And ch <= "9") Or (UCase$(ch) >= "A" And UCase$(ch) <= "Z") Or ch = "_"
+End Function
+
+Private Function NativeIndexInList(params() As String, ByVal tok As String) As Long
+    Dim i As Long
+    NativeIndexInList = -1
+    For i = 0 To UBound(params)
+        If params(i) = tok Then NativeIndexInList = i: Exit Function
+    Next
+End Function
+
+Private Function NativeArgDispFromToken(ByVal tok As String) As Long
+    'arg_8 -> 8, arg_C -> 12, arg_10 -> 16 (the hex ebp offset).
+    If Left$(tok, 4) <> "arg_" Then Exit Function
+    NativeArgDispFromToken = NativeHexToLong(Mid$(tok, 5))
+End Function
+
+Private Function NativeHexToLong(ByVal h As String) As Long
+    Dim t As String, i As Long, ch As String
+    For i = 1 To Len(h)
+        ch = UCase$(Mid$(h, i, 1))
+        If (ch >= "0" And ch <= "9") Or (ch >= "A" And ch <= "F") Then t = t & ch Else Exit For
+    Next
+    If Len(t) = 0 Then Exit Function
+    On Error Resume Next
+    NativeHexToLong = CLng("&H" & t)
+End Function
+
+Private Function NativeMatchCloseParen(ByVal s As String, ByVal openPos As Long) As Long
+    'Index of the ")" matching the "(" at openPos (depth-aware, ignores quoted parens).
+    Dim i As Long, depth As Long, ch As String, inq As Boolean
+    For i = openPos To Len(s)
+        ch = Mid$(s, i, 1)
+        If ch = """" Then
+            inq = Not inq
+        ElseIf Not inq Then
+            If ch = "(" Then
+                depth = depth + 1
+            ElseIf ch = ")" Then
+                depth = depth - 1
+                If depth = 0 Then NativeMatchCloseParen = i: Exit Function
+            End If
+        End If
+    Next
+End Function
+
+Private Function NativeTopSplitArgs(ByVal s As String) As String()
+    'Split an argument list on TOP-LEVEL commas (paren/quote-aware).
+    Dim out() As String, n As Long, depth As Long, i As Long, ch As String, cur As String, inq As Boolean
+    ReDim out(0): n = 0: cur = "": inq = False
+    For i = 1 To Len(s)
+        ch = Mid$(s, i, 1)
+        If ch = """" Then
+            inq = Not inq: cur = cur & ch
+        ElseIf inq Then
+            cur = cur & ch
+        ElseIf ch = "(" Then
+            depth = depth + 1: cur = cur & ch
+        ElseIf ch = ")" Then
+            depth = depth - 1: cur = cur & ch
+        ElseIf ch = "," And depth = 0 Then
+            ReDim Preserve out(n): out(n) = Trim$(cur): n = n + 1: cur = ""
+        Else
+            cur = cur & ch
+        End If
+    Next
+    ReDim Preserve out(n): out(n) = Trim$(cur)
+    NativeTopSplitArgs = out
 End Function
 
 Private Function NativeCallRegName(inst As CInstruction) As String

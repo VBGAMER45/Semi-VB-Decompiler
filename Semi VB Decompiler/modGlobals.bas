@@ -674,6 +674,13 @@ Global gNativeGlobalClass As Collection  'key "g"&VA -> recovered user class nam
 '(lea reg,[Me+off]; push reg; push <ObjInfo>; call __vbaNew).  Key "Owner:offset"
 '(decimal) -> class name, so a method call on Me.<field> resolves like a New'd object.
 Global gFormFieldClass As Collection
+'Cross-proc transitive typing of OBJECT parameters: a helper/module proc whose
+'object param's class is stripped (not in typeinfo) is typed from the class its
+'CALLERS consistently pass (verified single-class, no polymorphism).  Key
+'"procAddr:paramDisp" (both decimal) -> class name; built by NativeBuildParamObjClasses
+'after the first render pass, consumed via NVParamObjClass to resolve arg_X.UnkVCall
+'-> arg_X.Method.  Empty during the first pass, so that pass is byte-identical.
+Global gParamObjClass As Collection
 Global gRetbufFunc As Collection       'module Functions returning a Variant/String/UDT via a hidden retbuf (key "V"&procVA -> arg byte count from `ret N`).  The epilogue returns the retbuf ptr (`mov eax,[ebp+8]`); the first param (arg_8) IS the retbuf, so callers render `<dest> = proc(<rest>)` and the proc is a Function.
 
 'The Win32 API Declare block (from the VB external table) is project-wide, but the
