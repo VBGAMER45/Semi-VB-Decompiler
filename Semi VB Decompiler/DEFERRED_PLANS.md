@@ -90,9 +90,18 @@ Me field) isn't tracked as a deref base. General field-ptr tracking is broad/ris
 
 ---
 
-## 3b. Late-bound control property get/put chain — frmClient.Form_Resize (Client2, @486830)
+## 3b. Late-bound control property get/put chain — frmClient.Form_Resize — DONE 1ccc876
 
-**Status: investigated 2026-06-19, NOT attempted (deep + high regression risk).**
+**Status: DONE 2026-06-19 (commit 1ccc876).** All three pieces shipped:
+(1) stock-extender DISPID table Left/Top/Width/Height = 0x80010003..6 (NativeStockExtenderMember,
+consulted before the OCX typelib) - fixed 12 wrong gets (HideSelection->Height) AND 18
+__vbaLateIdSt puts (Call LateIdSt -> obj.Member = value); (2) __vbaR4Var/R8Var -> CSng/CDbl
+FPU fold (Call R4Var 16->0); (3) stock-extender Ld result tracked in eax so `push eax; R4Var`
+inlines `CSng(var_X)` (gated to stock gets so a Dungeon CommonDialog StrCmp path stays
+byte-identical). Client2: only frmClient+frmChannel changed, all counters/proc-counts flat;
+Dungeon byte-identical. Form_Resize now matches commercial. Original analysis kept below.
+
+**Original analysis (investigated 2026-06-19):**
 
 The repeated block
 ```
