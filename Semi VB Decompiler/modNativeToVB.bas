@@ -764,6 +764,7 @@ nextInst:
     output = NativeStripSelfAssigns(output)
     output = NativeMergeElseIf(output)
     output = NativeStripEmptyIfs(output)
+    output = NativeRefineReturnType(output)
     DecompileNativeProcToVB = NativeInsertLocalDims(output)
     Exit Function
 fail:
@@ -1167,7 +1168,7 @@ Private Function NativeInferValType(ByVal rhs As String) As String
     If Len(s) = 0 Then Exit Function
     If InStr(s, " & ") > 0 Then NativeInferValType = "String": Exit Function     'concat
     If Left$(s, 1) = """" Then NativeInferValType = "String": Exit Function       'literal
-    If NativeStartsWithFn(s, "CStr|Left$|Right$|Mid$|Trim$|LTrim$|RTrim$|UCase$|LCase$|Chr$|ChrW$|Space$|String$|Format$|Hex$|Oct$|Str$") Then NativeInferValType = "String": Exit Function
+    If NativeStartsWithFn(s, "CStr|Left$|Right$|Mid$|Trim$|LTrim$|RTrim$|UCase$|LCase$|Chr$|ChrW$|Space$|String$|Format$|Hex$|Oct$|Str$|Replace|StrReverse|StrConv|Join") Then NativeInferValType = "String": Exit Function
     If NativeStartsWithFn(s, "CInt|Asc") Then NativeInferValType = "Integer": Exit Function
     If NativeStartsWithFn(s, "CLng|Len|UBound|LBound|InStr") Then NativeInferValType = "Long": Exit Function
     If NativeStartsWithFn(s, "CBool") Then NativeInferValType = "Boolean": Exit Function
@@ -1177,6 +1178,45 @@ Private Function NativeInferValType(ByVal rhs As String) As String
     If Left$(s, 1) = "(" And InStr(s, """") = 0 Then
         If InStr(s, " + ") > 0 Or InStr(s, " - ") > 0 Or InStr(s, " * ") > 0 Then NativeInferValType = "Long"
     End If
+End Function
+
+Private Function NativeRefineReturnType(ByVal body As String) As String
+    'An accumulator-return module Function is typed by the eax-load WIDTH: a dword load
+    'is guessed "Long".  But a String function returns its BSTR in eax (also a dword), so
+    'the guess is wrong - refine it from the body: when every `FuncName = <expr>` return
+    'assignment infers String (UCase$/Left$/concat/literal...) and none infers another
+    'type, widen `As Long` -> `As String`.  (Only touches the Long width-guess; a genuine
+    'Long/Integer/Double return is left alone.)
+    On Error GoTo done
+    Dim lines() As String, hdr As String, nm As String, p As Long, q As Long
+    lines = Split(body, vbCrLf)
+    If UBound(lines) < 1 Then GoTo done
+    hdr = lines(0)
+    p = InStr(hdr, " Function ")
+    If p = 0 Or InStr(hdr, " As Long") = 0 Then GoTo done
+    nm = Mid$(hdr, p + 10)
+    q = InStr(nm, "("): If q > 0 Then nm = Trim$(Left$(nm, q - 1))
+    If Len(nm) = 0 Then GoTo done
+    Dim i As Long, lt As String, rhs As String, t As String, sawStr As Boolean, sawOther As Boolean
+    For i = 1 To UBound(lines)
+        lt = Trim$(lines(i))
+        If Left$(lt, Len(nm) + 3) = nm & " = " Then
+            rhs = Mid$(lt, Len(nm) + 4)
+            t = NativeInferValType(rhs)
+            If t = "String" Then
+                sawStr = True
+            ElseIf Len(t) > 0 And t <> "Long" Then
+                sawOther = True
+            End If
+        End If
+    Next
+    If sawStr And Not sawOther Then
+        lines(0) = Replace(hdr, " As Long", " As String", , 1)
+        NativeRefineReturnType = Join(lines, vbCrLf)
+        Exit Function
+    End If
+done:
+    NativeRefineReturnType = body
 End Function
 
 Private Function NativeInferSetType(ByVal rhs As String) As String
@@ -6604,46 +6644,99 @@ Private Sub NativeDetectAccumReturn(b() As Byte, ByVal addr As Long)
     'restore: it is this proc's epilogue (a Sub has no return load before its restore).
     Dim j As Long, ret8 As Long, isWord As Boolean
     For j = 8 To hi - 7
+        'mov fs:[0],reg with reg NOT esp (4, the setup) and NOT eax (0): a function that
+        'returns in eax can never restore the SEH frame THROUGH eax (it would clobber the
+        'return), so a `mov eax,[ebp-Z]` before `mov fs:[0],eax` is the SEH-pointer load,
+        'not a return - excluding eax here stops the windowed search below from
+        'mis-promoting an event-handler Sub (which uses fs:[0],eax) to a Function.
         If b(j) = &H64 And b(j + 1) = &H89 And (b(j + 2) And &HC7) = 5 _
-           And ((b(j + 2) \ 8) And 7) <> 4 _
+           And ((b(j + 2) \ 8) And 7) <> 4 And ((b(j + 2) \ 8) And 7) <> 0 _
            And b(j + 3) = 0 And b(j + 4) = 0 And b(j + 5) = 0 And b(j + 6) = 0 Then
-            'SEH-ptr load `mov reg,[ebp-Z]` (8b <m2:md1,rm5> <disp8>) immediately before.
-            If j >= 3 Then
-                If b(j - 3) = &H8B And (b(j - 2) And &HC7) = &H45 Then
-                    'Return-value load ending at j-3.  Three encodings:
-                    isWord = False: ret8 = 0
-                    If j >= 7 And b(j - 7) = &H66 And b(j - 6) = &H8B And b(j - 5) = &H45 Then
-                        isWord = True: ret8 = b(j - 4)                 'mov ax, word[ebp-d8]
-                    ElseIf j >= 7 And b(j - 7) = &HF And (b(j - 6) = &HBF Or b(j - 6) = &HB7) And b(j - 5) = &H45 Then
-                        isWord = True: ret8 = b(j - 4)                 'movsx/movzx eax, word[ebp-d8]
-                    ElseIf j >= 6 And b(j - 6) = &H8B And b(j - 5) = &H45 And b(j - 7) <> &H66 Then
-                        isWord = False: ret8 = b(j - 4)                'mov eax, dword[ebp-d8]
-                    Else
-                        Exit Sub        'no return load -> a Sub (don't scan into the next proc)
-                    End If
-                    Dim retDisp As Long
-                    retDisp = ret8: If retDisp >= 128 Then retDisp = retDisp - 256   'signed disp8
-                    If retDisp < 0 Then
-                        NVAccumRet = True
-                        NVAccumRetSlot = retDisp
-                        If isWord Then NVAccumRetType = "Integer" Else NVAccumRetType = "Long"
-                        Dim funcName As String, fp As Long
-                        funcName = NativeProcName(addr)
-                        fp = InStr(funcName, "("): If fp > 0 Then funcName = Trim$(Left$(funcName, fp - 1))
-                        If NativeIsIdent(funcName) Then
-                            ReDim Preserve NVArgTok(NVArgN): ReDim Preserve NVArgNm(NVArgN)
-                            NVArgTok(NVArgN) = "var_" & Hex$(Abs(retDisp))
-                            NVArgNm(NVArgN) = funcName
-                            NVArgN = NVArgN + 1
+            'Find the eax return-value load in the epilogue window BEFORE the restore.
+            'The load is `mov eax,dword[ebp-d8]` (8B 45 d8) / `mov ax,word[ebp-d8]`
+            '(66 8B 45 d8) / `movsx eax,word[ebp-d8]` (0F BF/B7 45 d8), with ONLY epilogue
+            'instructions (pop reg / mov esp,ebp / mov reg,[ebp-Z]) between it and the
+            'restore.  This handles BOTH the contiguous `eax-load ; SEHptr-load ; restore`
+            'order AND the String-function order `SEHptr-load ; eax-load ; pop edi ; pop esi
+            '; restore` (those funcs save esi/edi, and load eax AFTER the SEH ptr).
+            Dim rj As Long, lo As Long, hitAfter As Long, gotLoad As Boolean
+            lo = j - 18: If lo < 8 Then lo = 8
+            For rj = j - 3 To lo Step -1
+                isWord = False: ret8 = 0: gotLoad = False: hitAfter = 0
+                If b(rj) = &H8B And b(rj + 1) = &H45 And b(rj + 2) >= &H80 Then
+                    ret8 = b(rj + 2): hitAfter = rj + 3: gotLoad = True   'mov eax,dword[ebp-d8]
+                    If rj >= 1 And b(rj - 1) = &H66 Then isWord = True    '(66 prefix -> mov ax,word)
+                ElseIf b(rj) = &HF And (b(rj + 1) = &HBF Or b(rj + 1) = &HB7) And b(rj + 2) = &H45 And b(rj + 3) >= &H80 Then
+                    ret8 = b(rj + 3): hitAfter = rj + 4: gotLoad = True: isWord = True   'movsx/movzx eax,word[ebp-d8]
+                End If
+                If gotLoad Then
+                    If NativeEpiloguePrefixOK(b, hitAfter, j) Then
+                        Dim retDisp As Long
+                        retDisp = ret8: If retDisp >= 128 Then retDisp = retDisp - 256   'signed disp8
+                        '[ebp-4] is VB6's SEH scope-state (TRYLEVEL) slot, never a return
+                        'value - an event-handler Sub loads it into eax in the epilogue as
+                        'SEH teardown (`mov eax,[ebp-4]; mov ecx,[seh]; pop; pop; mov fs:[0],
+                        'ecx`), the same shape as a real String return.  Skip the -4 slot and
+                        'keep searching deeper for a genuine return load.
+                        If retDisp < 0 And retDisp <> -4 Then
+                            NVAccumRet = True
+                            NVAccumRetSlot = retDisp
+                            If isWord Then NVAccumRetType = "Integer" Else NVAccumRetType = "Long"
+                            Dim funcName As String, fp As Long
+                            funcName = NativeProcName(addr)
+                            fp = InStr(funcName, "("): If fp > 0 Then funcName = Trim$(Left$(funcName, fp - 1))
+                            If NativeIsIdent(funcName) Then
+                                ReDim Preserve NVArgTok(NVArgN): ReDim Preserve NVArgNm(NVArgN)
+                                NVArgTok(NVArgN) = "var_" & Hex$(Abs(retDisp))
+                                NVArgNm(NVArgN) = funcName
+                                NVArgN = NVArgN + 1
+                            End If
+                            Exit Sub
                         End If
                     End If
                 End If
-            End If
-            Exit Sub                    'first restore decides this proc
+            Next
+            Exit Sub                    'first restore decides this proc (no return load -> a Sub)
         End If
     Next
 done:
 End Sub
+
+Private Function NativeEpiloguePrefixOK(b() As Byte, ByVal lo As Long, ByVal hi As Long) As Boolean
+    'True when bytes [lo, hi) forward-decode as ONLY epilogue instructions (pop reg /
+    'mov esp,ebp / mov reg,[ebp-Z] / movsx reg,[ebp-Z] / fnclex / fwait / nop) and land
+    'exactly on hi.  Used to validate that a candidate `mov eax,[ebp-retSlot]` really sits
+    'in the function epilogue (only stack teardown between it and the SEH restore).
+    On Error GoTo bad
+    Dim k As Long, o As Long
+    k = lo
+    Do While k < hi
+        o = b(k)
+        If o = &H66 Then k = k + 1: o = b(k)                'operand-size prefix
+        If o >= &H58 And o <= &H5F Then
+            k = k + 1                                       'pop reg
+        ElseIf o = &H90 Then
+            k = k + 1                                       'nop
+        ElseIf o = &H9B Then
+            k = k + 1                                       'fwait
+        ElseIf o = &H8B And b(k + 1) = &HE5 Then
+            k = k + 2                                       'mov esp, ebp
+        ElseIf o = &H89 And b(k + 1) = &HEC Then
+            k = k + 2                                       'mov esp, ebp
+        ElseIf o = &H8B And (b(k + 1) And &HC7) = &H45 Then
+            k = k + 3                                       'mov reg, [ebp-d8]
+        ElseIf o = &HDB And b(k + 1) = &HE2 Then
+            k = k + 2                                       'fnclex
+        ElseIf o = &HF And (b(k + 1) = &HBF Or b(k + 1) = &HB7) And (b(k + 2) And &HC7) = &H45 Then
+            k = k + 4                                       'movsx/movzx reg, [ebp-d8]
+        Else
+            Exit Function                                   'not an epilogue instruction
+        End If
+    Loop
+    NativeEpiloguePrefixOK = (k = hi)
+    Exit Function
+bad:
+End Function
 
 Private Sub NativeDetectFpuReturn(col As Collection, ByVal addr As Long)
     'A framed module Function returns a Double/Single via the FPU: the epilogue loads the
