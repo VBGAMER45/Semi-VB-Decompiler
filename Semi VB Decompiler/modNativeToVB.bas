@@ -176,6 +176,7 @@ Private NVSuppressObjSet As Collection '"O"&objSetVA -> "1" - a __vbaObjSet whos
 'which drops the unconditional decrement store and mangles the condition (`+ 1+1 > 9`).
 Private NVByteClamp As Collection      '"B"&anchorVA -> "opSign|cmpOp|cmpVal|bodyVal|fieldOff"
 Private NVByteClampSkip As Collection  '"B"&va -> "1" - an idiom instruction to suppress
+Private NVFieldStamp As Collection     '"F"&storeVA -> "arrayOff|index|value" - a const byte stamped into an instance array's element 0 (packet GetData's ID byte: mov ecx,id; __vbaUI1I2; mov [pvData],al), reconstructed as field_<arrayOff>(index) = value at the store's VA
 Private NVArgTok() As String       'per-proc: generic tokens (arg_<offset>) to replace with...
 Private NVArgNm() As String        '...their recovered parameter names, at proc finalisation
 Private NVArgN As Long             'count of recovered parameter-name substitutions this proc
@@ -339,6 +340,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     Set NVLocalVtGuid = New Collection
     Set NVByteClamp = New Collection
     Set NVByteClampSkip = New Collection
+    Set NVFieldStamp = New Collection
     Set NVLocalObjType = New Collection
     Set NVNewEmitted = New Collection
     Set NVPropDir = New Collection
@@ -600,6 +602,15 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
             output = output & bcInd & "End If" & vbCrLf
         End If
         If Len(NativeColGet(NVByteClampSkip, "B" & inst.va)) > 0 Then GoTo nextInst
+
+        '--- Const byte stamped into an instance array's element (packet GetData's ID byte) ---
+        Dim fsRec As String
+        fsRec = NativeColGet(NVFieldStamp, "F" & inst.va)
+        If Len(fsRec) > 0 Then
+            Dim fsP() As String
+            fsP = Split(fsRec, "|")
+            output = output & NativeIndentStr() & NativeFieldName(CLng(fsP(0))) & "(" & fsP(1) & ") = " & fsP(2) & vbCrLf
+        End If
 
         '--- Select Case transitions (after If-close so case-body Ifs close first) ---
         Dim svaKey As String, selCV As String, selExpr As String
@@ -7181,6 +7192,74 @@ Private Sub NativeDetectArrayVariantReturn(col As Collection, ByVal addr As Long
     NVArgTok(NVArgN) = "var_" & Hex$(Abs(dataDisp))
     NVArgNm(NVArgN) = funcName
     NVArgN = NVArgN + 1
+
+    'Recover the leading ID-stamp the packet GetData writes into element 0 of the array
+    'before returning it:  mov ecx,<id> ; call __vbaUI1I2 ; mov R,[Me+pvOff] ; mov [R],al.
+    'The array descriptor is at Me+arrayOff and its pvData (SAFEARRAY+0x0C) at Me+pvOff,
+    'so arrayOff = pvOff - 0x0C.  We otherwise drop this store (disp 0, R untracked).
+    'Reconstruct it as `field_<arrayOff>(0) = <id>` at the store's VA (nested here, so it
+    'only runs when the array-Variant return matched - never on a project lacking VarCopy).
+    Dim meReg As Long: meReg = -1
+    For i = 0 To n - 1
+        dmp = Replace(arr(i).dump, " ", "")
+        If NativeOpStart(dmp, Len(dmp) \ 2) = 0 And NativeDumpByte(dmp, 0) = &H8B Then
+            Dim mdisp As Long, mabs As Boolean
+            If NativeMemBase(dmp) = 5 And NativeMemIndex(dmp) < 0 And NativeDecodeDisp(dmp, mdisp, mabs) Then
+                If Not mabs And mdisp = 8 Then
+                    meReg = (NativeDumpByte(dmp, 1) \ 8) And 7   'reg field of `mov R,[ebp+8]`
+                    Exit For
+                End If
+            End If
+        End If
+    Next i
+    If meReg < 0 Then Exit Sub
+
+    'The stamped constant: mov ecx,imm32 (B9) immediately followed by a __vbaUI1I2 call.
+    Dim stampVal As Long, haveStamp As Boolean
+    For i = 0 To n - 2
+        dmp = Replace(arr(i).dump, " ", "")
+        If NativeOpStart(dmp, Len(dmp) \ 2) = 0 And NativeDumpByte(dmp, 0) = &HB9 And Len(dmp) \ 2 >= 5 Then
+            Dim immc As Long: immc = NativeDumpInt32(dmp, 1)
+            If immc >= 0 And immc <= 255 Then
+                Dim dn As String, sn As Long
+                dn = Replace(arr(i + 1).dump, " ", ""): sn = NativeOpStart(dn, Len(dn) \ 2)
+                If Len(dn) \ 2 >= sn + 6 And NativeDumpByte(dn, sn) = &HFF And NativeDumpByte(dn, sn + 1) = &H15 Then
+                    If InStr(dsmNative.GetApiByIatVa(NativeDumpInt32(dn, sn + 2)), "__vbaUI1I2") > 0 Then
+                        stampVal = immc: haveStamp = True: Exit For
+                    End If
+                End If
+            End If
+        End If
+    Next i
+    If Not haveStamp Then Exit Sub
+
+    'The pvData load (mov R,[Me+pvOff]) and the element-0 byte store (mov [R],al, disp 0).
+    For i = 0 To n - 2
+        dmp = Replace(arr(i).dump, " ", "")
+        If NativeOpStart(dmp, Len(dmp) \ 2) = 0 And NativeDumpByte(dmp, 0) = &H8B Then
+            If NativeMemBase(dmp) = meReg And NativeMemIndex(dmp) < 0 Then
+                Dim pvOff As Long, pvAbs As Boolean
+                If NativeDecodeDisp(dmp, pvOff, pvAbs) Then
+                    If Not pvAbs And pvOff > &HC Then
+                        Dim destReg As Long: destReg = (NativeDumpByte(dmp, 1) \ 8) And 7
+                        Dim m As Long
+                        For m = i + 1 To i + 4
+                            If m > n - 1 Then Exit For
+                            Dim ds As String: ds = Replace(arr(m).dump, " ", "")
+                            'mov [destReg], al  (88 /r, mod=00, reg=al=0, rm=destReg, no SIB/disp)
+                            If NativeOpStart(ds, Len(ds) \ 2) = 0 And NativeDumpByte(ds, 0) = &H88 Then
+                                Dim mrm As Long: mrm = NativeDumpByte(ds, 1)
+                                If ((mrm \ &H40) And 3) = 0 And ((mrm \ 8) And 7) = 0 And (mrm And 7) = destReg And (mrm And 7) <> 4 And (mrm And 7) <> 5 Then
+                                    NativeColPut NVFieldStamp, "F" & arr(m).va, (pvOff - &HC) & "|0|" & stampVal
+                                    Exit Sub
+                                End If
+                            End If
+                        Next m
+                    End If
+                End If
+            End If
+        End If
+    Next i
 done:
 End Sub
 
