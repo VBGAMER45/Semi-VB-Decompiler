@@ -1260,6 +1260,13 @@ Private Sub NativeDetectParamWidths(col As Collection)
     'instructions in col.  Anything else (e.g. `sub esp,N`) is a frameless proc.
     frameless = Not (Left$(fd, 2) = "55" And Left$(sd, 4) = "8BEC")
     espDelta = 0: espOK = True
+    'A dword param slot looks identical (4-byte pointer) whether it is Long, String or
+    'object - so width alone leaves it untyped.  To recover Long we read the ACCESS KIND:
+    'regParam(r) mirrors the param offset a register was loaded from (mov r,[param]); a
+    'later NUMERIC-IMMEDIATE use of that register (cmp/add/sub/imul reg,imm with imm<>0)
+    'is a use no String/object pointer ever has -> the slot is Long (code "L").  A
+    'compare to ZERO is excluded (a null-pointer test looks identical).
+    Dim regParam(7) As Long, gmr As Long, gmd As Long, grm As Long, greg As Long, gimm As Long, gdisp As Long, plReg As Long, dreg As Long
     For Each inst In col
         d = UCase$(Replace(inst.dump, " ", "")): n = Len(d) \ 2
         If n < 2 Then GoTo nextInst
@@ -1269,6 +1276,32 @@ Private Sub NativeDetectParamWidths(col As Collection)
             If NativeDumpByte(d, k) = &H66 Then has66 = True: Exit For
         Next
         o = NativeDumpByte(d, p)
+        plReg = -1
+        'Numeric-immediate use of a tracked param register (or a param memory slot) -> Long.
+        If o = &H83 Or o = &H81 Then
+            gmr = NativeDumpByte(d, p + 1)
+            gmd = (gmr \ &H40) And 3: grm = gmr And 7: greg = (gmr \ 8) And 7
+            If gmd = 3 Then
+                If regParam(grm) >= 8 Then
+                    If o = &H83 Then gimm = NativeDumpInt8(d, p + 2) Else gimm = NativeDumpInt32(d, p + 2)
+                    If gimm <> 0 And (greg = 0 Or greg = 1 Or greg = 4 Or greg = 5 Or greg = 6 Or greg = 7) Then _
+                        NativeColAppendCode seen, regParam(grm), "L"
+                End If
+            ElseIf Not frameless And grm = 5 And (greg = 7 Or greg = 0 Or greg = 5) Then  'cmp/add/sub [ebp+off],imm
+                gdisp = -999
+                If gmd = 1 Then
+                    gdisp = NativeDumpInt8(d, p + 2)
+                    If o = &H83 Then gimm = NativeDumpInt8(d, p + 3) Else gimm = NativeDumpInt32(d, p + 3)
+                ElseIf gmd = 2 Then
+                    gdisp = NativeDumpInt32(d, p + 2)
+                    If o = &H83 Then gimm = NativeDumpInt8(d, p + 6) Else gimm = NativeDumpInt32(d, p + 6)
+                End If
+                If gdisp >= 8 And gimm <> 0 Then NativeColAppendCode seen, gdisp, "D": NativeColAppendCode seen, gdisp, "L"
+            End If
+        ElseIf o = &H69 Or o = &H6B Then                'imul r32, r/m, imm -> r/m is numeric
+            gmr = NativeDumpByte(d, p + 1)
+            If ((gmr \ &H40) And 3) = 3 Then If regParam(gmr And 7) >= 8 Then NativeColAppendCode seen, regParam(gmr And 7), "L"
+        End If
         code = "": m = -1
         Select Case o
             Case &HDD                                   'm64: fld / fst / fstp
@@ -1323,8 +1356,16 @@ Private Sub NativeDetectParamWidths(col As Collection)
                 GoTo updateEsp                          'md=0 with rm=5 is [disp32], not ebp
             End If
         End If
-        If disp >= 8 Then NativeColAppendCode seen, disp, code
+        If disp >= 8 Then
+            NativeColAppendCode seen, disp, code
+            'A `mov r32,[param]` (dword load) starts mirroring that param in the dest reg.
+            If o = &H8B And code = "D" Then regParam((modrm \ 8) And 7) = disp: plReg = (modrm \ 8) And 7
+        End If
 updateEsp:
+        'Invalidate the param mirror for any register this instruction overwrites (except
+        'the param-load just recorded), so a reused register can't yield a false Long.
+        dreg = NativeDestReg(d, p)
+        If dreg >= 0 And dreg <> plReg Then regParam(dreg) = 0
         If frameless And espOK Then NativeTrackEsp d, p, espDelta, espOK, pendPush
 nextInst:
     Next
@@ -1341,18 +1382,54 @@ nextInst:
             t = "Double"
         ElseIf InStr(codes, "S") > 0 And InStr(codes, "D") = 0 Then
             t = "Single"
-        ElseIf InStr(codes, "D") > 0 Then
-            t = ""                                       'dword: Long/String/object -> usage decides
-        ElseIf InStr(codes, "W") > 0 Then
+        ElseIf InStr(codes, "W") > 0 And InStr(codes, "D") = 0 Then
             t = "Integer"
-        ElseIf InStr(codes, "B") > 0 Then
+        ElseIf InStr(codes, "B") > 0 And InStr(codes, "D") = 0 And InStr(codes, "W") = 0 Then
             t = "Byte"
+        ElseIf InStr(codes, "L") > 0 Then
+            t = "Long"                                   'dword with a numeric-access proof
+        Else
+            t = ""                                       'dword, no proof -> usage decides String/Long
         End If
         If Len(t) > 0 Then NativeColPut NVParamWidth, Left$(rec, bar - 1), t
 nextRec:
     Next
 done:
 End Sub
+
+Private Function NativeDestReg(ByVal d As String, ByVal p As Long) As Long
+    'The GP register (0-7) this instruction writes, or -1 if none/uncertain.  Used to
+    'invalidate the param-mirror tracking when a register is reassigned.  A conservative
+    'OVER-approximation is safe (clearing a still-valid mirror only causes a Long MISS,
+    'never a false Long); CMP (no write) is correctly excluded so its operand stays tracked.
+    Dim o As Long, o2 As Long, mr As Long
+    NativeDestReg = -1
+    o = NativeDumpByte(d, p)
+    Select Case o
+        Case &H8B, &H8A, &H8D, &H3, &HB, &H13, &H1B, &H23, &H2B, &H33   'op r32, r/m -> dest = reg field
+            mr = NativeDumpByte(d, p + 1): NativeDestReg = (mr \ 8) And 7
+        Case &HF
+            o2 = NativeDumpByte(d, p + 1)
+            Select Case o2
+                Case &HB6, &HB7, &HBE, &HBF, &HAF       'movzx/movsx/imul r32, r/m -> dest = reg field
+                    mr = NativeDumpByte(d, p + 2): NativeDestReg = (mr \ 8) And 7
+            End Select
+        Case &H89, &H88, &H1, &H9, &H11, &H19, &H21, &H29, &H31, &HC7, &HC6, &HD1, &HD3, &HC1, &HF7  'op r/m, * -> dest = rm if mod=3
+            mr = NativeDumpByte(d, p + 1)
+            If ((mr \ &H40) And 3) = 3 Then NativeDestReg = mr And 7
+        Case &H83, &H81                                 'grp1 r/m, imm -> dest = rm if mod=3 (cmp /7 has no write)
+            mr = NativeDumpByte(d, p + 1)
+            If ((mr \ &H40) And 3) = 3 And ((mr \ 8) And 7) <> 7 Then NativeDestReg = mr And 7
+        Case &HFF                                       'inc/dec r/m (/0, /1)
+            mr = NativeDumpByte(d, p + 1)
+            If ((mr \ &H40) And 3) = 3 And (((mr \ 8) And 7) = 0 Or ((mr \ 8) And 7) = 1) Then NativeDestReg = mr And 7
+        Case &HB8 To &HBF: NativeDestReg = o - &HB8     'mov reg, imm32
+        Case &HB0 To &HB7: NativeDestReg = o - &HB0     'mov reg8, imm8 (clobbers the low byte)
+        Case &H58 To &H5F: NativeDestReg = o - &H58     'pop reg
+        Case &H40 To &H47: NativeDestReg = o - &H40     'inc reg
+        Case &H48 To &H4F: NativeDestReg = o - &H48     'dec reg
+    End Select
+End Function
 
 Private Function NativeFpuMem(ByVal d As String, ByVal m As Long) As Boolean
     'True when the ModRM at index m is a MEMORY float load/store (reg field 0/2/3 =
