@@ -377,6 +377,19 @@ Public Sub LinkNativeProcNames(ByVal F As Integer)
             End If
         Next p
 
+        'CLASS / UserControl: map names+addresses by the OBJECT'S METHOD-LINK TABLE
+        '(the authoritative source) instead of the positional address model below.  The
+        'optional object info's aEventLinkArray is an array of E9-jmp thunks - thunk
+        'target = the method's real code address, in vtable slot order.  Each FuncDesc's
+        'vtable offset (voff) gives the slot: linkIndex = (voff - 0x1C) / 4.  This is
+        'immune to the two failure modes of the positional model: internal procs
+        'interleaved by address among the public ones, and a spurious discovered proc
+        'inflating the count (nA > pc).  Falls through to the positional model when the
+        'link table or FuncDesc array is unavailable.
+        If (gObject(oi).ObjectType And &H100000) <> 0 And gObject(oi).aObjectInfo <> 0 Then
+            If NativeMapClassByLinks(F, oi) Then GoTo nextObj
+        End If
+
         'The names array is indexed by the object's FULL procedure table, which can
         'include leading non-code "phantom" slots (interface/property descriptors VB6
         'counts in ProcCount but emits no body for).  The real procedures we
@@ -498,6 +511,120 @@ nextObj:
     Next oi
 done:
 End Sub
+
+Private Function NativeBuildMethodLinks(ByVal F As Integer, ByVal aObjectInfo As Long, ByRef linkAddr() As Long, ByRef nLinks As Long) As Boolean
+    'Build the object's method-link address table.  The optional object info's
+    'aEventLinkArray (base = aObjectInfo + 0x38, field + 0x30) is an array of pointers to
+    'E9-jmp thunks; a thunk's target = the method's real code address.  linkAddr(slot) =
+    'that address (0 if the slot is not an E9 thunk).  iEventCount (+0x28, word) is the
+    'entry count (for a class this is the public-method count).  False if absent.
+    On Error GoTo fail
+    Dim optb As Long, mlt As Long, evCnt As Long, li As Long, lnk As Long, joff As Long
+    If aObjectInfo = 0 Then Exit Function
+    optb = aObjectInfo + &H38
+    evCnt = NativeFileDword(F, optb + &H28) And &HFFFF&
+    mlt = NativeFileDword(F, optb + &H30)
+    If evCnt <= 0 Or evCnt > 4096 Then Exit Function
+    If mlt < OptHeader.ImageBase Then Exit Function
+    ReDim linkAddr(evCnt - 1)
+    For li = 0 To evCnt - 1
+        linkAddr(li) = 0
+        lnk = NativeFileDword(F, mlt + li * 4)
+        If lnk >= OptHeader.ImageBase And lnk < OptHeader.ImageBase + &H1000000 Then
+            If (NativeFileDword(F, lnk) And &HFF) = &HE9 Then       'E9 rel32 thunk
+                joff = NativeFileDword(F, lnk + 1)
+                linkAddr(li) = lnk + 5 + joff
+            End If
+        End If
+    Next li
+    nLinks = evCnt
+    NativeBuildMethodLinks = True
+    Exit Function
+fail:
+End Function
+
+Private Function NativeMapClassByLinks(ByVal F As Integer, ByVal oi As Long) As Boolean
+    'Map a class/usercontrol's public methods to their real addresses+names via the
+    'method-link table (NativeBuildMethodLinks), indexed by each FuncDesc's vtable offset
+    '(linkIndex = (voff - 0x1C) / 4).  Populates gFormVtable (voff -> address, for vtable
+    'self-call resolution) and SubNamelist (name -> address).  The method KIND/SIG is set
+    'separately by LinkNativePublicParams (keyed by address via gFormVtable).  Returns
+    'False (caller falls back to the positional model) when the link table or the
+    'parallel FuncDesc array is unavailable.
+    On Error GoTo fail
+    Dim aoi As Long, linkAddr() As Long, nLinks As Long
+    aoi = gObject(oi).aObjectInfo
+    If Not NativeBuildMethodLinks(F, aoi, linkAddr, nLinks) Then Exit Function
+
+    'Locate the FuncDesc pointer array (parallel to the names array): typeinfo header at
+    'aObjectInfo+0xC, array base at hdr+0x18 (or scan hdr+0x1C..0x140 for it).
+    Dim hdr As Long, clsArr As Long, fj As Long
+    hdr = NativeFileDword(F, aoi + &HC)
+    If hdr < OptHeader.ImageBase Then Exit Function
+    clsArr = 0
+    If NativeArrayHasFuncDesc(F, NativeFileDword(F, hdr + &H18)) Then
+        clsArr = NativeFileDword(F, hdr + &H18)
+    Else
+        For fj = &H1C To &H140 Step 4
+            If NativeArrayHasFuncDesc(F, NativeFileDword(F, hdr + fj)) Then clsArr = NativeFileDword(F, hdr + fj): Exit For
+        Next fj
+    End If
+    If clsArr = 0 Then Exit Function
+
+    'gFormVtable: each populated slot's vtable offset (0x1C + slot*4) -> real address.
+    Dim li As Long
+    For li = 0 To nLinks - 1
+        If linkAddr(li) <> 0 Then
+            On Error Resume Next
+            gFormVtable.Add linkAddr(li), gObjectNameArray(oi) & ":off" & (&H1C + li * 4)
+            On Error GoTo fail
+        End If
+    Next li
+
+    'SubNamelist: each NAMED slot -> its real address, found through the FuncDesc voff.
+    Dim pc As Long, i As Long, namesVA() As Long, nm As String
+    Dim cfd As Long, cvoff As Long, clidx As Long, cAddr As Long, cpos As Long
+    Dim prevName As String, prevPos As Long, prevIdx As Long
+    pc = gObject(oi).ProcCount
+    If pc <= 0 Or gObject(oi).aProcNamesArray = 0 Then Exit Function
+    ReDim namesVA(pc - 1)
+    Seek F, gObject(oi).aProcNamesArray + 1 - OptHeader.ImageBase
+    Get F, , namesVA
+    prevName = "": prevPos = -1: prevIdx = -2
+    For i = 0 To pc - 1
+        If NativeValidNamePtr(namesVA(i)) Then
+            Seek F, namesVA(i) + 1 - OptHeader.ImageBase
+            nm = GetUntilNull(F)
+            If Len(nm) > 0 Then
+                cAddr = 0
+                cfd = NativeFileDword(F, clsArr + i * 4)
+                If cfd <> 0 And NativeIsFuncDesc(F, cfd) Then
+                    cvoff = (NativeFileDword(F, cfd) \ &H10000) And &HFFFC
+                    clidx = (cvoff - &H1C) \ 4
+                    If clidx >= 0 And clidx < nLinks Then cAddr = linkAddr(clidx)
+                End If
+                If cAddr <> 0 Then
+                    cpos = UBound(SubNamelist)
+                    SubNamelist(cpos).strName = gObjectNameArray(oi) & "." & nm
+                    SubNamelist(cpos).offset = cAddr
+                    SubNamelist(cpos).visibility = "Public"
+                    SubNamelist(cpos).kind = ""             'real kind comes from LinkNativePublicParams
+                    'A read/write property = the SAME name at two adjacent slots; mark the
+                    'pair so it still classifies if the FuncDesc kind is unavailable.
+                    If i = prevIdx + 1 And nm = prevName And prevPos >= 0 Then
+                        SubNamelist(prevPos).kind = "Property Get"
+                        SubNamelist(cpos).kind = "Property Let"
+                    End If
+                    ReDim Preserve SubNamelist(UBound(SubNamelist) + 1)
+                    prevName = nm: prevPos = cpos: prevIdx = i
+                End If
+            End If
+        End If
+    Next i
+    NativeMapClassByLinks = True
+    Exit Function
+fail:
+End Function
 
 Private Function NativeValidNamePtr(ByVal va As Long) As Boolean
     'A real procedure-name pointer points inside this image.  Some EXEs fill unused
