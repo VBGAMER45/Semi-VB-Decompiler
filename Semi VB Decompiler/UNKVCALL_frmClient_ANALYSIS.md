@@ -56,6 +56,21 @@ indirect-predeclared path just added for clsBitmap) → the class vtable map res
 offset. The predeclared-clsBitmap case (49d91d1) is the template; these other globals need
 their class identified.
 
+> **INVESTIGATED 2026-06-19 — mostly already works; remaining gap is a FuncDesc-array bound.**
+> These globals are typically FORM instances (`global_0055DCB0 As frmNPCTrade`,
+> `global_0055D5A0 As frmClient`), correctly typed at their `__vbaNew2`, and MANY methods
+> already resolve (`global_0055DCB0.Update_Info`, `.Add_NPC_Item`, `global_0055D5A0.Update_Carry`).
+> The unresolved ones are HIGH-offset form methods (0x710, 0x788–0x7B8) whose FuncDesc sits
+> beyond the `i <= 255` cap in LinkNativeProcNames (modNative.bas ~486) that maps the
+> per-object FuncDesc array → `gFormVtable`. **Raising the cap is NOT safe**: beyond ~255 the
+> FuncDesc pointer array and the name array stop being parallel for big forms (frmNPCTrade has
+> picNPCItem(28)/picPlayerItem(28)/… control-array elements), so the extra entries map
+> offsets to the WRONG addresses — tested: it resolved ~17 (Update_Attack_Delay) but
+> MIS-resolved others (`frmClient.Clear_Screen(global_00560E54)`, `Add_Volatile_Text` with
+> dropped args, `If New frmClient < 0`). Counters didn't catch it (wrong-but-resolved names).
+> Reverted. A safe fix needs the REAL FuncDesc-array length (not a flat cap) so only
+> genuinely-parallel entries are mapped — non-trivial.
+
 ## 4. Intrinsic control — `frmClient.<ctl>.UnkVCall` (37)
 
 Receiver resolves (lblSkillValue/lblSkillName/lblStrength/lblLevel/vscrollSkill/…) but the
