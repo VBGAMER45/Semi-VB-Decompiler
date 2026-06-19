@@ -4078,6 +4078,12 @@ Private Function NativeProcessInst(inst As CInstruction) As String
     ind = NativeIndentStr()
     NVCurVa = inst.va          'so the SIB read/store renderers can look up NVElemIdx
 
+    'SEH frame install/restore `mov fs:[0],reg` (64 89 ...): the prologue setup pushed
+    'the handler address and prev-frame onto the stack just before it, which otherwise
+    'linger on the call-argument stack and leak into the first runtime call as a stray
+    'arg (e.g. `UCase$(s, 4199814)`).  Clear the push stack at the SEH boundary.
+    If Left$(UCase$(Replace(inst.dump, " ", "")), 4) = "6489" Then NVPushTop = 0
+
     'A write to a register invalidates the 16-bit word shadow for that register (the
     'setter, a 16-bit mov-from-memory, re-populates it below).  This keeps a captured
     'array-element / Integer-field word from being read by a later, unrelated
