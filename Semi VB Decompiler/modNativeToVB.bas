@@ -210,6 +210,8 @@ Private NVProcEndWord As String    'closing keyword for this proc: "Sub" / "Func
 Private NVAccumRet As Boolean      'the proc returns a simple value in the accumulator (ax/eax) - a module Function whose kind/type is stripped (recovered from the epilogue return-load)
 Private NVRetbuf As Boolean        'the proc returns a Variant/String/UDT via a hidden retbuf (first param, ebp+8) - a module Function (from gRetbufFunc); the header drops that param and renders `As Variant`
 Private NVAccumRetType As String   'recovered return type from that load: "Integer" (word/ax) or "Long" (dword/eax)
+Private NVFpuRet As Boolean        'the proc returns a Double/Single via the FPU: the epilogue loads the result into ST(0) (`fld qword/dword [mem]` before the teardown/ret) - an unclassified module Function (recovered by NativeDetectFpuReturn)
+Private NVFpuRetType As String     'recovered FPU return type: "Double" (qword/DD) or "Single" (dword/D9)
 Private NVAccumRetSlot As Long      'the return slot's ebp displacement (negative; 0 = none) - so a constant store `mov [ebp-slot],imm` (0xC7) to it renders `FuncName = imm`
 Private NVClassRetType As String    'CLASS Function/Property-Get return type, inferred from the width of the store into its hidden [out,retval] retbuf param (word=Integer, dword=Long, strcopy=String); "" if undetermined
 Private NVRetN As Long             'the proc's `ret imm16` operand (callee-popped arg bytes), -1 if none
@@ -274,6 +276,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVIsClass = NativeOwnerIsClass(NVForm)
     NVProcEndWord = "Sub"
     NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0: NVRetbuf = False: NVClassRetType = ""
+    NVFpuRet = False: NVFpuRetType = ""
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastLeaField = False: NVLastCmp = ""
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVCmpIsBool = False: NVFpuChk = False
@@ -522,6 +525,11 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'the proc name so `FuncName = value` reads as VB's implicit return.  MUST run before
     'NativeProcHeader (which reads NVAccumRet to emit `Function ... As <type>`).
     NativeDetectAccumReturn b, addr
+    'A module Function returning a Double/Single via the FPU (the epilogue loads the
+    'result into ST(0) - `fld qword/dword [mem]` before the teardown/ret).  Promotes the
+    'unclassified Sub to `Function ... As Double`.  Mutually exclusive with the
+    'accumulator return (eax) - only set when that did not fire.
+    If Not NVAccumRet Then NativeDetectFpuReturn col, addr
     'A module Function returning a Variant/String/UDT via a hidden retbuf (first param):
     'mark it so NativeProcHeader emits `Function ... As Variant` and drops the retbuf
     'param.  Mutually exclusive with the accumulator return (different epilogue).
@@ -6637,6 +6645,65 @@ Private Sub NativeDetectAccumReturn(b() As Byte, ByVal addr As Long)
 done:
 End Sub
 
+Private Sub NativeDetectFpuReturn(col As Collection, ByVal addr As Long)
+    'A framed module Function returns a Double/Single via the FPU: the epilogue loads the
+    'result into ST(0) (`fld qword [mem]` = DD /0 / `fld dword [mem]` = D9 /0) immediately
+    'before the stack teardown and ret.  A Sub never leaves a value in ST(0) at return, so
+    'this reliably marks the proc a Function and recovers As Double / As Single.  (The
+    'in-body return-value assignment is a separate, larger effort - signature only here.)
+    On Error GoTo done
+    NVFpuRet = False: NVFpuRetType = ""
+    'Skip anything already classified as a Function/Property/Sub by typeinfo or the list.
+    Dim kind As String, mi As Long
+    If NativeTryMethodKind(addr, kind) Then
+        If InStr(kind, "Function") > 0 Or InStr(kind, "Get") > 0 Or InStr(kind, "Property") > 0 Or InStr(kind, "Sub") > 0 Then Exit Sub
+    End If
+    mi = NativeProcMatchIdx(addr)
+    If mi >= 0 Then
+        If InStr(SubNamelist(mi).kind, "Function") > 0 Or InStr(SubNamelist(mi).kind, "Property") > 0 Then Exit Sub
+    End If
+    Dim n As Long, k As Long, arr() As CInstruction, inst As CInstruction
+    n = col.Count
+    If n < 2 Then Exit Sub
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    'Locate the final RET.
+    Dim ri As Long
+    ri = -1
+    For k = n - 1 To 0 Step -1
+        If (arr(k).cmdType And C_TYPEMASK) = C_RET Then ri = k: Exit For
+    Next
+    If ri < 1 Then Exit Sub
+    'Walk backward over epilogue-only instructions (pop reg / mov esp,ebp / leave) to the
+    'return-load fld.  Any other instruction means this is not the FPU-return shape.
+    Dim j As Long, d As String, nn As Long, p As Long, o As Long, mr As Long
+    For j = ri - 1 To 0 Step -1
+        d = UCase$(Replace(arr(j).dump, " ", "")): nn = Len(d) \ 2
+        If nn = 0 Then GoTo prevj
+        p = NativeOpStart(d, nn)
+        o = NativeDumpByte(d, p)
+        If o = &HDD Or o = &HD9 Then                       'fld qword(DD)/dword(D9) [mem] -> the return load
+            mr = NativeDumpByte(d, p + 1)
+            If ((mr \ 8) And 7) = 0 And ((mr \ &H40) And 3) <> 3 Then
+                NVFpuRet = True
+                If o = &HDD Then NVFpuRetType = "Double" Else NVFpuRetType = "Single"
+            End If
+            Exit Sub
+        ElseIf o >= &H58 And o <= &H5F Then                 'pop reg (pop ebp/esi/edi)
+        ElseIf o = &HC9 Then                               'leave
+        ElseIf o = &H8B And NativeDumpByte(d, p + 1) = &HE5 Then  'mov esp, ebp
+        ElseIf o = &H89 And NativeDumpByte(d, p + 1) = &HEC Then  'mov esp, ebp
+        ElseIf (o = &H83 Or o = &H81) And (NativeDumpByte(d, p + 1) And &HC7) = &HC4 Then  'add/sub esp, imm (stack cleanup)
+        ElseIf o = &H90 Then                               'nop padding
+        Else
+            Exit Sub                                       'a real instruction, not an epilogue -> not this shape
+        End If
+prevj:
+    Next
+done:
+End Sub
+
 Private Sub NativeDetectClassRetType(b() As Byte, ByVal addr As Long)
     'A CLASS Function / Property Get returns its value through a hidden [out,retval]
     'retbuf param (the LAST param: Me@8, user params@0xC.., retbuf last).  Infer the
@@ -10666,6 +10733,8 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
     'An unclassified module Function recovered from its accumulator-return epilogue
     '(NativeDetectAccumReturn): promote Sub -> Function and remember the return type.
     If kindStr = "Sub" And NVAccumRet Then kindStr = "Function": NVProcEndWord = "Function"
+    'An unclassified module Function returning a Double/Single via the FPU (NativeDetectFpuReturn).
+    If kindStr = "Sub" And NVFpuRet Then kindStr = "Function": NVProcEndWord = "Function"
     'A module Function returning a Variant/String/UDT via a hidden retbuf (first param).
     'Promote Sub -> Function; the param list drops the retbuf slot (NativeProcParams).
     If kindStr = "Sub" And NVRetbuf Then kindStr = "Function": NVProcEndWord = "Function"
@@ -10698,6 +10767,8 @@ Private Function NativeProcHeader(ByVal addr As Long) As String
     'Append the recovered return type for an accumulator-return module Function.
     Dim asType As String
     If NVAccumRet And Len(NVAccumRetType) > 0 And InStr(kindStr, "Function") > 0 Then asType = " As " & NVAccumRetType
+    'An FPU-return module Function -> As Double / As Single (when nothing else typed it).
+    If NVFpuRet And Len(asType) = 0 And Len(NVFpuRetType) > 0 And InStr(kindStr, "Function") > 0 Then asType = " As " & NVFpuRetType
     'A retbuf return is a Variant/String/UDT - indistinguishable from the binary, so As Variant.
     If NVRetbuf And InStr(kindStr, "Function") > 0 Then asType = " As Variant"
     'A CLASS Function / Property Get return type recovered from the retbuf store width.
@@ -10722,9 +10793,9 @@ Private Function NativeProcParams(ByVal kindStr As String, ByVal hasMe As Boolea
     retbufFirst = (NVRetbuf And Not hasMe)
     If hasMe Or retbufFirst Then nParams = slots - 1 Else nParams = slots   'drop the hidden Me/this or retbuf slot
     'A CLASS Function returns via a hidden [out,retval] retbuf param - drop it.  An
-    'accumulator-return module Function (NVAccumRet) returns in ax/eax with NO stack
-    'retslot, so keep every parameter (else a real argument is wrongly dropped).
-    If InStr(kindStr, "Function") > 0 And Not NVAccumRet And Not retbufFirst Then nParams = nParams - 1
+    'accumulator-return (NVAccumRet, ax/eax) or FPU-return (NVFpuRet, ST(0)) module
+    'Function has NO stack retslot, so keep every parameter (else a real arg is dropped).
+    If InStr(kindStr, "Function") > 0 And Not NVAccumRet And Not NVFpuRet And Not retbufFirst Then nParams = nParams - 1
     If nParams < 0 Then nParams = 0
     base = IIf(hasMe Or retbufFirst, &HC, &H8)   'first user parameter's ebp offset
     For i = 0 To nParams - 1
