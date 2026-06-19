@@ -76,6 +76,17 @@ _Global member. **Fix:** route all 0xC/0x10 through the existing Load/Unload sta
 renderer regardless of arg shape, and add the other _Global slots to
 NativeGlobalMethodByOffset (App/Screen/Clipboard accessors live here too).
 
+> **INVESTIGATED 2026-06-19 — NOT a missing slot; a receiver-typing edge case.** 0xC/0x10
+> ARE in the slot map and resolve at **40** sites (`Load frmX`/`Unload frmX`/`Unload Me`).
+> The 26 here fail because the `_Global` render requires `NVRegObjVt(receiver)="_Global"`,
+> which depends on `NVObjClass[_GlobalGlobal]="_Global"` being set per-proc at the
+> `__vbaNew2`. At these 26 sites the typing chain (`mov esi,[_Global]; mov vt,[esi]`)
+> doesn't produce `NVRegObjVt="_Global"` even though the disasm is **near-identical** to the
+> resolved sites (verified cmdAppeal_Click vs ItemUse_Multiple — only register choice
+> differs). Root cause not pinned down without engine instrumentation; likely a localized
+> per-proc state difference (possibly a disassembly desync near the `_Global` guard, e.g.
+> ~0x467959). Deferred — needs runtime tracing of `NVObjClass`/`NVRegObjType` at these sites.
+
 ## 6. Winsock OCX — `frmClient.Winsock1.UnkVCall` (21)
 
 Early-bound vtable calls on the Winsock OCX (offsets 0x28/0x30/0x38/0x40/0x48/0x50/0x68/0x70…).
@@ -84,6 +95,20 @@ these are **early-bound** `call [vt+off]` — the OCX typelib is keyed by DISPID
 vtable offset, so the offset doesn't map directly. **Fix:** build a vtable-offset→member map
 from the OCX typelib (the funcs are laid out in vtable order after IDispatch), then resolve
 like the intrinsic-control case.
+
+> **INVESTIGATED 2026-06-19 — the resolver ALREADY EXISTS but the offsets don't map.**
+> `modCOM.ResolveVtableMember`/`VtableMemberName` already map vtable offset → member via the
+> typelib's `FuncDesc.oVft` (`clsTypeLibInfo.FunctionVTOffset`), wired into `NativeControlProp`.
+> Adding a `NativeUnkVCall` fallback that calls it (so the 21 reach the resolver) produced
+> **zero change**: `VtableMemberName(Winsock, 0x50)` returns "" because **no Winsock typelib
+> function has `oVft == 0x50`**. The observed early-bound offsets are **8-byte-spaced**
+> (0x28/0x30/0x38/0x40/0x48/0x50…), not the 4-byte spacing of a standard dual-interface
+> vtable — so VB calls the OCX through a WRAPPER/extender vtable whose layout differs from the
+> typelib interface (`oVft`). Resolving needs the actual VB-OCX-wrapper vtable layout, not the
+> typelib `oVft` — a deeper COM-layout investigation. (Reverted the inert fallback + an
+> unscoped `ResolveVtableMember` change that added mis-resolution risk without benefit.)
+> The MSCOMCTL Slider/StatusBar early-bound resolution the resolver was built for works
+> because those controls' offsets DO match their typelib `oVft`; Winsock's do not.
 
 ---
 
