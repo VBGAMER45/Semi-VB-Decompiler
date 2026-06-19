@@ -214,6 +214,7 @@ Private NVFpuRet As Boolean        'the proc returns a Double/Single via the FPU
 Private NVFpuRetType As String     'recovered FPU return type: "Double" (qword/DD) or "Single" (dword/D9)
 Private NVAccumRetSlot As Long      'the return slot's ebp displacement (negative; 0 = none) - so a constant store `mov [ebp-slot],imm` (0xC7) to it renders `FuncName = imm`
 Private NVClassRetType As String    'CLASS Function/Property-Get return type, inferred from the width of the store into its hidden [out,retval] retbuf param (word=Integer, dword=Long, strcopy=String); "" if undetermined
+Private NVParamWidth As Collection  'per-proc parameter type from ACCESS WIDTH at ebp+off (key=decimal off, value="Double"/"Single"/"Integer"/"Byte"); a Double also implies the off+4 hi-dword slot is dropped.  Filled by NativeDetectParamWidths, consumed by NativeRefineParamTypes.
 Private NVRetN As Long             'the proc's `ret imm16` operand (callee-popped arg bytes), -1 if none
 Private NVApiStubCache As Collection 'declared-DLL stub address -> resolved API name (global, "" = not a stub)
 Private NVCmpL As String           'pending condition: left operand (symbolic)
@@ -544,6 +545,13 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     '(If ds7.Init(..)) keeps flowing to its consumer (no duplicate Call).
     NativeDetectLocalReads col
 
+    'Infer each parameter's TYPE from the ACCESS WIDTH at its ebp+offset (fld qword =
+    'Double, fld dword = Single, movsx/movzx word = Integer, byte = Byte).  Fills
+    'NVParamWidth; the post-pass NativeRefineParamTypes (after the body is built)
+    'combines it with USAGE evidence and rewrites the generic `(arg_8, arg_C)` list to
+    'a typed one.  Strong width signals only; the ambiguous dword case is left to usage.
+    NativeDetectParamWidths col
+
     output = NativeProcHeader(addr) & vbCrLf
 
     'A Function/Property Get returns its value through a hidden retbuf pointer (the
@@ -765,6 +773,7 @@ nextInst:
     output = NativeMergeElseIf(output)
     output = NativeStripEmptyIfs(output)
     output = NativeRefineReturnType(output)
+    output = NativeRefineParamTypes(output)
     DecompileNativeProcToVB = NativeInsertLocalDims(output)
     Exit Function
 fail:
@@ -1217,6 +1226,264 @@ Private Function NativeRefineReturnType(ByVal body As String) As String
     End If
 done:
     NativeRefineReturnType = body
+End Function
+
+Private Sub NativeDetectParamWidths(col As Collection)
+    'Infer each stack parameter's TYPE from the WIDTH of the instructions that ACCESS
+    'it at [ebp+off] (off > 0).  Width is the strongest, least ambiguous signal:
+    '  fld qword [ebp+off]  (DD /0)          -> Double  (8 bytes: the off+4 hi slot is
+    '                                           a phantom param -> dropped by the rewrite)
+    '  fld dword [ebp+off]  (D9 /0)          -> Single
+    '  movsx/movzx r32, word [ebp+off]       -> Integer (0F B7/BF)
+    '  movsx/movzx r32, byte [ebp+off]       -> Byte    (0F B6/BE) / mov r8,[ebp+off] (8A)
+    '  mov r32,[ebp+off] / add/sub/cmp dword -> dword (a Long OR a String/object pointer,
+    '                                           left to the usage pass; also VETOes a
+    '                                           narrower reading so a Long never types Integer)
+    'Per-offset the WIDEST/most-specific access wins; a dword data access vetoes word/byte.
+    Set NVParamWidth = New Collection
+    On Error GoTo done
+    Dim seen As Collection
+    Set seen = New Collection
+    Dim inst As CInstruction, d As String, n As Long, p As Long, has66 As Boolean
+    Dim o As Long, o2 As Long, m As Long, modrm As Long, md As Long, rm As Long, disp As Long, code As String, k As Long
+    For Each inst In col
+        d = UCase$(Replace(inst.dump, " ", "")): n = Len(d) \ 2
+        If n < 2 Then GoTo nextInst
+        p = NativeOpStart(d, n)
+        has66 = False
+        For k = 0 To p - 1
+            If NativeDumpByte(d, k) = &H66 Then has66 = True: Exit For
+        Next
+        o = NativeDumpByte(d, p)
+        code = "": m = -1
+        Select Case o
+            Case &HDD                                   'fld qword / fst / fstp (m64)
+                m = p + 1: If NativeFldReg0(d, m) Then code = "Q"
+            Case &HD9                                   'fld dword (m32)
+                m = p + 1: If NativeFldReg0(d, m) Then code = "S"
+            Case &HF                                    'two-byte: movzx/movsx
+                o2 = NativeDumpByte(d, p + 1)
+                m = p + 2
+                Select Case o2
+                    Case &HB6, &HBE: code = "B"          'movzx/movsx r32, r/m8
+                    Case &HB7, &HBF: code = "W"          'movzx/movsx r32, r/m16
+                End Select
+            Case &H8B, &H3, &H2B, &H3B, &H39, &H1B, &H13, &H23, &H33, &HB, &H8D  'mov/arith/cmp/lea r32, r/m32
+                m = p + 1: If has66 Then code = "W" Else code = "D"
+            Case &H8A                                   'mov r8, r/m8
+                m = p + 1: code = "B"
+        End Select
+        If Len(code) = 0 Or m < 0 Then GoTo nextInst
+        'Operand must be [ebp+disp] with disp a positive parameter offset.
+        modrm = NativeDumpByte(d, m)
+        md = (modrm \ &H40) And 3: rm = modrm And 7
+        If rm <> 5 Then GoTo nextInst                   'not [ebp+disp] (rm=5/ebp)
+        If md = 1 Then
+            disp = NativeDumpInt8(d, m + 1)
+        ElseIf md = 2 Then
+            disp = NativeDumpInt32(d, m + 1)
+        Else
+            GoTo nextInst                               'md=0 with rm=5 is [disp32], not ebp
+        End If
+        If disp < 8 Then GoTo nextInst                  'negative = local, +4 = return addr
+        NativeColAppendCode seen, disp, code
+nextInst:
+    Next
+    'Finalize: pick the type from the accumulated access codes for each offset.  `seen`
+    'stores value = "off|codes" so For Each (which yields VALUES) recovers both.
+    Dim v As Variant, rec As String, codes As String, t As String, bar As Long
+    For Each v In seen
+        rec = CStr(v)
+        bar = InStr(rec, "|")
+        If bar = 0 Then GoTo nextRec
+        codes = Mid$(rec, bar + 1)
+        t = ""
+        If InStr(codes, "Q") > 0 Then
+            t = "Double"
+        ElseIf InStr(codes, "S") > 0 And InStr(codes, "D") = 0 Then
+            t = "Single"
+        ElseIf InStr(codes, "D") > 0 Then
+            t = ""                                       'dword: Long/String/object -> usage decides
+        ElseIf InStr(codes, "W") > 0 Then
+            t = "Integer"
+        ElseIf InStr(codes, "B") > 0 Then
+            t = "Byte"
+        End If
+        If Len(t) > 0 Then NativeColPut NVParamWidth, Left$(rec, bar - 1), t
+nextRec:
+    Next
+done:
+End Sub
+
+Private Function NativeFldReg0(ByVal d As String, ByVal m As Long) As Boolean
+    'True when the ModRM at index m is a memory operand with reg field 0 (an FPU
+    'load `fld` for DD/D9, as opposed to fst/fstp/fcom) - i.e. a READ of the operand.
+    Dim modrm As Long
+    modrm = NativeDumpByte(d, m)
+    NativeFldReg0 = (((modrm \ 8) And 7) = 0) And (((modrm \ &H40) And 3) <> 3)
+End Function
+
+Private Sub NativeColAppendCode(c As Collection, ByVal off As Long, ByVal code As String)
+    'Append a one-letter access code to the per-offset accumulator (deduped per offset).
+    'Value form is "off|codes" so a `For Each` over the Collection's VALUES recovers the
+    'offset together with its codes (a VB Collection cannot enumerate its keys).
+    Dim key As String, cur As String, codes As String, bar As Long
+    key = "o" & CStr(off)
+    cur = NativeColGet(c, key)
+    If Len(cur) = 0 Then
+        NativeColPut c, key, CStr(off) & "|" & code
+    Else
+        bar = InStr(cur, "|")
+        codes = Mid$(cur, bar + 1)
+        If InStr(codes, code) = 0 Then NativeColPut c, key, CStr(off) & "|" & codes & code
+    End If
+End Sub
+
+Private Function NativeRefineParamTypes(ByVal body As String) As String
+    'Post-pass: rewrite a generic `(arg_8, arg_C, ...)` parameter list with inferred
+    'types, combining the width pre-pass (NVParamWidth: Double/Single/Integer/Byte) with
+    'USAGE evidence scanned from the finished body (String / Long for the dword slots).
+    'A Double param occupies TWO dword slots (lo arg_<off> + hi arg_<off+4>); the hi
+    'slot is a phantom the generic list emits as a separate param -> dropped here.
+    'Only untyped lone `arg_<hex>` tokens are touched; already-typed params (frameless
+    'Double sig, typeinfo names, event sigs) are left exactly as they are.
+    On Error GoTo done
+    Dim lines() As String, hdr As String, op As Long, cp As Long, inside As String
+    lines = Split(body, vbCrLf)
+    If UBound(lines) < 0 Then GoTo done
+    hdr = lines(0)
+    If Not NativeIsProcHeaderLine(hdr) Then GoTo done
+    op = InStr(hdr, "(")
+    If op = 0 Then GoTo done
+    'Closing paren of the param list = the LAST ')' before any trailing ` As <type>` /
+    'comment.  Params never contain ')' in our generic form, so match the first ')'.
+    cp = InStr(op, hdr, ")")
+    If cp = 0 Or cp <= op + 1 Then GoTo done            'empty param list -> nothing to do
+    inside = Mid$(hdr, op + 1, cp - op - 1)
+    Dim parts() As String, i As Long, tok As String, off As Long, t As String, outp As String, nOut As Long
+    parts = Split(inside, ", ")
+    Dim dropOff As Collection
+    Set dropOff = New Collection
+    'First pass: any Double slot marks its hi-dword (off+4) for removal.
+    For i = 0 To UBound(parts)
+        tok = Trim$(parts(i))
+        If NativeIsLoneArgTok(tok) Then
+            off = NativeHexVal(Mid$(tok, 5))
+            If NativeColGet(NVParamWidth, CStr(off)) = "Double" Then NativeColPut dropOff, CStr(off + 4), "1"
+        End If
+    Next
+    nOut = 0
+    For i = 0 To UBound(parts)
+        tok = Trim$(parts(i))
+        If Not NativeIsLoneArgTok(tok) Then
+            'Already typed / renamed -> keep verbatim.
+            If Len(outp) > 0 Then outp = outp & ", "
+            outp = outp & tok
+            nOut = nOut + 1
+            GoTo nextPart
+        End If
+        off = NativeHexVal(Mid$(tok, 5))
+        If Len(NativeColGet(dropOff, CStr(off))) > 0 Then GoTo nextPart    'phantom Double hi slot -> drop
+        t = NativeColGet(NVParamWidth, CStr(off))                          'width signal
+        If Len(t) = 0 Then t = NativeParamUsageType(lines, tok)            'usage signal (String/Long)
+        If Len(outp) > 0 Then outp = outp & ", "
+        If Len(t) > 0 Then outp = outp & tok & " As " & t Else outp = outp & tok
+        nOut = nOut + 1
+nextPart:
+    Next
+    lines(0) = Left$(hdr, op) & outp & Mid$(hdr, cp)
+    NativeRefineParamTypes = Join(lines, vbCrLf)
+    Exit Function
+done:
+    NativeRefineParamTypes = body
+End Function
+
+Private Function NativeIsLoneArgTok(ByVal s As String) As Boolean
+    'True when s is exactly one untyped `arg_<hex>` token (a generic parameter that has
+    'not been renamed to a real name or given a type yet).
+    Dim i As Long, ch As Long
+    If Left$(s, 4) <> "arg_" Or Len(s) <= 4 Then Exit Function
+    For i = 5 To Len(s)
+        ch = Asc(Mid$(s, i, 1))
+        If Not ((ch >= 48 And ch <= 57) Or (ch >= 65 And ch <= 70) Or (ch >= 97 And ch <= 102)) Then Exit Function
+    Next
+    NativeIsLoneArgTok = True
+End Function
+
+Private Function NativeParamUsageType(ByRef lines() As String, ByVal tok As String) As String
+    'Disambiguate a dword parameter (Long vs String vs object) from how it is USED in
+    'the body.  High-precision signals only; CONFLICTING signals (or an object signal)
+    'yield "" (left untyped) so a wrong type is never emitted program-wide.
+    Dim i As Long, ln As String, sawStr As Boolean, sawLong As Boolean, sawObj As Boolean
+    For i = 1 To UBound(lines)
+        ln = lines(i)
+        If InStr(ln, tok) = 0 Then GoTo nextLn
+        'Aggregate / object signal -> bail out of typing entirely (don't guess
+        'Long/String).  An indexed `arg_X(...)` is a UDT-record or array param (a
+        'whole-record ByRef passed to RecAssign/RecDestruct, or an array element); a
+        'scalar String/Long is never indexed - so its concat/arithmetic appearance is
+        'a misrendering, not evidence of a scalar type.
+        If InStr(ln, tok & "(") > 0 Then sawObj = True
+        If InStr(ln, tok & ".") > 0 Then sawObj = True
+        If InStr(ln, "Set ") > 0 And InStr(ln, "= " & tok) > 0 Then sawObj = True
+        If InStr(ln, tok & " Is ") > 0 Then sawObj = True
+        'String signals.
+        If InStr(ln, "& " & tok) > 0 Or InStr(ln, tok & " &") > 0 Then sawStr = True       'concat
+        If NativeTokIsArgOf(ln, tok, "Len|LenB|UCase$|LCase$|Trim$|LTrim$|RTrim$|Asc|AscW|StrReverse") Then sawStr = True
+        If NativeTokIsFirstArgOf(ln, tok, "Left$|Right$|Mid$|Replace|Split|StrConv|InStrRev") Then sawStr = True
+        'Long signals.
+        If NativeTokIsArgOf(ln, tok, "CLng|Chr$|ChrW$|String$|Space$|Hex$|Oct$") Then sawLong = True
+        If InStr(ln, tok & " + ") > 0 Or InStr(ln, " + " & tok) > 0 Then sawLong = True
+        If InStr(ln, tok & " - ") > 0 Or InStr(ln, " - " & tok) > 0 Then sawLong = True
+        If InStr(ln, tok & " * ") > 0 Or InStr(ln, " * " & tok) > 0 Then sawLong = True
+        If InStr(ln, tok & " \ ") > 0 Or InStr(ln, tok & " Mod ") > 0 Then sawLong = True
+        If NativeTokNumericCompare(ln, tok) Then sawLong = True
+nextLn:
+    Next
+    If sawObj Then Exit Function                          'object -> leave untyped
+    If sawStr And sawLong Then Exit Function              'ambiguous -> leave untyped
+    If sawStr Then NativeParamUsageType = "String": Exit Function
+    If sawLong Then NativeParamUsageType = "Long"
+End Function
+
+Private Function NativeTokIsArgOf(ByVal ln As String, ByVal tok As String, ByVal fns As String) As Boolean
+    'True when tok appears as `<fn>(tok` (immediately after the open paren) for any of
+    'the pipe-separated function names - i.e. tok is the (first/sole) argument.
+    Dim arr() As String, i As Long
+    arr = Split(fns, "|")
+    For i = 0 To UBound(arr)
+        If InStr(ln, arr(i) & "(" & tok) > 0 Then NativeTokIsArgOf = True: Exit Function
+    Next
+End Function
+
+Private Function NativeTokIsFirstArgOf(ByVal ln As String, ByVal tok As String, ByVal fns As String) As Boolean
+    'True when tok is the FIRST argument of one of the named functions: `<fn>(tok,`
+    '(a comma follows, since these take more args).  Used for funcs whose first arg is
+    'a String but later args are numbers (Left$/Right$/Mid$/Replace/Split/StrConv).
+    Dim arr() As String, i As Long
+    arr = Split(fns, "|")
+    For i = 0 To UBound(arr)
+        If InStr(ln, arr(i) & "(" & tok & ",") > 0 Then NativeTokIsFirstArgOf = True: Exit Function
+        If InStr(ln, arr(i) & "(" & tok & ")") > 0 Then NativeTokIsFirstArgOf = True: Exit Function
+    Next
+End Function
+
+Private Function NativeTokNumericCompare(ByVal ln As String, ByVal tok As String) As Boolean
+    'True when tok is compared against a numeric literal: `tok <op> <digit>` or
+    '`<digit> <op> tok`, for op in = <> < > <= >=.  A pure-numeric comparand means the
+    'parameter is numeric (Long).  A comparison against a string literal / another
+    'identifier is NOT counted (could be String).
+    Dim ops As Variant, opv As Variant, p As Long, after As String, before As String, c As String
+    ops = Array(" = ", " <> ", " < ", " > ", " <= ", " >= ")
+    For Each opv In ops
+        p = InStr(ln, tok & CStr(opv))
+        If p > 0 Then
+            after = Trim$(Mid$(ln, p + Len(tok) + Len(CStr(opv))))
+            c = Left$(after, 1)
+            If c = "-" And Len(after) > 1 Then c = Mid$(after, 2, 1)
+            If c >= "0" And c <= "9" Then NativeTokNumericCompare = True: Exit Function
+        End If
+    Next
 End Function
 
 Private Function NativeInferSetType(ByVal rhs As String) As String
