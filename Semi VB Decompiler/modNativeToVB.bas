@@ -7388,6 +7388,17 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                 'loading an App/Screen/Clipboard-typed local tags the register as
                 'that object pointer; dereferencing such a pointer ([objPtr], disp 0)
                 'tags the register as that object's vtable.
+                'Capture the BASE register's object identity BEFORE the dest-clear below:
+                'a same-register deref `mov edx,[edx]` (object ptr -> its vtable) has
+                'reg = bse, so clearing the dest first would wipe bse's GUID/class and the
+                'disp-0 branch would read empty.  This is why only the FIRST method call in
+                'a `With control` block resolved (its vtable went to a DIFFERENT register);
+                'the rest (`mov edx,[edx]; call [edx+off]`) dropped to UnkVCall.
+                Dim hadObjType As String, hadObjGuid As String, hadObjInst As String
+                hadObjType = "": hadObjGuid = "": hadObjInst = ""
+                If Not isAbs And disp = 0 And bse >= 0 And bse <= 7 Then
+                    hadObjType = NVRegObjType(bse): hadObjGuid = NVRegObjGuid(bse): hadObjInst = NVRegObjInst(bse)
+                End If
                 NVRegObjType(reg) = "": NVRegObjVt(reg) = "": NVRegObjGuid(reg) = "": NVRegObjVtGuid(reg) = "": NVRegObjInst(reg) = ""
                 Dim hadFieldCls As String, hadFieldRecv As String
                 hadFieldCls = "": hadFieldRecv = ""
@@ -7445,9 +7456,9 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     If Len(gcls) = 0 And Not gNativeGlobalClass Is Nothing Then gcls = NativeColGet(gNativeGlobalClass, "g" & disp)
                     If Len(gcls) > 0 Then NVRegObjType(reg) = gcls: NVRegObjInst(reg) = NVReg(reg)
                 ElseIf Not isAbs And disp = 0 And bse >= 0 And bse <= 7 Then
-                    NVRegObjVt(reg) = NVRegObjType(bse)
-                    NVRegObjVtGuid(reg) = NVRegObjGuid(bse)   'deref of a control pointer -> its vtable carries the GUID
-                    NVRegObjInst(reg) = NVRegObjInst(bse)     'deref of a user-class pointer -> its vtable carries the receiver
+                    NVRegObjVt(reg) = hadObjType              'deref of a control pointer -> its vtable
+                    NVRegObjVtGuid(reg) = hadObjGuid          'the control GUID rides on the vtable (resolves the method)
+                    NVRegObjInst(reg) = hadObjInst            'deref of a user-class pointer -> its vtable carries the receiver
                 ElseIf Not isAbs And disp > 0 And baseObj Then
                     'Reading an `As New` private object field Me.<field> (e.g. a
                     'clsBitmap member): type it from the auto-instantiation map so a
