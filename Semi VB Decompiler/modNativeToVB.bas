@@ -6501,6 +6501,20 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                 vdDest = NVRegAddrDisp(1): vdSrc = NVRegAddrDisp(2)
                 NativeSetVSlot vdDest, NativeGetVSlot(vdSrc)
                 NativeSetVSlot vdDest + 8, NativeGetVSlot(vdSrc + 8)
+            ElseIf NVRegIsAddr(1) And NVRegAddrDisp(1) < 0 And NativeIsExprValue(NVReg(2)) _
+                   And InStr(NVReg(2), "<arg>") = 0 Then
+                'VarDup(dest=&local, src) where src is a freshly COMPUTED value (a BSTR from
+                '__vbaStrCat in edx, not an address) - a real assignment `var_X = <expr>`,
+                'e.g. `var_24 = (global_X & "util0.bmp")` before a LoadBitmap.  The address
+                'src case above (a built Variant temp copied into a MsgBox arg slot) is
+                'unaffected; only a value src reaches here.  Skip a value that still carries
+                'an unresolved `<arg>` (the char-by-char Chr$(Asc(..)) build chains) - those
+                'stayed silently dropped before and surfacing them just leaks <arg>.
+                Dim vdDn As String
+                vdDn = "var_" & Hex$(Abs(NVRegAddrDisp(1)))
+                NativeSetLocalExpr NVRegAddrDisp(1), vdDn
+                NVPushTop = 0: NVReg(0) = vdDn
+                NativeRuntimeCall = vdDn & " = " & NVReg(2): Exit Function
             End If
             NVPushTop = 0: NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaStrMove") > 0, InStr(nm, "__vbaStrCopy") > 0, _
