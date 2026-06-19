@@ -27,7 +27,7 @@ Usage:
 Example (run from the project root):
     python tools\\gen_vbapi.py C:\\Windows\\SysWOW64\\msvbvm60.dll "Install Folder\\data\\vb6api.txt" "data\\vb6api.txt"
 """
-import sys, pefile
+import sys, os, pefile
 
 # rtcName -> description fixes/additions layered on top of the seeded map.
 # (rtc names are identical in msvbvm50 and msvbvm60, so this serves both.)
@@ -61,6 +61,11 @@ def main():
         sys.exit(2)
     dll, out = sys.argv[1], sys.argv[2]
     seeds = sys.argv[3:]
+    if not os.path.isfile(dll):
+        print("ERROR: DLL not found: %s" % dll)
+        print("  (VB5's msvbvm50.dll is not installed by default on modern Windows -")
+        print("   copy it from a VB5 install or the redistributable, then re-run.)")
+        sys.exit(1)
     desc = load_desc(seeds)
 
     pe = pefile.PE(dll)
