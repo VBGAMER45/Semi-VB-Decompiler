@@ -7071,6 +7071,13 @@ Private Sub NativeDetectAccumReturn(b() As Byte, ByVal addr As Long)
     If mi >= 0 Then
         If InStr(SubNamelist(mi).kind, "Function") > 0 Or InStr(SubNamelist(mi).kind, "Property") > 0 Then Exit Sub
     End If
+    'Only STANDARD-MODULE (.bas) procedures use the VB accumulator-return convention
+    '(the return value left in eax).  A form/class method - including EVERY event handler
+    '(cmdSend_Click, Timer1_Timer ...) and a private form helper - is a COM method that
+    'returns an HRESULT (S_OK = 0) in eax, NOT a VB return value; the `<name> = 0` it loads
+    'at the epilogue is that HRESULT, so promoting it to `Function ... As Long` is wrong.
+    'An event/method has a hidden Me at ebp+8 (NativeProcHasMe); a module proc does not.
+    If NativeProcHasMe(addr) Then Exit Sub
 
     'Bound the scan to this proc - the 8KB buffer overruns into the next procedure.
     Dim hi As Long, pp As Long
@@ -7200,6 +7207,10 @@ Private Sub NativeDetectFpuReturn(col As Collection, ByVal addr As Long)
     If mi >= 0 Then
         If InStr(SubNamelist(mi).kind, "Function") > 0 Or InStr(SubNamelist(mi).kind, "Property") > 0 Then Exit Sub
     End If
+    'Only standard-module (.bas) procedures use the FPU/accumulator return convention; a
+    'form/class method (incl. event handlers) returns an HRESULT, not a VB value - so a
+    'stray ST(0) value at its epilogue must not promote it to `Function ... As Double`.
+    If NativeProcHasMe(addr) Then Exit Sub
     Dim n As Long, k As Long, arr() As CInstruction, inst As CInstruction
     n = col.Count
     If n < 2 Then Exit Sub
