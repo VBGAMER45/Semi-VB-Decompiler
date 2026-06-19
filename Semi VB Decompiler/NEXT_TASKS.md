@@ -527,7 +527,13 @@ a stale control-flow-merged register at call#1. A naive fold yields garbage
 ### F. FPU compare `st0` operand recovery (low value, medium effort)
 `If (st0 > (var_C + 5))` — the left operand is lost because a value-preserving fp helper `call`
 between the `fld` and the `fcom` resets the NVFpu stack model (NVFpuTop=0). Let such helper calls
-carry the operand through. ~13 sites.
+carry the operand through. ~13 sites. Concrete repro: frmGamble.Spin @51BBE0 (a 50 ms delay loop)
+`If (st0 < (st0 + 0.05))` — the `__vbaFpR4` (CSng) call between `fld var_5C` and `fcomp var_40`
+resets the model so both operands show `st0`. Fix idea: do NOT reset NVFpu for the fp COERCION
+helpers (`__vbaFpR4`/`__vbaFpR8`/`__vbaFpI4`...), which leave their result on st0; also track the
+Double-returning Function result (proc_4FF160 = a time func) so var_40's stored expr isn't `st0`.
+**Constant-WIDTH half DONE 2026-06-19 (b410ca2)**: m64 operands now read as Double
+(was Single -> garbage `0.05`->`-1.588187E-23`); only the operand collapse remains.
 
 ### G. Sub Main detection (low value, low effort)
 VB header `+0x2C lpSubMain` gives the entry point — label it. Quick win.
