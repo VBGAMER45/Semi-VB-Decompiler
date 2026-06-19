@@ -3716,6 +3716,22 @@ Private Function NativeCtlBaseName(ByVal s As String) As String
     NativeCtlBaseName = t
 End Function
 
+Private Function NativeStockExtenderMember(ByVal dispid As Long) As String
+    'VB6 standard control-EXTENDER property DISPIDs.  The extender (position/visibility/etc.)
+    'is provided by the VB runtime, NOT the control's own OCX typelib - so a late-bound
+    '`obj.Height` on an OCX (RichTextBox/SSTab) carries an extender DISPID (0x800100xx) that
+    'the OCX-typelib lookup mis-resolves to a coincidental same-memid OCX member (e.g.
+    'HideSelection).  These IDs are stable across VB6 EXEs; verified against Client2 +
+    'commercial output (Left/Top/Width/Height = 0x80010003..6).  &H8.. literals are negative
+    'Longs in VB6, which matches the signed value NativeIsPushImm records for the push imm32.
+    Select Case dispid
+        Case &H80010003: NativeStockExtenderMember = "Left"
+        Case &H80010004: NativeStockExtenderMember = "Top"
+        Case &H80010005: NativeStockExtenderMember = "Width"
+        Case &H80010006: NativeStockExtenderMember = "Height"
+    End Select
+End Function
+
 Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String, ByRef resolved As Boolean) As String
     'Render a late-bound dispatch call obj.Member by resolving its DISPID (recorded by
     'NativeDetectLateCalls) against the control's OCX typelib.  Sets resolved=True (and
@@ -3762,13 +3778,26 @@ Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String,
     End If
     Dim parts() As String, pi As Long, d As Long
     parts = Split(cand, ",")
+    'A VB6 control-EXTENDER property (Left/Top/Width/Height/...) carries an extender DISPID
+    '(0x800100xx) supplied by the VB runtime, NOT the control's OCX typelib - so resolve it
+    'from the stable stock table FIRST, else LateMemberName finds a coincidental same-memid
+    'OCX member (e.g. RichTextBox `Height` -> `HideSelection`).
+    Dim stockHit As Boolean
     For pi = 0 To UBound(parts)
         If Len(parts(pi)) > 0 Then
-            d = CLng(parts(pi))
-            memName = modCOM.LateMemberName(libClass, baseName, d, wantKind, invKind)
-            If Len(memName) > 0 Then Exit For
+            memName = NativeStockExtenderMember(CLng(parts(pi)))
+            If Len(memName) > 0 Then stockHit = True: Exit For
         End If
     Next pi
+    If Len(memName) = 0 Then
+        For pi = 0 To UBound(parts)
+            If Len(parts(pi)) > 0 Then
+                d = CLng(parts(pi))
+                memName = modCOM.LateMemberName(libClass, baseName, d, wantKind, invKind)
+                If Len(memName) > 0 Then Exit For
+            End If
+        Next pi
+    End If
     If Len(memName) = 0 Then Exit Function
     resolved = True
     Dim mref As String
@@ -3796,6 +3825,18 @@ Private Function NativeLateIdCall(inst As CInstruction, ByVal apiName As String,
         'buffer was recovered, thread through eax for the consumer instead.
         If Len(resTok) > 0 Then
             NativeLateIdCall = resTok & " = " & mref
+            'The Ld result also stays in eax (the retbuf ptr); track it as the result local
+            'so an immediately-following consumer that reads eax - e.g. `push eax; __vbaR4Var`
+            '(CSng of a property Get) - inlines the recovered value (`CSng(var_X)`) instead of
+            'a stale register / the receiver object.  GATED to a STOCK-extender Get (the
+            'resize idiom `obj.Height = CSng(other.Height)`): tracking eax=resTok for every
+            'late Get perturbs unrelated OCX-typelib paths (a CommonDialog string Get feeding
+            'a __vbaStrCmp), so keep those at their prior behaviour.
+            If stockHit Then
+                NVReg(0) = resTok
+                NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
+                NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+            End If
         Else
             NVReg(0) = mref
             NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
@@ -6124,14 +6165,16 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             If Len(aa) = 0 Then aa = "<arg>"
             NVReg(0) = "CStr(" & aa & ")": NVKeepPushStack = True
             NativeRuntimeCall = "": Exit Function
-        Case InStr(nm, "__vbaR8Str") > 0, InStr(nm, "__vbaR4Str") > 0
-            'String -> floating point (the reverse of __vbaStrR8).  The result is
-            'returned on the FPU stack, so push it into the FPU model; a following
-            'narrowing (__vbaR?IntI2/I4) or an fstp store consumes it.  Folds the
-            'whole `<field> = Int(Trim$(...))` config-parse assignment.
+        Case InStr(nm, "__vbaR8Str") > 0, InStr(nm, "__vbaR4Str") > 0, _
+             InStr(nm, "__vbaR8Var") > 0, InStr(nm, "__vbaR4Var") > 0
+            'String / Variant -> floating point (the reverse of __vbaStrR8 / a Variant
+            'coercion).  The result is returned on the FPU stack, so push it into the FPU
+            'model; a following narrowing (__vbaR?IntI2/I4) or an fstp store consumes it.
+            'Folds `<field> = Int(Trim$(...))` config parses AND `obj.Height =
+            'CSng(other.Height)` late-bound assignments (the R4Var of a property-Get result).
             aa = NativeArgPop()
             If Len(aa) = 0 Then aa = "<arg>"
-            NativeFpuPush IIf(InStr(nm, "R4Str") > 0, "CSng(", "CDbl(") & aa & ")"
+            NativeFpuPush IIf(InStr(nm, "R4Str") > 0 Or InStr(nm, "R4Var") > 0, "CSng(", "CDbl(") & aa & ")"
             NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaI4Abs") > 0, InStr(nm, "__vbaI2Abs") > 0
             'Integer/Long Abs(): the value is passed in ECX (not pushed), result in eax.
