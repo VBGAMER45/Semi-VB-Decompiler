@@ -532,9 +532,20 @@ falls back to the local NAME (var_X) when a slot's tracked FPU expr is empty or 
 frmGamble.Spin `st0 < (st0+0.05)` -> `var_5C < var_40`; st0-garbage operands Dungeon 38->9,
 Client2 90->40 (~79 conditions recovered). The constant-WIDTH half was b410ca2 (m64 read as Double).
 Proc counts/<arg>/garbage flat. REMAINING st0 are genuine unnamed FPU accumulators (`((16/8)+st0)`).
-**Follow-up (separate bug, surfaced here)**: `or eax,0xFFFFFFFF; add eax,[var_2C]` (a post-delay-loop
-counter decrement = `var_2C = var_2C - 1`) mis-renders `var_2C = ((cond) + var_2C)` because
-`or eax,-1` does not reset eax's tracked value to -1. Add an `or reg,0xFFFFFFFF -> reg = -1` idiom.
+**Follow-up (separate bug, surfaced here) — ATTEMPTED 2026-06-19, REVERTED (not cleanly winnable)**:
+`or eax,0xFFFFFFFF` (= load -1, VB's Boolean-True / pre-loop-decrement idiom) does not reset eax's
+tracked value, so a stale relational lingers: `var_2C = ((cond) + var_2C)` instead of the real
+`var_2C = var_2C - 1`, and `var_2C = (var_2C = 0)` instead of `var_2C = -1`. Adding an `or reg,-1
+-> reg = -1` reset (gated to a relational current value, to spare loop-counter inits like
+`For var = -1 To 1`) FIXED frmMain (`(-1 + var_2C)`) and modChat (`var_2C = -1`, disasm-verified
+correct) BUT REGRESSED frmClient.cmdFollow_Click: `var_20 = -1; var_1C = -1` (out-params pre-set
+before proc_4C8200) VANISHED. Root cause: the 0x89 store-to-local handler (~8750) only EMITS
+`var_X = <val>` when the value contains `(` / is a field / is a counter-or-class slot; a bare `-1`
+goes to the Else branch and is FOLDED silently (intentional, to suppress zero-init noise). The
+relational `(var_1C = 1)` emitted (it has `(`); the reset `-1` did not. Making bare-`-1` stores emit
+would fire across every True/-1 assignment program-wide (breaks Dungeon byte-identical with noise).
+A clean fix needs: emit a bare-literal store ONLY when the local is subsequently pushed BY-REF to a
+call (an out-param pre-init) — requires lookahead. Deferred; low value.
 
 ### G. Sub Main detection (low value, low effort)
 VB header `+0x2C lpSubMain` gives the entry point — label it. Quick win.
