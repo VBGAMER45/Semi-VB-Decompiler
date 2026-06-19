@@ -8592,6 +8592,18 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     '__vbaObjSet) - remember its GUID so a later property access
                     'through that local resolves (e.g. the LET target temp).
                     If Len(NVRegObjGuid(reg)) > 0 Then NativeSetLocalGuid disp, NVRegObjGuid(reg)
+                    'Storing a tracked USER-CLASS object to a local (the deref of an As-New
+                    'global, `mov ecx,[global]; mov [ebp-X],ecx`) - remember its class so a
+                    'later `mov eax,[ebp-X]; mov vt,[eax]; call [vt+off]` resolves to
+                    'var_X.Method (the reload reads NVLocalObjType).  Otherwise the class
+                    'identity is lost through the temp and the call drops to UnkVCall
+                    '(clsBitmap.LoadBitmap via an As-New global went through such a temp).
+                    If Len(NVRegObjType(reg)) > 0 Then
+                        On Error Resume Next
+                        NVLocalObjType.Remove "D" & disp
+                        On Error GoTo 0
+                        NVLocalObjType.Add NVRegObjType(reg), "D" & disp
+                    End If
                     'Storing an object's VTABLE to a local (VB caches it before a call
                     'when intervening helpers would clobber the register - e.g. the first
                     'lblSkillName(i).Caption put, or the _Global vtable before `Unload`).
