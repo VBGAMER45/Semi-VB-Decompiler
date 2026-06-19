@@ -7332,14 +7332,17 @@ done:
 End Sub
 
 Private Function NativeMovRegEbp(inst As CInstruction, ByRef reg As Long, ByRef disp As Long) As Boolean
-    'Match `mov r(16/32), [ebp + disp]` (8B /r, base ebp): dest reg + signed disp.
+    'Match `mov r(8/16/32), [ebp + disp]` (8B /r dword, or 8A /r byte for a Byte
+    'property's return-value load) base ebp: dest reg + signed disp.  The 8-bit dest
+    'reg number (al/cl/dl/bl = 0..3) equals its 32-bit register number, so the
+    'reg-match in NativeDetectReturnSlot still aligns.
     Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, isAbs As Boolean
     On Error Resume Next
     dump = Replace(inst.dump, " ", "")
     nn = Len(dump) \ 2
     i = NativeOpStart(dump, nn)
     op = NativeDumpByte(dump, i)
-    If op <> &H8B Then Exit Function
+    If op <> &H8B And op <> &H8A Then Exit Function
     If NativeMemBase(dump) <> 5 Then Exit Function          'base must be ebp
     modrm = NativeDumpByte(dump, i + 1)
     If (modrm \ &H40) = 3 Then Exit Function                'register-direct, not memory
@@ -7348,14 +7351,16 @@ Private Function NativeMovRegEbp(inst As CInstruction, ByRef reg As Long, ByRef 
 End Function
 
 Private Function NativeMovToBase(inst As CInstruction, ByRef baseReg As Long, ByRef srcReg As Long) As Boolean
-    'Match `mov [REG], r(16/32)` (89 /r, mod=00, rm=base register, no disp).
+    'Match `mov [REG], r(8/16/32)` (89 /r dword store, or 88 /r byte store for a Byte
+    'property writing its value into the [out,retval] buffer), mod=00, rm=base register,
+    'no disp.
     Dim dump As String, nn As Long, i As Long, op As Long, modrm As Long, md As Long, rm As Long
     On Error Resume Next
     dump = Replace(inst.dump, " ", "")
     nn = Len(dump) \ 2
     i = NativeOpStart(dump, nn)
     op = NativeDumpByte(dump, i)
-    If op <> &H89 Then Exit Function
+    If op <> &H89 And op <> &H88 Then Exit Function
     modrm = NativeDumpByte(dump, i + 1)
     md = (modrm \ &H40) And 3: rm = modrm And 7
     If md <> 0 Or rm = 4 Or rm = 5 Then Exit Function       'need [REG] with no disp, no SIB/ebp
@@ -8145,6 +8150,13 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         Dim ln88 As String
                         ln88 = "var_" & Hex$(Abs(d88))
                         If (InStr(v88, "(") > 0 Or Left$(v88, 6) = "field_") And v88 <> ln88 Then
+                            NativeTrackReg = ln88 & " = " & v88
+                            NativeSetLocalExpr d88, ln88
+                        ElseIf d88 = NVAccumRetSlot And v88 <> "0" And v88 <> ln88 And (NativeIsNumLit(v88) Or NativeIsCleanNamedVal(v88)) Then
+                            'A constant/clean value stored to the RETURN slot through a byte
+                            'coercion (`mov ecx,0x49; call __vbaUI1I2; mov [ebp-X],al` ->
+                            'a Byte `Property Get ID() = 73`).  Surface it like the 0xC7
+                            'const-return path; skip the "0" slot zero-init that precedes it.
                             NativeTrackReg = ln88 & " = " & v88
                             NativeSetLocalExpr d88, ln88
                         End If
