@@ -560,6 +560,10 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'Rename that local to the procedure name so assignments read `FuncName = value`.
     'Runs AFTER NativeProcHeader so it appends to the parameter-name substitutions.
     NativeDetectReturnSlot col, addr
+    'A class Get/Function returning an instance-field ARRAY as a Variant (VT_ARRAY data =
+    '&Me.field_X, __vbaVarCopy'd into the retbuf) - rename the data-slot local to the proc
+    'name so it reads `FuncName = field_X`.  Runs after the param-name + return-slot passes.
+    NativeDetectArrayVariantReturn col, addr
 
     For Each inst In col
         'Resolve a deferred call (from the previous instruction) based on how
@@ -7076,6 +7080,107 @@ Private Sub NativeDetectReturnSlot(col As Collection, ByVal addr As Long)
             End If
         End If
     Next
+done:
+End Sub
+
+Private Sub NativeDetectArrayVariantReturn(col As Collection, ByVal addr As Long)
+    'A class Function / Property Get that returns an ARRAY held in an instance field AS A
+    'Variant:  it builds a VT_ARRAY Variant whose data pointer is &Me.field_X, __vbaVarCopy's
+    'it into the hidden [out,retval] retbuf slot, and the epilogue copies that 16-byte Variant
+    'into the caller's retbuf.  e.g. clsPktRandomByte.GetData returns field_38 as a Byte()
+    '(vt = VT_ARRAY|VT_UI1 = 0x2011):
+    '    add esi,0x38                      ; esi = &Me.field_38
+    '    mov [ebp-0x2c], esi               ; var_34.data (base+8) = &field_38
+    '    mov dword[ebp-0x34], 0x2011       ; var_34.vt   = VT_ARRAY|VT_UI1
+    '    call __vbaVarCopy                 ; var_24 (retbuf) = var_34
+    'We otherwise render only the data-pointer store as `var_2C = field_38` (an orphan local
+    'assignment) and never name the return.  Rename the data-slot local to the procedure name
+    'so it reads `GetData = field_38` (VB's implicit return variable); the VT_ARRAY-Variant
+    'value the field genuinely carries is field_X, so the value rendered is already correct.
+    'NativeDetectReturnSlot misses this case: its return value reaches the retbuf via a 16-byte
+    'VARIANT copy (interleaved load/store) in the SEH tail past the proc`s `ret`, not the rigid
+    '3-instruction `mov rega,[ebp+ret]; mov regb,[ebp-X]; mov [rega],regb` it scans for.
+    '
+    'Gate is rigid - all of: a class Get/Function (hidden retbuf, NVRetN>=4, has Me); a const
+    'store `mov dword[ebp-Dvt], imm` with the VT_ARRAY bit (0x2000) set and a 16-bit vt code;
+    'the matching VARIANT data-pointer store `mov [ebp-(Dvt-8)], reg` 8 bytes above it; and a
+    '__vbaVarCopy call.  A non-returning array Variant (no retbuf) is excluded by the class-Get
+    'gate; the data-store-at-+8 + VarCopy pairing makes a chance match on an unrelated local
+    'store practically impossible.  A non-match leaves the proc untouched.
+    On Error GoTo done
+    If NVRetN < 4 Then Exit Sub
+    If Not NativeProcHasMe(addr) Then Exit Sub
+    Dim kind As String, isFunc As Boolean, mi As Long
+    If NativeTryMethodKind(addr, kind) Then
+        isFunc = (InStr(kind, "Function") > 0 Or InStr(kind, "Get") > 0)
+    Else
+        mi = NativeProcMatchIdx(addr)
+        If mi >= 0 Then isFunc = (InStr(SubNamelist(mi).kind, "Function") > 0 Or InStr(SubNamelist(mi).kind, "Get") > 0)
+    End If
+    If Not isFunc Then Exit Sub
+    Dim funcName As String, pp As Long
+    funcName = NativeProcName(addr)
+    pp = InStr(funcName, "("): If pp > 0 Then funcName = Left$(funcName, pp - 1)
+    funcName = Trim$(funcName)
+    If Not NativeIsIdent(funcName) Then Exit Sub
+
+    Dim n As Long, k As Long, inst As CInstruction
+    n = col.Count
+    If n < 3 Then Exit Sub
+    Dim arr() As CInstruction
+    ReDim arr(n - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+
+    'Find a VT_ARRAY vt-store paired with a VARIANT data-pointer store 8 bytes above it.
+    Dim i As Long, j As Long, dmp As String, disp As Long, dataDisp As Long, found As Boolean
+    For i = 0 To n - 1
+        dmp = Replace(arr(i).dump, " ", "")
+        If NativeEbpOp(dmp, &HC7, disp) Then
+            If disp < 0 Then
+                Dim st As Long, md As Long, imm As Long
+                st = NativeOpStart(dmp, Len(dmp) \ 2)
+                md = (NativeDumpByte(dmp, st + 1) \ &H40) And 3
+                imm = 0
+                If md = 1 And Len(dmp) \ 2 >= st + 7 Then
+                    imm = NativeDumpInt32(dmp, st + 3)      'C7 modrm disp8 imm32
+                ElseIf md = 2 And Len(dmp) \ 2 >= st + 10 Then
+                    imm = NativeDumpInt32(dmp, st + 6)      'C7 modrm disp32 imm32
+                End If
+                If imm > 0 And imm < &H10000 And (imm And &H2000) <> 0 Then
+                    Dim d89 As Long
+                    For j = 0 To n - 1
+                        If NativeEbpOp(Replace(arr(j).dump, " ", ""), &H89, d89) Then
+                            If d89 = disp + 8 Then dataDisp = d89: found = True: Exit For
+                        End If
+                    Next j
+                    If found Then Exit For
+                End If
+            End If
+        End If
+    Next i
+    If Not found Then Exit Sub
+
+    'Confirm a __vbaVarCopy call (the field-Variant is copied into the retbuf return slot).
+    Dim haveCopy As Boolean, st2 As Long
+    For i = 0 To n - 1
+        dmp = Replace(arr(i).dump, " ", "")
+        st2 = NativeOpStart(dmp, Len(dmp) \ 2)
+        If Len(dmp) \ 2 >= st2 + 6 Then
+            If NativeDumpByte(dmp, st2) = &HFF And NativeDumpByte(dmp, st2 + 1) = &H15 Then
+                If InStr(dsmNative.GetApiByIatVa(NativeDumpInt32(dmp, st2 + 2)), "__vbaVarCopy") > 0 Then
+                    haveCopy = True: Exit For
+                End If
+            End If
+        End If
+    Next i
+    If Not haveCopy Then Exit Sub
+
+    'Rename the data-slot local (var_<dataDisp>) to the procedure name -> `FuncName = field_X`.
+    ReDim Preserve NVArgTok(NVArgN): ReDim Preserve NVArgNm(NVArgN)
+    NVArgTok(NVArgN) = "var_" & Hex$(Abs(dataDisp))
+    NVArgNm(NVArgN) = funcName
+    NVArgN = NVArgN + 1
 done:
 End Sub
 
