@@ -5673,7 +5673,14 @@ End Function
 Private Sub NativeFpuOp(inst As CInstruction, ByVal mn As String)
     Dim operand As String, a As String, disp As Long, isAbs As Boolean, hasMem As Boolean
     hasMem = NativeDecodeDisp(inst.dump, disp, isAbs)
-    operand = NativeFpuOperand(hasMem, disp, isAbs)
+    'Operand WIDTH from the FPU escape opcode: 0xDC/0xDD address a 64-bit Double
+    '(m64), 0xD8/0xD9 a 32-bit Single (m32).  A qword constant read as a Single takes
+    'only its low 4 bytes -> garbage (0.05 -> -1.588187E-23 in the Spin delay loop).
+    Dim fdmp As String, fn As Long, fi As Long, fop As Long, isQ As Boolean
+    fdmp = Replace(inst.dump, " ", ""): fn = Len(fdmp) \ 2
+    fi = NativeOpStart(fdmp, fn): fop = NativeDumpByte(fdmp, fi)
+    isQ = (fop = &HDC Or fop = &HDD)
+    operand = NativeFpuOperand(hasMem, disp, isAbs, isQ)
 
     Select Case True
         Case mn = "FLD", mn = "FILD"
@@ -5706,13 +5713,14 @@ Private Sub NativeFpuOp(inst As CInstruction, ByVal mn As String)
     End Select
 End Sub
 
-Private Function NativeFpuOperand(ByVal hasMem As Boolean, ByVal disp As Long, ByVal isAbs As Boolean) As String
+Private Function NativeFpuOperand(ByVal hasMem As Boolean, ByVal disp As Long, ByVal isAbs As Boolean, ByVal isQword As Boolean) As String
     'The memory operand of an FPU instruction: a global float constant
-    '(absolute address), a known local slot, or a synthetic name.
+    '(absolute address), a known local slot, or a synthetic name.  isQword selects
+    'the constant width (Double for m64 fadd/fld qword, Single for m32).
     If Not hasMem Then
         NativeFpuOperand = "st0"
     ElseIf isAbs Then
-        NativeFpuOperand = NativeFloatAtAddr(disp)
+        If isQword Then NativeFpuOperand = NativeDoubleAtAddr(disp) Else NativeFpuOperand = NativeFloatAtAddr(disp)
     ElseIf disp < 0 Then
         NativeFpuOperand = NativeGetLocalExpr(disp)
     Else
@@ -9352,6 +9360,21 @@ Private Function NativeFloatAtAddr(ByVal va As Long) As String
         Get #fp, va + 1 - OptHeader.ImageBase, s
     Close #fp
     If s = Int(s) Then NativeFloatAtAddr = CStr(CLng(s)) Else NativeFloatAtAddr = Format$(s)
+End Function
+
+Private Function NativeDoubleAtAddr(ByVal va As Long) As String
+    'The 8-byte Double constant at an absolute address - the operand of an m64 FPU
+    'instruction (fadd/fld/fcomp qword [abs], opcode 0xDC/0xDD).  Reading these as a
+    'Single (NativeFloatAtAddr) takes only the low dword and yields garbage.
+    Dim s As Double, fp As Integer
+    On Error Resume Next
+    If va = 0 Then NativeDoubleAtAddr = "?": Exit Function
+    fp = FreeFile
+    Open SFilePath For Binary Access Read As #fp
+        Get #fp, va + 1 - OptHeader.ImageBase, s
+    Close #fp
+    NativeDoubleAtAddr = Format$(s)                          'default (handles all magnitudes)
+    If s = Int(s) And Abs(s) < 2147483647# Then NativeDoubleAtAddr = CStr(CLng(s))
 End Function
 
 Private Function NativeFirstReg(ByVal cmd As String) As String
