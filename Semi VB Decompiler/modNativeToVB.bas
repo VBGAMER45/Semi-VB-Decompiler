@@ -10107,14 +10107,19 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
     'is the top; slotExpr maps a scratch [esp+N] store back to its expression so the
     'final `fld [esp+N]` reload returns the computed value, not the original parameter.
     Dim fpu(15) As String, ftop As Long, fpPending As Boolean
-    Dim slotExpr As Collection: Set slotExpr = New Collection
     Dim regF As Long, rir As Boolean, rmR As Long, rmD As Long, rmDr As Boolean, fop As String
-    'Intrinsic-call support: lastStackArg is the value an immediately preceding
-    '`fstp [esp]` parked for the next stack-arg helper (chained calls like
-    'Sin(DegToRad(x))); pushCnt counts pushed dwords since the last call so an E8
-    'user call's arity is known (only a unary 1-Double call is modelled).
-    Dim lastStackArg As String, pushCnt As Long, mnm As String, vbOp As String, mcat As Long
-    Dim ffReg As Long, callA As String, utgt As Long, modrm As Long
+    'x86 argument-stack model for binary user-call chains (Square = MathMul(v, v),
+    'ArcCos = MathSub(90, ArcSin(v)), Hypotenuse = Sqr(MathAdd(Square(a), Square(b)))).
+    'xsp tracks esp (0 at entry); xq maps a frame offset -> a parked Double expr (fstp);
+    'xdw maps a frame offset -> a pushed dword token ("L:"/"H:" half of a Double, or
+    '"IMM:n"); rdw is the per-register pending dword token from a marshalling mov.  A
+    'call reads its Double args back from [xsp], [xsp+8], ... (NativeFLRead8) and parks
+    'the result on the FPU stack.  For a no-call body xsp stays 0 and offsets == disp,
+    'so the pure-FPU path (MathAdd...) is unchanged.
+    Dim xsp As Long, xq As Collection, xdw As Collection, rdw(7) As String
+    Set xq = New Collection: Set xdw = New Collection
+    Dim mnm As String, vbOp As String, mcat As Long, ffReg As Long, modrm As Long
+    Dim utgt As Long, origOff As Long, argc As Long, ai As Long, aexpr As String, alist As String
     For Each inst In col
         dump = UCase$(Replace(inst.dump, " ", ""))
         n = Len(dump) \ 2
@@ -10127,9 +10132,19 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
             Case &HEB                                 'short jmp -> ignore (skip over a guard)
             Case &H8B                                 'mov reg, r/m
                 If Not NativeFLMov(dump, i + 1, regv, regPtr) Then GoTo bail
+                'Also capture which Double dword this loads (a param/stored-slot half),
+                'so a following `push reg` can re-marshal it as a call argument.
+                If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) <> -1 Then
+                    If Not rir And rmR = 4 And regF >= 0 And regF <= 7 Then
+                        rdw(regF) = NativeFLDwordTok(xsp + rmD, xq)
+                    ElseIf Not rir And regF >= 0 And regF <= 7 Then
+                        rdw(regF) = ""
+                    End If
+                End If
             Case &HB8 To &HBF                         'mov reg, imm32
                 Dim rr As Long: rr = op - &HB8
                 regv(rr) = NativeFLNum(NativeDumpInt32(dump, i + 1)): regPtr(rr) = False
+                rdw(rr) = ""                          'not a Double half anymore
             Case &H3                                  'add reg, r/m
                 If Not NativeFLArith(dump, i + 1, regv, regPtr, " + ") Then GoTo bail
             Case &H2B                                 'sub reg, r/m
@@ -10151,15 +10166,15 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
             Case &HDD                                 'fld / fstp  qword [esp+N]
                 If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) = -1 Then GoTo bail
                 If rir Or rmR <> 4 Then GoTo bail     'register form / non-esp memory -> bail (constant compares etc.)
-                If regF = 0 Then                      'fld m64 -> push the slot's expr (or the param)
+                origOff = xsp + rmD
+                If regF = 0 Then                      'fld m64 -> push the slot's parked expr (or the param)
                     If ftop > 15 Then GoTo bail
-                    fpu(ftop) = NativeFLSlotVal(slotExpr, rmD): ftop = ftop + 1
-                ElseIf regF = 3 Then                  'fstp m64 -> pop ST(0) into the scratch slot
+                    fpu(ftop) = NativeFLReadSlot(xq, origOff): ftop = ftop + 1
+                ElseIf regF = 3 Then                  'fstp m64 -> pop ST(0) and park it at this frame slot
                     If ftop = 0 Then GoTo bail
-                    ftop = ftop - 1: NativeColPut slotExpr, "S" & rmD, fpu(ftop)
-                    'A pop to [esp] (disp 0) parks the value as the next stack-arg
-                    'helper's operand - the chained `fstp [esp]; call Sin` idiom.
-                    If rmD = 0 Then lastStackArg = fpu(ftop)
+                    ftop = ftop - 1
+                    NativeColPut xq, CStr(origOff), fpu(ftop)
+                    NativeColDel xdw, CStr(origOff): NativeColDel xdw, CStr(origOff + 4)
                 Else
                     GoTo bail
                 End If
@@ -10174,7 +10189,7 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
                     Case 6: fop = " / "
                     Case Else: GoTo bail
                 End Select
-                fpu(ftop - 1) = "(" & fpu(ftop - 1) & fop & NativeFLSlotVal(slotExpr, rmD) & ")"
+                fpu(ftop - 1) = "(" & fpu(ftop - 1) & fop & NativeFLReadSlot(xq, xsp + rmD) & ")"
             Case &HD9                                 'fabs (D9 E1) / fchs (D9 E0) - unary on ST(0)
                 op2 = NativeDumpByte(dump, i + 1)
                 If ftop = 0 Then GoTo bail
@@ -10189,57 +10204,63 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
                 If NativeDumpByte(dump, i + 1) = &HE0 Then fpPending = True Else GoTo bail
             Case &HA8                                 'test al, imm8 - VB6's post-op FP exception check
                 If fpPending Then fpPending = False Else GoTo bail
-            Case &H50 To &H57                         'push reg - argument marshalling (count the dwords)
-                pushCnt = pushCnt + 1
-            Case &H68                                 'push imm32 - argument marshalling
-                pushCnt = pushCnt + 1
-            Case &H6A                                 'push imm8 - argument marshalling
-                pushCnt = pushCnt + 1
-            Case &H83, &H81                           'add/sub r/m, imm - only an esp stack-alloc is expected
+            Case &H50 To &H57                         'push reg - marshal the reg's dword onto the arg stack
+                xsp = xsp - 4
+                NativeColPut xdw, CStr(xsp), rdw(op - &H50)
+                NativeColDel xq, CStr(xsp)
+            Case &H68                                 'push imm32 - an immediate dword (a Double half)
+                xsp = xsp - 4
+                NativeColPut xdw, CStr(xsp), "IMM:" & NativeDumpInt32(dump, i + 1)
+                NativeColDel xq, CStr(xsp)
+            Case &H6A                                 'push imm8 - an immediate dword (a Double half)
+                xsp = xsp - 4
+                NativeColPut xdw, CStr(xsp), "IMM:" & NativeDumpInt8(dump, i + 1)
+                NativeColDel xq, CStr(xsp)
+            Case &H83, &H81                           'add/sub esp, imm - track the stack-pointer delta
                 modrm = NativeDumpByte(dump, i + 1)
                 If Not ((modrm And 7) = 4 And ((modrm \ &H40) And 3) = 3) Then GoTo bail
+                Dim aimm As Long
+                If op = &H83 Then aimm = NativeDumpInt8(dump, n - 1) Else aimm = NativeDumpInt32(dump, n - 4)
+                If ((modrm \ 8) And 7) = 5 Then xsp = xsp - aimm Else xsp = xsp + aimm   '/5 = sub, /0 = add
             Case &HFF                                 'push [mem] (/6) or call [abs] (/2)
                 modrm = NativeDumpByte(dump, i + 1)
                 ffReg = (modrm \ 8) And 7
-                If ffReg = 6 Then
-                    pushCnt = pushCnt + 1             'push r/m - argument marshalling
+                If ffReg = 6 Then                     'push r/m -> marshal that dword
+                    If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) = -1 Then GoTo bail
+                    xsp = xsp - 4
+                    If Not rir And rmR = 4 Then NativeColPut xdw, CStr(xsp), NativeFLDwordTok(xsp + 4 + rmD, xq) Else NativeColPut xdw, CStr(xsp), ""
+                    NativeColDel xq, CStr(xsp)
                 ElseIf ffReg = 2 Then                 'call [abs] -> a runtime math helper
                     mnm = NativeApiName(inst)
                     If Len(mnm) = 0 Then GoTo bail
                     If Not NativeFLMathOp(mnm, vbOp, mcat) Then GoTo bail
-                    Select Case mcat
-                        Case 1                        'FPU-stack unary (Int/Fix): operand already on ST(0)
-                            If ftop = 0 Then GoTo bail
-                            fpu(ftop - 1) = vbOp & "(" & fpu(ftop - 1) & ")"
-                        Case 2                        'x86-stack unary (Sin/Cos/Exp...): operand = chain or 1st param
-                            If ftop > 15 Then GoTo bail
-                            If Len(lastStackArg) > 0 Then callA = lastStackArg Else callA = "arg_8"
-                            fpu(ftop) = vbOp & "(" & callA & ")": ftop = ftop + 1
-                            lastStackArg = ""
-                        Case 3                        'x86-stack binary power: base ^ exponent (the two params)
-                            If ftop > 15 Then GoTo bail
-                            fpu(ftop) = "(arg_8 ^ arg_10)": ftop = ftop + 1
-                    End Select
-                    pushCnt = 0
+                    If mcat = 1 Then                  'FPU-stack unary (Int/Fix): operand already on ST(0)
+                        If ftop = 0 Then GoTo bail
+                        fpu(ftop - 1) = vbOp & "(" & fpu(ftop - 1) & ")"
+                    ElseIf mcat = 2 Then              'x86-stack unary (Sin/Cos/Exp...): one Double arg
+                        If Not NativeFLGatherArgs(xsp, xq, xdw, alist, argc) Or argc <> 1 Then GoTo bail
+                        If ftop > 15 Then GoTo bail
+                        fpu(ftop) = vbOp & "(" & alist & ")": ftop = ftop + 1
+                        xsp = 0
+                    ElseIf mcat = 3 Then              'x86-stack binary power: base ^ exponent
+                        If Not NativeFLGatherArgs(xsp, xq, xdw, alist, argc) Or argc <> 2 Then GoTo bail
+                        If ftop > 15 Then GoTo bail
+                        fpu(ftop) = "(" & Replace(alist, ", ", " ^ ") & ")": ftop = ftop + 1
+                        xsp = 0
+                    End If
                 Else
                     GoTo bail
                 End If
-            Case &HE8                                 'call rel32 -> a user Double-returning helper (DegToRad...)
-                'Only a UNARY call chains cleanly: either a chained value parked by a
-                'preceding fstp [esp] (lastStackArg), or one Double pushed as 2 dwords.
-                'Bail on any other arity (e.g. Square's MathMul(v, v) = 4 pushes) - safe.
-                If ftop > 15 Then GoTo bail
-                If Len(lastStackArg) > 0 And pushCnt = 0 Then
-                    callA = lastStackArg          'unary chained: RadToDeg(Atn(x))
-                ElseIf Len(lastStackArg) = 0 And pushCnt = 2 Then
-                    callA = "arg_8"               'unary pushed: DegToRad(x)
-                Else
-                    GoTo bail                     'binary/n-ary (MathSub(90, x), MathAdd(..,..)) -> safe
-                End If
+            Case &HE8                                 'call rel32 -> a user Double-returning helper
+                'Gather the marshalled Double args from [xsp, 0) and emit proc_X(a, b...);
+                'the result is parked on the FPU stack.  Recovers BOTH operands of a
+                'binary user call (MathSub(90, ArcSin(x)), MathAdd(Square(a), Square(b))).
                 utgt = NativeCallTarget(inst)
                 If utgt = 0 Then GoTo bail
-                fpu(ftop) = NativeFLProcName(utgt) & "(" & callA & ")": ftop = ftop + 1
-                lastStackArg = "": pushCnt = 0
+                If Not NativeFLGatherArgs(xsp, xq, xdw, alist, argc) Or argc < 1 Then GoTo bail
+                If ftop > 15 Then GoTo bail
+                fpu(ftop) = NativeFLProcName(utgt) & "(" & alist & ")": ftop = ftop + 1
+                xsp = 0
             Case &HC3, &HC2                           'ret / ret N -> done
                 Exit For
             Case Else
@@ -10258,13 +10279,80 @@ bail:
     NativeFramelessBody = ""
 End Function
 
-Private Function NativeFLSlotVal(slotExpr As Collection, ByVal disp As Long) As String
-    'The current expression at scratch slot [esp+disp]: the value most recently fstp'd
-    'there, else the original parameter that occupies it (arg_<disp+4>, mirroring
-    'NativeFLRmVal's esp->arg mapping).
+Private Function NativeFLReadSlot(xq As Collection, ByVal origOff As Long) As String
+    'The Double at frame offset origOff for an fld/fadd operand: the value parked there
+    'by a prior fstp, else the original parameter occupying it (arg_<origOff+4>).
     Dim s As String
-    s = NativeColGet(slotExpr, "S" & disp)
-    If Len(s) > 0 Then NativeFLSlotVal = s Else NativeFLSlotVal = "arg_" & Hex$(disp + 4)
+    s = NativeColGet(xq, CStr(origOff))
+    If Len(s) > 0 Then NativeFLReadSlot = s Else NativeFLReadSlot = "arg_" & Hex$(origOff + 4)
+End Function
+
+Private Sub NativeColDel(c As Collection, ByVal key As String)
+    On Error Resume Next
+    c.Remove key
+End Sub
+
+Private Function NativeFLDwordTok(ByVal off As Long, xq As Collection) As String
+    'Dword token for the 4-byte slot at frame offset `off`: the low ("L:") or high
+    '("H:") half of a Double - either one parked by fstp (xq) or a Double parameter.
+    'Empty when it is not a recognisable Double half (caller leaves it untracked).
+    Dim e As String
+    e = NativeColGet(xq, CStr(off))
+    If Len(e) > 0 Then NativeFLDwordTok = "L:" & e: Exit Function          'low half of a parked Double
+    e = NativeColGet(xq, CStr(off - 4))
+    If Len(e) > 0 Then NativeFLDwordTok = "H:" & e: Exit Function          'high half of a parked Double
+    If off >= 4 And (off Mod 8) = 4 Then NativeFLDwordTok = "L:arg_" & Hex$(off + 4): Exit Function   'param low
+    If off >= 8 And (off Mod 8) = 0 Then NativeFLDwordTok = "H:arg_" & Hex$(off): Exit Function        'param high
+End Function
+
+Private Function NativeFLRead8(ByVal off As Long, xq As Collection, xdw As Collection) As String
+    'Reconstruct the Double argument at frame offset `off`: a directly parked Double
+    'expr (xq), a matched low/high dword-token pair (param or stored half), or a pair
+    'of immediate dwords decoded as an IEEE-754 constant.  Empty -> caller bails.
+    Dim e As String, lo As String, hi As String
+    e = NativeColGet(xq, CStr(off))
+    If Len(e) > 0 Then NativeFLRead8 = e: Exit Function
+    lo = NativeColGet(xdw, CStr(off))
+    hi = NativeColGet(xdw, CStr(off + 4))
+    If Left$(lo, 2) = "L:" And Left$(hi, 2) = "H:" And Mid$(lo, 3) = Mid$(hi, 3) Then
+        NativeFLRead8 = Mid$(lo, 3): Exit Function
+    End If
+    If Left$(lo, 4) = "IMM:" And Left$(hi, 4) = "IMM:" Then
+        NativeFLRead8 = NativeFLImmDouble(CLng(Mid$(lo, 5)), CLng(Mid$(hi, 5)))
+    End If
+End Function
+
+Private Function NativeFLGatherArgs(ByVal xsp As Long, xq As Collection, xdw As Collection, _
+        ByRef alist As String, ByRef argc As Long) As Boolean
+    'Collect the marshalled Double args occupying [xsp, 0): argc = (-xsp)/8 Doubles read
+    'left-to-right (call arg order), comma-joined into alist.  False if the region is not
+    'a clean whole number of resolvable Doubles.
+    Dim k As Long, a As String
+    alist = "": argc = 0
+    If xsp >= 0 Or (xsp Mod 8) <> 0 Then Exit Function
+    argc = (-xsp) \ 8
+    If argc < 1 Or argc > 8 Then argc = 0: Exit Function
+    For k = 0 To argc - 1
+        a = NativeFLRead8(xsp + k * 8, xq, xdw)
+        If Len(a) = 0 Then argc = 0: alist = "": Exit Function
+        If Len(alist) > 0 Then alist = alist & ", "
+        alist = alist & a
+    Next
+    NativeFLGatherArgs = True
+End Function
+
+Private Function NativeFLImmDouble(ByVal loBits As Long, ByVal hiBits As Long) As String
+    'Decode the two little-endian dwords of an IEEE-754 double into a VB numeric literal.
+    Dim d As Double, b(7) As Byte
+    On Error Resume Next
+    CopyMemory b(0), loBits, 4
+    CopyMemory b(4), hiBits, 4
+    CopyMemory d, b(0), 8
+    If d = Int(d) And Abs(d) < 2147483647# Then
+        NativeFLImmDouble = CStr(CLng(d))
+    Else
+        NativeFLImmDouble = CStr(d)
+    End If
 End Function
 
 Private Function NativeDoubleParams(ByVal retN As Long) As String
