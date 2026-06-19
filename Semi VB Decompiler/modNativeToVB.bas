@@ -7046,6 +7046,14 @@ Private Sub NativeDetectReturnSlot(col As Collection, ByVal addr As Long)
                                 NVArgTok(NVArgN) = "var_" & Hex$(Abs(dloc))
                                 NVArgNm(NVArgN) = funcName
                                 NVArgN = NVArgN + 1
+                                'Record the return-slot displacement so a CONSTANT store to
+                                'it (`mov [ebp-X], imm`, 0xC7) is emitted as `FuncName = imm`
+                                '- otherwise a const-returning Get (e.g. `Size = 3`,
+                                '`ID = 73`) renders an empty body (the store was dropped).
+                                'Reuses NVAccumRetSlot: a class Get (has Me) and a module
+                                'accumulator return (no Me) are mutually exclusive, and only
+                                'the 0xC7 handler reads it.
+                                NVAccumRetSlot = dloc
                                 Exit Sub
                             End If
                         End If
