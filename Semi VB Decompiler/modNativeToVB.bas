@@ -10699,11 +10699,16 @@ Private Sub NativeDecodeCompare(inst As CInstruction, ByVal mn As String)
         Case &H39                       'cmp r/m32, r32
             L = NativeRmVal(dump, md, rm): R = NativeRegVal(reg)
         Case &H3D                       'cmp eax, imm32
-            L = NativeRegVal(0): R = NativeNumFromBits(NativeDumpInt32(dump, i + 1))
+            'An INTEGER cmp - the immediate is always an integer (VB6 compares
+            'Single/Double via the FPU `fcom`, never `cmp`), so render the signed
+            'Long directly.  NOT NativeNumFromBits, whose float heuristic mis-reads a
+            'bit pattern that happens to fall in float range (e.g. 0x3B9AC9FF =
+            '999999999 -> "4.723787E-03"), corrupting `If arg_10 > 999999999`.
+            L = NativeRegVal(0): R = CStr(NativeDumpInt32(dump, i + 1))
         Case &H83                       'cmp r/m32, imm8 (sign-extended)
             L = NativeRmVal(dump, md, rm): R = CStr(NativeDumpInt8(dump, n - 1))
         Case &H81                       'cmp r/m32, imm32
-            L = NativeRmVal(dump, md, rm): R = NativeNumFromBits(NativeDumpInt32(dump, n - 4))
+            L = NativeRmVal(dump, md, rm): R = CStr(NativeDumpInt32(dump, n - 4))
     End Select
     If Len(L) > 0 And Len(R) > 0 Then
         NVCmpL = L: NVCmpR = R: NVCmpIsTest = isTst: NVCmpSet = True
