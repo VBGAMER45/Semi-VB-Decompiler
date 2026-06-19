@@ -398,15 +398,25 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     'directly and emit it as a Function.  Bails to the normal (empty) path on any
     'shape it does not fully understand.
     If Not (b(0) = &H55 And b(1) = &H8B And b(2) = &HEC) Then
-        Dim flIsFunc As Boolean, flExpr As String
-        flExpr = NativeFramelessBody(col, flIsFunc)
+        Dim flIsFunc As Boolean, flExpr As String, flDbl As Boolean
+        flExpr = NativeFramelessBody(col, flIsFunc, flDbl)
         If Len(flExpr) > 0 Then
-            Dim flName As String, flParams As String, flpp As Long
+            Dim flName As String, flParams As String, flpp As Long, flRetType As String
             flName = NativeProcName(addr)
             flpp = InStr(flName, "(")
             If flpp > 0 Then flName = Trim$(Left$(flName, flpp - 1))
-            flParams = NativeProcParams("Sub", NVHasMe)        'no hidden-retslot drop (returns via eax)
-            output = "Private Function " & flName & "(" & flParams & ")   '" & Hex$(addr) & vbCrLf
+            'A body recovered through the FPU stack returns a Double in ST(0) and its
+            'params are Doubles (8 bytes each at [esp+8], [esp+0x10], ...): type them
+            'so the signature reads `(arg_8 As Double, ...) As Double`.  Otherwise the
+            'integer/eax path keeps the generic arg list (returns via eax, no type).
+            flRetType = ""
+            If flDbl And NVRetN > 0 And (NVRetN Mod 8) = 0 Then
+                flParams = NativeDoubleParams(NVRetN)
+                flRetType = " As Double"
+            Else
+                flParams = NativeProcParams("Sub", NVHasMe)    'no hidden-retslot drop (returns via eax)
+            End If
+            output = "Private Function " & flName & "(" & flParams & ")" & flRetType & "   '" & Hex$(addr) & vbCrLf
             output = output & Space$(4) & flName & " = " & flExpr & vbCrLf
             output = output & "End Function" & vbCrLf
             DecompileNativeProcToVB = NativeInsertLocalDims(NativeSubstituteArgNames(output))
@@ -10087,11 +10097,18 @@ End Function
 ' it does not fully understand, so a complex frameless proc just keeps its empty
 ' body and a framed proc is never touched.
 '---------------------------------------------------------------------------
-Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean) As String
+Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean, ByRef isDoubleRet As Boolean) As String
     On Error GoTo bail
-    isFunc = False
+    isFunc = False: isDoubleRet = False
     Dim regv(7) As String, regPtr(7) As Boolean      '0=eax 1=ecx 2=edx 3=ebx 4=esp 5=ebp 6=esi 7=edi
     Dim inst As CInstruction, dump As String, n As Long, i As Long, op As Long, op2 As Long
+    'FPU stack model for Double-returning frameless functions (MathAdd = a + b etc.):
+    'fld/fadd.../fstp on qword [esp+N] params, result returned in ST(0).  fpu(ftop-1)
+    'is the top; slotExpr maps a scratch [esp+N] store back to its expression so the
+    'final `fld [esp+N]` reload returns the computed value, not the original parameter.
+    Dim fpu(15) As String, ftop As Long, fpPending As Boolean
+    Dim slotExpr As Collection: Set slotExpr = New Collection
+    Dim regF As Long, rir As Boolean, rmR As Long, rmD As Long, rmDr As Boolean, fop As String
     For Each inst In col
         dump = UCase$(Replace(inst.dump, " ", ""))
         n = Len(dump) \ 2
@@ -10125,6 +10142,44 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean)
                         If Not NativeFLMov(dump, i + 2, regv, regPtr) Then GoTo bail
                     Case Else: GoTo bail
                 End Select
+            Case &HDD                                 'fld / fstp  qword [esp+N]
+                If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) = -1 Then GoTo bail
+                If rir Or rmR <> 4 Then GoTo bail     'register form / non-esp memory -> bail (constant compares etc.)
+                If regF = 0 Then                      'fld m64 -> push the slot's expr (or the param)
+                    If ftop > 15 Then GoTo bail
+                    fpu(ftop) = NativeFLSlotVal(slotExpr, rmD): ftop = ftop + 1
+                ElseIf regF = 3 Then                  'fstp m64 -> pop ST(0) into the scratch slot
+                    If ftop = 0 Then GoTo bail
+                    ftop = ftop - 1: NativeColPut slotExpr, "S" & rmD, fpu(ftop)
+                Else
+                    GoTo bail
+                End If
+            Case &HDC                                 'fadd/fsub/fmul/fdiv  qword [esp+N]
+                If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) = -1 Then GoTo bail
+                If rir Or rmR <> 4 Then GoTo bail
+                If ftop = 0 Then GoTo bail
+                Select Case regF
+                    Case 0: fop = " + "
+                    Case 1: fop = " * "
+                    Case 4: fop = " - "
+                    Case 6: fop = " / "
+                    Case Else: GoTo bail
+                End Select
+                fpu(ftop - 1) = "(" & fpu(ftop - 1) & fop & NativeFLSlotVal(slotExpr, rmD) & ")"
+            Case &HD9                                 'fabs (D9 E1) / fchs (D9 E0) - unary on ST(0)
+                op2 = NativeDumpByte(dump, i + 1)
+                If ftop = 0 Then GoTo bail
+                If op2 = &HE1 Then
+                    fpu(ftop - 1) = "Abs(" & fpu(ftop - 1) & ")"
+                ElseIf op2 = &HE0 Then
+                    fpu(ftop - 1) = "-" & fpu(ftop - 1)
+                Else
+                    GoTo bail
+                End If
+            Case &HDF                                 'fnstsw ax (DF E0) - FP status for the exception check
+                If NativeDumpByte(dump, i + 1) = &HE0 Then fpPending = True Else GoTo bail
+            Case &HA8                                 'test al, imm8 - VB6's post-op FP exception check
+                If fpPending Then fpPending = False Else GoTo bail
             Case &HC3, &HC2                           'ret / ret N -> done
                 Exit For
             Case Else
@@ -10132,11 +10187,38 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean)
         End Select
 nextI:
     Next
-    'The return value lives in eax (reg 0).
+    'A Double-returning body left its result on the FPU stack (ST(0)).
+    If ftop > 0 And Len(fpu(ftop - 1)) > 0 Then
+        isFunc = True: isDoubleRet = True: NativeFramelessBody = fpu(ftop - 1): Exit Function
+    End If
+    'Else the return value lives in eax (reg 0) - the integer/pointer path.
     If Len(regv(0)) > 0 Then isFunc = True: NativeFramelessBody = regv(0)
     Exit Function
 bail:
     NativeFramelessBody = ""
+End Function
+
+Private Function NativeFLSlotVal(slotExpr As Collection, ByVal disp As Long) As String
+    'The current expression at scratch slot [esp+disp]: the value most recently fstp'd
+    'there, else the original parameter that occupies it (arg_<disp+4>, mirroring
+    'NativeFLRmVal's esp->arg mapping).
+    Dim s As String
+    s = NativeColGet(slotExpr, "S" & disp)
+    If Len(s) > 0 Then NativeFLSlotVal = s Else NativeFLSlotVal = "arg_" & Hex$(disp + 4)
+End Function
+
+Private Function NativeDoubleParams(ByVal retN As Long) As String
+    'Parameter list for an all-Double frameless function: one `arg_<off> As Double`
+    'per 8-byte slot implied by `ret N` (off = 8, 0x10, 0x18, ...), matching the
+    'esp->arg naming the body uses.
+    Dim k As Long, cnt As Long, s As String, off As Long
+    cnt = retN \ 8
+    For k = 0 To cnt - 1
+        off = 8 + k * 8
+        If Len(s) > 0 Then s = s & ", "
+        s = s & "arg_" & Hex$(off) & " As Double"
+    Next
+    NativeDoubleParams = s
 End Function
 
 'Decode a ModRM (+SIB+disp) operand at byte `idx`.  Fills regField and the r/m.

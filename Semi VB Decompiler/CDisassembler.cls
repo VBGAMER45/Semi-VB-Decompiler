@@ -154,12 +154,29 @@ Public Function DisasmProc(b() As Byte, ByVal va As Long, ByVal maxLen As Long) 
         'jo/jno (integer-overflow checks): VB6 emits these after arithmetic and
         'jumps to an overflow-error stub appended AFTER the function epilogue, so
         'counting their target would run the scan off the proc end into the next
-        'function's padding/data.
+        'function's padding/data.  Also exclude the FP-exception check
+        '(`fnstsw ax; test al,0Dh; jne <stub>`) emitted after every floating-point
+        'op: its jne lands on a `jmp <fp-error-handler>` stub just past the RET, so
+        'counting it cascades the scan through a whole cluster of tiny FP helpers
+        '(MathAdd/Sub/Mul...) and they never get bounded as their own procedures.
+        'The check is `test AL, imm8` (opcode A8) - distinct from an fcomp compare,
+        'which tests the high byte (`test AH, mask`, opcode F6) and IS a real branch.
         If (cls = C_JMP Or cls = C_JMC) And d.jmpConst > farTarget Then
-            Dim mnm As String, sp As Long
+            Dim mnm As String, sp As Long, isFpExc As Boolean
             mnm = Trim$(d.command): sp = InStr(mnm, " ")
             If sp > 0 Then mnm = UCase$(Left$(mnm, sp - 1)) Else mnm = UCase$(mnm)
-            If mnm <> "JO" And mnm <> "JNO" Then farTarget = d.jmpConst
+            isFpExc = False
+            If cls = C_JMC And ret.Count >= 3 Then
+                'Require the exact FP-exception epilogue: fnstsw ax (DF E0, optionally
+                'WAIT-prefixed) ; test al, imm8 (A8) ; jcc.  Anchoring on the fnstsw
+                'keeps a genuine `test al, imm8 ; jcc` (e.g. an `If (x And 8)` byte test)
+                'from being mistaken for the epilogue and truncating the proc.
+                Dim pd1 As String, pd2 As String
+                pd1 = Replace(UCase$(ret(ret.Count - 1).dump), " ", "")
+                pd2 = Replace(UCase$(ret(ret.Count - 2).dump), " ", "")
+                If Left$(pd1, 2) = "A8" And (pd2 = "DFE0" Or pd2 = "9BDFE0") Then isFpExc = True
+            End If
+            If mnm <> "JO" And mnm <> "JNO" And Not isFpExc Then farTarget = d.jmpConst
         End If
         va = va + d.instLen
         pointer = pointer + d.instLen

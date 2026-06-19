@@ -312,6 +312,8 @@ Private Function NativeIsProcStartByte(ByVal b0 As Byte, ByVal b1 As Byte) As Bo
             NativeIsProcStartByte = True       'mov/lea/xor/mov-eax-abs/word-prefix/sub-esp/grp5
         Case &HB8 To &HBF            'mov reg, imm32
             NativeIsProcStartByte = True
+        Case &HD8 To &HDF            'x87 FPU op (fld/fild/...): a Double-math leaf helper
+            NativeIsProcStartByte = True       'e.g. MathAdd starts `fld qword [esp+4]` (0xDD)
         Case Else
             NativeIsProcStartByte = False
     End Select
