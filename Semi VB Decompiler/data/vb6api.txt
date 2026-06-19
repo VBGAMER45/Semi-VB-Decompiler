@@ -506,7 +506,7 @@
 73471682,605,rtcGetErl,undef
 7347B318,606,rtcStringBstr,String$()
 7347B43F,607,rtcStringVar,String()
-734754F3,608,rtcVarBstrFromAnsi,undef
+734754F3,608,rtcVarBstrFromAnsi,Chr()
 7346BA35,609,rtcGetDateBstr,Date$
 7346B9A5,610,rtcGetDateVar,Date
 7346BAF7,611,rtcGetTimeBstr,Time$
@@ -558,7 +558,7 @@
 73475071,657,rtcIntVar,Int()
 734750C1,658,rtcSgnVar,Sgn()
 734854AD,659,_adj_fdiv_m16i,undef
-7348753B,660,rtcVarFromFormatVar,undef
+7348753B,660,rtcVarFromFormatVar,Format()
 7346BC8C,661,rtcDateAdd,DateAdd()
 7346BEC7,662,rtcDateDiff,DateDiff()
 7346C1FB,663,rtcDatePart,DatePart()
