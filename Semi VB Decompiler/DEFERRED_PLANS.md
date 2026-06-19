@@ -141,11 +141,17 @@ HIGH effort, HIGH risk (late-bound changes touch Winsock/RichTextBox across the 
 dedicated effort with heavy regression on the customocx + Client2 benches. Net payoff is large for
 readability (Form_Resize is ~80 mangled lines that should be ~25 clean property assignments).
 
-## 3c. Indirect predeclared-instance clsBitmap receiver — frmClient bitmap-init (Client2)
+## 3c. Indirect predeclared-instance clsBitmap receiver — DONE 2026-06-19
 
-**Status: investigated 2026-06-19. Related wins shipped (Part A 0f.. user-class object
-type through local store/reload resolved 8 calls; Part B the StrCat/__vbaVarDup string
-recovery), but the util0/util1 LoadBitmap RECEIVER remains `.UnkVCall_00000030h`.**
+**Status: DONE.** Pre-pass NativeDetectIndirectNew records the pointer-to-pointer As-New
+global -> class (gated to user CLASSES, not forms); a narrowly-gated 0xA1 handler tags only
+those globals' loads as a field-address whose deref is the object.  Resolved util0/util1
+`var_10C.LoadBitmap(...)` + 30 `clsBitmap.ImageDC`/`.MaskDC` (inlined into BitBlt as the
+source DC); receiver renders as `clsBitmap` (matches commercial).  Client2 UnkVCall 1649->1618,
+counters/proc-counts unchanged, Dungeon byte-identical (the class-only gate + narrow 0xA1
+avoid the modPlayer SIB regression that broad 0xA1 tracking causes).  Original analysis below.
+
+**Original analysis (investigated 2026-06-19):**
 
 `clsBitmap` is a PREDECLARED-instance class (commercial renders `clsBitmap.LoadBitmap(clsBitmap, ..)`).
 Its instance is reached through a 3-LEVEL indirection: `mov eax,[0x55d148]` (slot ptr) ->
