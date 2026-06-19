@@ -213,6 +213,7 @@ Private NVAccumRetType As String   'recovered return type from that load: "Integ
 Private NVFpuRet As Boolean        'the proc returns a Double/Single via the FPU: the epilogue loads the result into ST(0) (`fld qword/dword [mem]` before the teardown/ret) - an unclassified module Function (recovered by NativeDetectFpuReturn)
 Private NVFpuRetType As String     'recovered FPU return type: "Double" (qword/DD) or "Single" (dword/D9)
 Private NVAccumRetSlot As Long      'the return slot's ebp displacement (negative; 0 = none) - so a constant store `mov [ebp-slot],imm` (0xC7) to it renders `FuncName = imm`
+Private NVRetSlotClass As Boolean   'True when NVAccumRetSlot is a CLASS [out,retval] retbuf slot (NativeDetectReturnSlot), False for a module accumulator slot (NativeDetectAccumReturn).  Gates the clean-NAMED-value return surfacing to classes, where the slot's value is reliably tracked (a module return is often computed via dropped helper calls, so a named store to its slot can be a stale intermediate, e.g. modMap_Dist).
 Private NVClassRetType As String    'CLASS Function/Property-Get return type, inferred from the width of the store into its hidden [out,retval] retbuf param (word=Integer, dword=Long, strcopy=String); "" if undetermined
 Private NVParamWidth As Collection  'per-proc parameter type from ACCESS WIDTH at ebp+off (key=decimal off, value="Double"/"Single"/"Integer"/"Byte"); a Double also implies the off+4 hi-dword slot is dropped.  Filled by NativeDetectParamWidths, consumed by NativeRefineParamTypes.
 Private NVRetN As Long             'the proc's `ret imm16` operand (callee-popped arg bytes), -1 if none
@@ -276,7 +277,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVHasMe = NativeProcHasMe(addr)
     NVIsClass = NativeOwnerIsClass(NVForm)
     NVProcEndWord = "Sub"
-    NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0: NVRetbuf = False: NVClassRetType = ""
+    NVAccumRet = False: NVAccumRetType = "": NVAccumRetSlot = 0: NVRetSlotClass = False: NVRetbuf = False: NVClassRetType = ""
     NVFpuRet = False: NVFpuRetType = ""
     NVLastControl = "": NVLastGuid = "": NVLastImm = "": NVPendingArg = ""
     NVLastLea = 0: NVLastLeaSet = False: NVLastLeaField = False: NVLastCmp = ""
@@ -5141,6 +5142,18 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         'would otherwise fold/consume a deferred call and lose it.
                         Dim cpname As String, cargs As String, csig As String, ckind As String
                         Dim cP() As String, cStart As Long, cKeep As Long, cTotal As Long, cRetbuf As String, cI As Long, cOut As String
+                        'A by-ref OUT-param local (its &address pushed, currently holding only
+                        'the "0" zero-init placeholder) is FILLED by the callee.  Invalidate
+                        'its tracked value BEFORE draining the push stack, so a read AFTER the
+                        'call yields the local name (var_X) and the value flows to the return
+                        '(`var_18 = var_20` -> `Randomizer = var_20`).  Narrow (only the "0"
+                        'placeholder) so a by-ref local holding a real value is untouched.
+                        Dim biK As Long
+                        For biK = 0 To NVPushTop - 1
+                            If NVPushDisp(biK) < 0 Then
+                                If NativeGetLocalExpr(NVPushDisp(biK)) = "0" Then NativeSetLocalExpr NVPushDisp(biK), ""
+                            End If
+                        Next
                         cargs = NativeArgList()
                         cpname = NativeCallTargetName(ctgt)
                         'This is a SELF vtable-call - ctgt was resolved on NVForm's OWN
@@ -7054,6 +7067,7 @@ Private Sub NativeDetectReturnSlot(col As Collection, ByVal addr As Long)
                                 'accumulator return (no Me) are mutually exclusive, and only
                                 'the 0xC7 handler reads it.
                                 NVAccumRetSlot = dloc
+                                NVRetSlotClass = True   'this slot is a CLASS retbuf return
                                 Exit Sub
                             End If
                         End If
@@ -8152,11 +8166,13 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         If (InStr(v88, "(") > 0 Or Left$(v88, 6) = "field_") And v88 <> ln88 Then
                             NativeTrackReg = ln88 & " = " & v88
                             NativeSetLocalExpr d88, ln88
-                        ElseIf d88 = NVAccumRetSlot And v88 <> "0" And v88 <> ln88 And (NativeIsNumLit(v88) Or NativeIsCleanNamedVal(v88)) Then
+                        ElseIf d88 = NVAccumRetSlot And v88 <> "0" And v88 <> ln88 And (NativeIsNumLit(v88) Or (NVRetSlotClass And NativeIsCleanNamedVal(v88))) Then
                             'A constant/clean value stored to the RETURN slot through a byte
                             'coercion (`mov ecx,0x49; call __vbaUI1I2; mov [ebp-X],al` ->
                             'a Byte `Property Get ID() = 73`).  Surface it like the 0xC7
                             'const-return path; skip the "0" slot zero-init that precedes it.
+                            'A numeric const is reliable for any slot; a clean NAMED value is
+                            'gated to a class slot (see the 0x89 store note re: module returns).
                             NativeTrackReg = ln88 & " = " & v88
                             NativeSetLocalExpr d88, ln88
                         End If
@@ -8297,6 +8313,15 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                         '(parenthesised) OR a bare instance-field read (field_<off>) - so an
                         'Integer Property Get's `temp = field_34` return-slot copy shows and
                         'the post-pass renames it to `ID = field_34`.
+                        NativeTrackReg = lname & " = " & stv89
+                        NativeSetLocalExpr disp, lname
+                    ElseIf disp = NVAccumRetSlot And NVRetSlotClass And Len(stv89) > 0 And stv89 <> "0" And stv89 <> lname And NativeIsCleanNamedVal(stv89) Then
+                        'A clean named value stored to a CLASS return slot (`var_18 = var_20`,
+                        'where var_20 is a value-returning helper's by-ref out-param) ->
+                        'surface it so the return renders `FuncName = var_20`.  Gated to a
+                        'class slot (NVRetSlotClass): a module return is often computed via
+                        'dropped helper calls, so a named store to its accumulator slot can
+                        'be a stale intermediate (e.g. modMap_Dist = arg_C, which is wrong).
                         NativeTrackReg = lname & " = " & stv89
                         NativeSetLocalExpr disp, lname
                     ElseIf isCtrSlot And Len(stv89) > 0 And stv89 <> lname Then
