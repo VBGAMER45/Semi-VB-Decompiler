@@ -374,7 +374,16 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         If cls = C_RET And NVRetN = -1 Then
             Dim rdmp As String
             rdmp = UCase$(Replace(inst.dump, " ", ""))
-            If Left$(rdmp, 2) = "C2" And Len(rdmp) >= 6 Then NVRetN = NativeDumpByte(rdmp, 1) + NativeDumpByte(rdmp, 2) * 256
+            If Left$(rdmp, 2) = "C2" And Len(rdmp) >= 6 Then
+                Dim rn As Long
+                rn = NativeDumpByte(rdmp, 1) + NativeDumpByte(rdmp, 2) * 256
+                'A real stdcall `ret N` always pops a DWORD-aligned argument block, so N
+                'is a multiple of 4.  A non-multiple-of-4 is a misdecoded immediate (e.g.
+                'the C2 byte inside `push 0x43c2f8` when the linear sweep briefly desyncs),
+                'NOT this proc's epilogue - skip it and keep scanning for the genuine ret,
+                'else the bogus N inflates the parameter count (Form_Load(arg_C..arg_44)).
+                If (rn And 3) = 0 And rn <= &H400 Then NVRetN = rn
+            End If
         End If
         prevWasResumePush = NativeIsResumePush(inst, addr)
     Next
@@ -395,7 +404,9 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
         For jj = scanLen - 3 To 0 Step -1
             If b(jj) = &HC2 Then
                 nn = b(jj + 1) + b(jj + 2) * 256&
-                If nn >= 0 And nn <= 256 Then NVRetN = nn: Exit For
+                'Same DWORD-alignment guard as the col scan: a real `ret N` pops a
+                'multiple of 4, so a non-aligned C2 is data/misdecode - keep scanning.
+                If nn >= 0 And nn <= 256 And (nn And 3) = 0 Then NVRetN = nn: Exit For
             End If
         Next
     End If
@@ -915,9 +926,18 @@ Private Function NativeMergeElseIf(ByVal src As String) As String
             If NativeLineIndent(lines(i + 1)) = ind _
                And Left$(nxtT, 3) = "If " And Right$(nxtT, 5) = " Then" _
                And NativeLineIndent(lines(i - 1)) = ind + 4 _
-               And NativeIsUncondTransfer(Trim$(lines(i - 1))) Then
+               And NativeIsUncondTransfer(Trim$(lines(i - 1))) _
+               And Not (i + 2 <= n And Trim$(lines(i + 2)) = "End If" And InStr(nxtT, "(") = 0) Then
                 'Drop this End If; rewrite the following If as ElseIf (in place, so a
                 'longer chain keeps collapsing on later iterations of this same pass).
+                'Skip ONLY when the following If is EMPTY (body immediately `End If`) AND
+                'STRIPPABLE (no "(" in its condition - the same gate NativeStripEmptyIfs
+                'uses): merging such a guard would leave a pointless empty `ElseIf <c> Then
+                '/ End If` arm that NativeStripEmptyIfs (which drops only standalone `If`
+                'blocks) can't remove.  Left standalone, that empty guard (e.g. an As-New
+                'null-check `global_X = 0` with no recovered Set body) is dropped as before.
+                'A paren condition is NOT strippable downstream, so keep merging it (else we
+                'just trade an empty ElseIf arm for an equally-empty standalone If - churn).
                 lines(i + 1) = Space$(ind) & "Else" & nxtT
                 skip(i) = True
             End If
@@ -6325,6 +6345,16 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
                     'numerics / unresolved pointers); only the gated asymmetric form below
                     'is built as a fresh immediate constant right before the compare.
                     vtL = vtA(0): vtR = vtA(1)
+                    'EXCEPTION: resolve an operand that is the address of a VT_BSTR Variant
+                    'CONSTANT to its STRING LITERAL (e.g. `If (Command = "1024lUnAtIc1024")`).
+                    'Accept ONLY a quoted-string result - a number/pointer could be a stale
+                    'reused-temp value (the risk noted above), but a quoted literal in the
+                    'data slot is a reliable string constant the compare reads directly.
+                    Dim vsL As String, vsR As String
+                    vsL = NativeVarOperand(0, vtA, vtD)
+                    If Left$(vsL, 1) = Chr$(34) Then vtL = vsL
+                    vsR = NativeVarOperand(1, vtA, vtD)
+                    If Left$(vsR, 1) = Chr$(34) Then vtR = vsR
                 Else
                     vtL = NativeVarOperand(1, vtA, vtD): vtR = NativeVarOperand(0, vtA, vtD)
                 End If
@@ -6847,6 +6877,7 @@ Private Sub NativeRuntimeSyntax(ByVal nm As String, ByRef vbName As String, ByRe
         Case "rtcPrintFile", "__vbaPrintFile": vbName = "Print": arity = -1: isStmt = True
         Case "rtcWriteFile": vbName = "Write": arity = -1: isStmt = True
         Case "rtcKillFiles", "rtcKill": vbName = "Kill": arity = 1: isStmt = True
+        Case "__vbaEnd": vbName = "End": arity = 0: isStmt = True    'the VB `End` statement (terminate) - not `Call End()`
     End Select
 End Sub
 
