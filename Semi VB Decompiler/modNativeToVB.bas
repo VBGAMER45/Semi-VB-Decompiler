@@ -69,6 +69,7 @@ Private NVLastControl As String   'most recently accessed control name
 Private NVLastGuid As String      'its GUID (for property name resolution)
 Private NVFpu() As String         'FPU expression stack
 Private NVFpuTop As Long
+Private NVFpCoerce As Boolean     'a __vbaFpR4/R8 (CSng/CDbl) just popped st0 to eax - an immediately-following fcom/fcomp can recover its lost left operand from eax (NVReg(0))
 Private NVLocal As Collection      'local stack slot (disp) -> expression
 Private NVLocalGuid As Collection  'local stack slot (disp) -> control GUID, when the slot holds a control object
 Private NVLastLea As Long          'displacement of the most recent LEA (GET out-param)
@@ -289,7 +290,7 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
     NVCmpSet = False: NVCmpL = "": NVCmpR = "": NVCmpIsTest = False: NVCmpIsBool = False: NVFpuChk = False
     NVStrCmpPending = False: NVStrCmpP1 = "": NVStrCmpP2 = ""
     NVPendingCall = "": NVErrObjPending = False
-    ReDim NVFpu(31): NVFpuTop = 0
+    ReDim NVFpu(31): NVFpuTop = 0: NVFpCoerce = False
     ReDim NVPushImm(31): ReDim NVPushDisp(31): NVPushTop = 0: NVLastPushDisp = 0
     ReDim NVIfTarget(31): NVIfTop = 0: NVIndent = 0
     Dim r As Long
@@ -5685,6 +5686,8 @@ Private Sub NativeFpuOp(inst As CInstruction, ByVal mn As String)
     Select Case True
         Case mn = "FLD", mn = "FILD"
             NativeFpuPush operand
+            NVFpCoerce = False              'a fresh FPU load supersedes any pending coercion-in-eax
+
         Case mn = "FADD", mn = "FADDP", mn = "FIADD"
             a = NativeFpuPop(): NativeFpuPush "(" & a & " + " & operand & ")"
         Case mn = "FSUB", mn = "FSUBP", mn = "FISUB"
@@ -5708,7 +5711,17 @@ Private Sub NativeFpuOp(inst As CInstruction, ByVal mn As String)
             'Comparison consumes the top; remember the operands as a hint for the
             'condition of the branch that follows.
             Dim lhs As String
-            If NVFpuTop > 0 Then lhs = NativeFpuPop() Else lhs = "st0"
+            If NVFpuTop > 0 Then
+                lhs = NativeFpuPop()
+            ElseIf NVFpCoerce And (NativeIsCleanNamedVal(NVReg(0)) Or NativeIsNumLit(NVReg(0))) Then
+                'The FPU stack is empty because a __vbaFpR4/R8 (CSng/CDbl) just before the
+                'compare popped st0 to eax; recover the left operand from eax so the
+                'condition reads `var_5C < var_40` instead of the lost `st0 < ...`.
+                lhs = NVReg(0)
+            Else
+                lhs = "st0"
+            End If
+            NVFpCoerce = False
             NVLastCmp = "(" & lhs & " ? " & operand & ")"
     End Select
 End Sub
@@ -5722,7 +5735,15 @@ Private Function NativeFpuOperand(ByVal hasMem As Boolean, ByVal disp As Long, B
     ElseIf isAbs Then
         If isQword Then NativeFpuOperand = NativeDoubleAtAddr(disp) Else NativeFpuOperand = NativeFloatAtAddr(disp)
     ElseIf disp < 0 Then
-        NativeFpuOperand = NativeGetLocalExpr(disp)
+        'A local slot's tracked FPU expression.  When it is empty or carries the
+        '`st0` sentinel (the model was reset by an intervening call - e.g. a Double-
+        'returning time function whose result we don't track), the folded expression
+        'is garbage; fall back to the local NAME (var_X) so the operand is at least a
+        'real, correct variable (`var_5C < var_40`) instead of `st0 < (st0 + 0.05)`.
+        Dim le As String
+        le = NativeGetLocalExpr(disp)
+        If Len(le) = 0 Or InStr(le, "st0") > 0 Then le = "var_" & Hex$(Abs(disp))
+        NativeFpuOperand = le
     Else
         NativeFpuOperand = "var_" & Hex$(disp)
     End If
@@ -6112,7 +6133,7 @@ Private Function NativePopValue() As String
 End Function
 
 Private Sub NativeResetValue()
-    NVPendingArg = "": NVLastImm = "": NVFpuTop = 0: NVReg(0) = ""
+    NVPendingArg = "": NVLastImm = "": NVFpuTop = 0: NVReg(0) = "": NVFpCoerce = False
 End Sub
 
 Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String) As String
@@ -6568,12 +6589,20 @@ Private Function NativeRuntimeCall(inst As CInstruction, ByVal apiName As String
             'Do NOT touch the push stack: it belongs to the FOLLOWING consumer call
             '(clearing it dropped EOF/Close/UBound arguments).
             NativeRuntimeCall = "": Exit Function
-        Case InStr(nm, "__vbaFpR4") > 0, InStr(nm, "__vbaFpR8") > 0, _
-             InStr(nm, "__vbaFpI4") > 0, InStr(nm, "__vbaFpI2") > 0, _
+        Case InStr(nm, "__vbaFpR4") > 0, InStr(nm, "__vbaFpR8") > 0
+            'REAL coercion (CSng/CDbl): folds the FPU top through to eax for the value
+            'consumer.  Also flag it (NVFpCoerce) so an IMMEDIATELY-following fcom/fcomp -
+            'which finds the FPU stack empty because this popped st0 - can recover its
+            'LEFT operand from eax (the frmGamble.Spin delay loop `st0 < (st0+0.05)`
+            '-> `var_5C < var_40`).  Pop, NOT peek: leaving it on the stack would let a
+            'stray entry pollute a later store (frmMain CurrentX / var_2C).
+            If NVFpuTop > 0 Then NVReg(0) = NativeFpuPop()
+            NVFpCoerce = True
+            NativeRuntimeCall = "": Exit Function
+        Case InStr(nm, "__vbaFpI4") > 0, InStr(nm, "__vbaFpI2") > 0, _
              InStr(nm, "__vbaFpUI1") > 0, InStr(nm, "__vbaFpCY") > 0
-            'Convert the FPU top to an integer/real type (result in eax).  Fold the
-            'FPU expression value through to eax; emit no Call.  The push stack is
-            'left untouched (the FPU stack, not the arg stack, holds the input).
+            'INTEGER/Currency coercion: converts the FPU top to an integer in eax and
+            'REMOVES it from the FPU stack.  Fold the value through to eax; emit no Call.
             If NVFpuTop > 0 Then NVReg(0) = NativeFpuPop()
             NativeRuntimeCall = "": Exit Function
         Case InStr(nm, "__vbaCastObj") > 0
