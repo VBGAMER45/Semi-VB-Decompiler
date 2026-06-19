@@ -5143,6 +5143,15 @@ Private Function NativeProcessInst(inst As CInstruction) As String
                         Dim cP() As String, cStart As Long, cKeep As Long, cTotal As Long, cRetbuf As String, cI As Long, cOut As String
                         cargs = NativeArgList()
                         cpname = NativeCallTargetName(ctgt)
+                        'This is a SELF vtable-call - ctgt was resolved on NVForm's OWN
+                        'vtable (NativeClassVtableTarget keys gFormVtable by NVForm), so
+                        'NVForm already provides the receiver below.  Strip any owner
+                        'qualifier the name still carries (a SHARED helper's gNativeProcArray
+                        'owner can be a DIFFERENT class - e.g. proc_536860 lives in three
+                        'packet classes' vtables), else it renders NVForm.OtherClass.proc_X.
+                        Dim cdot As Long
+                        cdot = InStrRev(cpname, ".")
+                        If cdot > 0 Then cpname = Mid$(cpname, cdot + 1)
                         cRetbuf = ""
                         If Len(cargs) > 0 Then
                             cP = Split(cargs, ", ")
