@@ -524,16 +524,17 @@ a stale control-flow-merged register at call#1. A naive fold yields garbage
 (`Abs(var_24)`). Needs full CFG data-flow, out of scope. The other modMap residual is the
 5 boolean-AND materialization `<cond>` in Get_Wall_Connector_ID (Task A, regression-prone).
 
-### F. FPU compare `st0` operand recovery (low value, medium effort)
-`If (st0 > (var_C + 5))` — the left operand is lost because a value-preserving fp helper `call`
-between the `fld` and the `fcom` resets the NVFpu stack model (NVFpuTop=0). Let such helper calls
-carry the operand through. ~13 sites. Concrete repro: frmGamble.Spin @51BBE0 (a 50 ms delay loop)
-`If (st0 < (st0 + 0.05))` — the `__vbaFpR4` (CSng) call between `fld var_5C` and `fcomp var_40`
-resets the model so both operands show `st0`. Fix idea: do NOT reset NVFpu for the fp COERCION
-helpers (`__vbaFpR4`/`__vbaFpR8`/`__vbaFpI4`...), which leave their result on st0; also track the
-Double-returning Function result (proc_4FF160 = a time func) so var_40's stored expr isn't `st0`.
-**Constant-WIDTH half DONE 2026-06-19 (b410ca2)**: m64 operands now read as Double
-(was Single -> garbage `0.05`->`-1.588187E-23`); only the operand collapse remains.
+### F. FPU compare `st0` operand recovery — DONE 2026-06-19 (9ac599a)
+`If (st0 > (var_C + 5))` / `If (st0 < (st0 + 0.05))` — operands collapsed to the `st0` sentinel.
+FIXED two ways: (1) __vbaFpR4/R8 (CSng/CDbl) set NVFpCoerce; a following fcom/fcomp with an empty
+FPU stack recovers its LEFT operand from eax (where the coercion left it). (2) NativeFpuOperand
+falls back to the local NAME (var_X) when a slot's tracked FPU expr is empty or carries `st0`.
+frmGamble.Spin `st0 < (st0+0.05)` -> `var_5C < var_40`; st0-garbage operands Dungeon 38->9,
+Client2 90->40 (~79 conditions recovered). The constant-WIDTH half was b410ca2 (m64 read as Double).
+Proc counts/<arg>/garbage flat. REMAINING st0 are genuine unnamed FPU accumulators (`((16/8)+st0)`).
+**Follow-up (separate bug, surfaced here)**: `or eax,0xFFFFFFFF; add eax,[var_2C]` (a post-delay-loop
+counter decrement = `var_2C = var_2C - 1`) mis-renders `var_2C = ((cond) + var_2C)` because
+`or eax,-1` does not reset eax's tracked value to -1. Add an `or reg,0xFFFFFFFF -> reg = -1` idiom.
 
 ### G. Sub Main detection (low value, low effort)
 VB header `+0x2C lpSubMain` gives the entry point — label it. Quick win.
