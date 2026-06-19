@@ -141,6 +141,22 @@ HIGH effort, HIGH risk (late-bound changes touch Winsock/RichTextBox across the 
 dedicated effort with heavy regression on the customocx + Client2 benches. Net payoff is large for
 readability (Form_Resize is ~80 mangled lines that should be ~25 clean property assignments).
 
+## 3c. Indirect predeclared-instance clsBitmap receiver — frmClient bitmap-init (Client2)
+
+**Status: investigated 2026-06-19. Related wins shipped (Part A 0f.. user-class object
+type through local store/reload resolved 8 calls; Part B the StrCat/__vbaVarDup string
+recovery), but the util0/util1 LoadBitmap RECEIVER remains `.UnkVCall_00000030h`.**
+
+`clsBitmap` is a PREDECLARED-instance class (commercial renders `clsBitmap.LoadBitmap(clsBitmap, ..)`).
+Its instance is reached through a 3-LEVEL indirection: `mov eax,[0x55d148]` (slot ptr) ->
+`mov ecx,[eax]` (object ptr) -> `mov [ebp-X],ecx`; later `mov eax,[ebp-X]; mov ecx,[eax]
+(vtable); call [ecx+0x30]`. The standard As-New model is 2-level (global -> object -> vtable),
+and __vbaNew2's @dest here is a REGISTER (`push eax` where eax=[0x55d148]), not a `push imm`
+global address, so NVObjClass never records the class for 0x55d148. To fix: recognise the
+predeclared-instance global (0x55d148 -> clsBitmap, e.g. from the __vbaNew2 ObjInfo 0x416264
++ the pushed global VALUE), thread the type through the extra indirection level, and render the
+receiver as the class name `clsBitmap`. Niche; the string args + the 2-level cases already work.
+
 ## 4. Indexed-property parameter drop (Client2, medium value)
 
 `Property Get OK(Index As Integer)` / packet `Size(Index As Integer)` render as `OK()` / `Size()` —
