@@ -90,6 +90,48 @@ Me field) isn't tracked as a deref base. General field-ptr tracking is broad/ris
 
 ---
 
+## 3b. Late-bound control property get/put chain — frmClient.Form_Resize (Client2, @486830)
+
+**Status: investigated 2026-06-19, NOT attempted (deep + high regression risk).**
+
+The repeated block
+```
+var_40 = frmClient.txtMessage.HideSelection     ' WRONG member (DISPID mis-resolved)
+Call R4Var(frmClient.txtMessage)                ' __vbaR4Var = CSng (Single coercion)
+var_14(4) = var_4C ; var_14(8) = st0 ; var_14(12) = var_44   ' build a VT_R4 Variant
+Call LateIdSt()                                 ' __vbaLateIdSt = late-bound property PUT (dropped)
+```
+should be (commercial):
+```
+frmClient.txtGlobalMsg.Height = CSng(frmClient.txtMessage.Height)
+```
+(Commercial writes `CSgn(...)` — that's its label for the **Single** coercion `__vbaR4Var`;
+real VB is `CSng`. There is no `CSgn` keyword.)
+
+**Decode (disasm @486CB0-486D66):** the txtMessage/txtGlobalMsg/... controls are accessed
+LATE-BOUND. `mov eax,[esi=Me]; call [eax+0x644/0x648/0x64c/...]` are the FORM-vtable control
+accessors (these controls sit at high vtable offsets, not the 0x2F8 block) — they return the
+control object, cached via `__vbaObjSet` (edi) into var_28/var_2C. Then:
+- GET: `__vbaLateIdCallLd` reads `txtMessage.Height` (a Variant) -> `__vbaR4Var` -> `fstp` Single.
+- A 16-byte VT_R4 Variant (vt=4 at [esp], the Single at +8) is built inline (`sub esp,0x10`).
+- PUT: `__vbaLateIdSt` sets `<targetCtrl>.Height = <that Variant>`. The `0x80010006` push is the
+  late-bind flags/lcid word.
+
+**Two bugs to fix (both in the existing late-bound path NativeLateIdCall/NativeDetectLateCalls):**
+1. **DISPID mis-resolves to `HideSelection` instead of `Height`.** `Top`/`Left`/`Height`/`Width`
+   are EXTENDER/stock properties (provided by the VB container, not the RichTextBox OCX typelib),
+   so `modCOM.LateMemberName(RichTextBox, dispid, ...)` finds a coincidental same-memid member
+   (HideSelection). FIX: a stock/extender-DISPID table (Top/Left/Height/Width/Visible/Enabled/...)
+   consulted BEFORE the control's OCX typelib.
+2. **`__vbaLateIdSt` PUT renders `Call LateIdSt()` (unresolved).** The object token and/or DISPID
+   aren't recovered for these chained puts (object is cached in var_28 via __vbaObjSet; the value
+   is the inline VT_R4 Variant). NativeLateIdCall's St branch exists but needs the obj token from
+   the cached-control local and the value from the inline Variant; also fold `__vbaR4Var` -> CSng.
+
+HIGH effort, HIGH risk (late-bound changes touch Winsock/RichTextBox across the program). Do as a
+dedicated effort with heavy regression on the customocx + Client2 benches. Net payoff is large for
+readability (Form_Resize is ~80 mangled lines that should be ~25 clean property assignments).
+
 ## 4. Indexed-property parameter drop (Client2, medium value)
 
 `Property Get OK(Index As Integer)` / packet `Size(Index As Integer)` render as `OK()` / `Size()` —
