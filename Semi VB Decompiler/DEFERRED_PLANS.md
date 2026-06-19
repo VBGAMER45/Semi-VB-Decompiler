@@ -1,0 +1,125 @@
+# Deferred Plans — Native Decompiler
+
+Tasks investigated and intentionally deferred (too risky / too large for a quick fix),
+written so they can be resumed cold. See `DEVELOPMENT.md` (build/test/git), `NEXT_TASKS.md`
+(long history), and the auto-memory dir for the rest. Benchmarks: Dungeon
+(`...\forummods\rpgwo\DungeonFateSource\Dungeon.exe`, byte-stable ground truth) and
+Client2 (`...\websites\a-client2-decomp\Client2.exe`).
+
+---
+
+## 1. clsPktSkillDef.Desc — For-loop byte-fill reconstruction (Client2, @5361F0)
+
+**Status: investigated 2026-06-19, NOT shipped. The `movsx` sub-fix was tried and REVERTED
+(regressed Dungeon integer math — see below).**
+
+### The real code (from the binary)
+```vb
+Public Property Let Desc(inString)
+    For i = 1 To 100                                      ' di/edi counter, 1..0x64
+        If i > Len(inString) Then                         ' cmp esi,eax(=__vbaLenBstr); jle else
+            field_44(i + 33) = 0                          ' xor ecx; __vbaUI1I2 -> al=0; mov [pvData+esi],al
+        Else
+            field_44(i + 33) = Asc(CStr(Mid(inString, i, 1)))
+            ' rtcMidCharVar(var_3C,var_4C,i,var_2C)=Mid$(inString,i,1);
+            ' __vbaStrVarVal -> CStr; rtcAnsiValueBstr -> Asc; __vbaUI1I2 -> CByte; store
+        End If
+    Next i
+End Property
+```
+`field_44` is the packet byte buffer = `pvData` of the inline array at `Me+0x38` (descriptor
++0x0C; same relationship as the GetData/ID-stamp work, commit 37752d0).
+
+### What our output is missing (4 interlocking failures)
+1. **Counter renders as `0`** (`If 0 > Len`, `Mid(..,0,..)`). `i` lives in `edi`; the body reads
+   it via `movsx esi, di`, but the value model (`NativeTrackReg`, ~8156) has NO `Case &HF`, so
+   `esi` keeps its stale `xor esi,esi` 0.
+2. **Two-armed if/else not reconstructed.** The `jle` to the else branch isn't structured; the
+   THEN body `field_44(i+33)=0` is dropped and rendered as `If 0 > Len Then GoTo loc_00536318`.
+3. **Asc/Mid store dropped.** The else branch collapses to bare `Call Mid(...)`; the
+   `Asc(CStr(Mid(...)))` value and the byte store are lost.
+4. **Dangling label / `Next` placement** — a SYMPTOM of #2: the unreconstructed if/else leaves a
+   `GoTo loc_00536318` + label (the merge point) before `Next`. Reconstruct the if/else and the
+   label/GoTo vanish and `Next` is clean. NOT a separate "Next bug."
+
+### The `movsx` attempt (reverted — DO NOT re-ship the broad form)
+Added a `Case &HF` to `NativeTrackReg` to propagate `NVReg(rm)->NVReg(reg)` for `movsx/movzx`
+reg-to-reg (md=3), gated to a "simple" source value (no `(`/space/`&`/quote). Result:
+- Client2: FIXED cleanly — `If i > Len(inString)`, `Mid(.., i, ..)`; all counters flat.
+- Dungeon: REGRESSED integer-math procs — `proc_413050` expressions mangled (two distinct operands
+  both became `arg_C`), `field_70 = (Index + var_A8)` -> `field_70 = 0`, modMap/modPlayer/modItem
+  perturbed. `movsx`-word propagation helps loop counters but corrupts 16-bit Integer arithmetic,
+  and the two are **indistinguishable at the instruction level** (the documented "word reg-reg
+  juggling" hard ceiling). Even the simple-val gate didn't separate them. Reverted to 82b457d.
+
+### What a SAFE fix needs (the real task)
+A **bespoke, tightly-gated pre-pass** that recognises this whole For-loop-byte-fill idiom end to
+end and emits it as a unit (like the array-Variant / byte-stamp pre-passes), rather than touching
+the general `movsx`/if-else paths:
+- Anchor on the shape: `For`-counter (already detected) + `cmp esi,Len; jle` two-arm + both arms
+  ending in `mov [pvData+esi],al` (one via `__vbaUI1I2` of 0, one via `__vbaUI1I2(Asc(StrVarVal(rtcMidCharVar(...))))`).
+- Bind `esi` to the counter name `i` LOCALLY within the matched region (avoids the global movsx
+  regression).
+- Emit `field_<arrayOff>(i+33) = 0` / `field_<arrayOff>(i+33) = Asc(CStr(Mid(inString, i, 1)))`
+  inside reconstructed `If i > Len(inString) ... Else ... End If`, suppressing the scaffolding.
+- MANDATORY: Dungeon byte-identical + Client2 no new `<arg>`/`<cond>`/garbage.
+High effort, niche payoff (packet `Desc`-style setters). Only worth it if a clean gate is found.
+
+---
+
+## 2. Function-result-via-out-param folding — `var_60` -> `Command` (frmClient, Client2)
+
+From the 82b457d work: `If ("1024lUnAtIc1024" = var_60)` should be `If (Command = "1024lUnAtIc1024")`.
+`Call Command(var_60)` leaves the result in the by-ref out-param `var_60`; we don't fold that into
+the following compare. General pattern: a runtime/intrinsic call whose result is delivered through a
+by-ref local, then that local is read. Folding `var_X -> <call>` after `Call F(var_X)` is the task —
+broader than the string fix, needs care (the local may be read multiple times / reassigned).
+
+---
+
+## 3. Packet byte-buffer field stores — SetData / Randomizer Let / loaders (Client2)
+
+From the GetData/ID-stamp work (8fa3737 / 37752d0). The byte buffer `field_44` (= `field_38.pvData`)
+is written by `SetData`, the `Randomizer` Let helper (`proc_536860`), and `proc_536D5B` via
+`mov [pvData+index], al`, but those stores are DROPPED (bodies render empty / partial). Recovering
+them needs general field-pointer deref tracking: `mov edx,[Me+0x44]` should mark `edx` as a deref
+base so `mov [edx+k], al` renders `field_44(k) = ...`. Two blockers in the 0x88 byte-store handler:
+(a) it requires `disp > 0` (the stamp store is `mov [edx],al`, disp 0); (b) `edx` (a deref of the
+Me field) isn't tracked as a deref base. General field-ptr tracking is broad/risky (touches every
+`mov reg,[Me+disp]`) — do as a tightly-gated pre-pass, not a global model change.
+
+---
+
+## 4. Indexed-property parameter drop (Client2, medium value)
+
+`Property Get OK(Index As Integer)` / packet `Size(Index As Integer)` render as `OK()` / `Size()` —
+the indexed-property param is dropped. The FuncDesc param-count `nP = (b0\4) - b1` computes 0 for
+these (b0=5, b1=1). Decode the VB6 FuncDesc indexed-property encoding (low 2 bits of b0 seem to flag
+the invoke kind). See the FuncDesc field dump in SESSION_HANDOFF_2026-06-19.md task C.
+
+---
+
+## 5. Form `Property Get` that should be `Sub` (frmMainMenu.Recv_*, Client2)
+
+`Recv_Player_List` etc. render `Private Property Get` but are `Public Sub`. The form FuncDesc is
+UNRELIABLE PER-FORM (frmMainMenu's Recv_* decode with property+return bits wrongly, BUT frmClient's
+Send_* are reliable). A blanket "gate forms out of FuncDesc kind" REGRESSED frmClient (already
+reverted). Needs a per-method reliability signal, OR extend the method-link resolver to forms (forms
+mix own methods at voff 0x1C with events at 0x6F8). Do NOT re-attempt the blanket gate.
+
+---
+
+## 6. Transitive parameter typing (both projects)
+
+`FirstChar(s) = LeftN(s, 1)` — propagate a type across calls (an arg passed as the Nth arg to a proc
+whose Nth param is typed). Needs a post-cache pass after ALL signatures are resolved. From the
+param-typing work (9f509af..). Also: positional string args inside `InStr(1, s, needle)`.
+
+---
+
+## Hard ceilings — confirmed, do NOT attempt (see condition-resolution.md)
+- Broad `movsx`/`movzx` counter propagation (regresses Integer math — task 1 above).
+- `Abs()` compares needing CFG data-flow (Open_Sight_Line).
+- 2D/UDT array-element compares — UDT field names stripped (commercial punts too).
+- Boolean-materialization double-If collapse (Task A) — structural, regression-prone.
+- Module global / user-proc / UDT-field / local / constant NAMES — stripped from native EXEs.
