@@ -184,9 +184,27 @@ mix own methods at voff 0x1C with events at 0x6F8). Do NOT re-attempt the blanke
 
 ## 6. Transitive parameter typing (both projects)
 
-`FirstChar(s) = LeftN(s, 1)` — propagate a type across calls (an arg passed as the Nth arg to a proc
-whose Nth param is typed). Needs a post-cache pass after ALL signatures are resolved. From the
-param-typing work (9f509af..). Also: positional string args inside `InStr(1, s, needle)`.
+**OBJECT variant — DONE 2026-06-19 (commit 9a1bd58).** A helper/module proc calling vtable methods
+on an object PARAMETER (`arg_X.UnkVCall_<off>h`, class stripped from typeinfo) is now typed from the
+class its callers consistently pass. New pass `NativeBuildParamObjClasses` (runs after the first
+render pass in `BuildNativeCodeCache`): scans rendered bodies for object params + their call sites,
+resolves the position-matched arg's class (local `New`/`As`, or As-New field via `gFormFieldClass`),
+and — on SINGLE-class consensus + `NativeClassHasMethodAt` validation — records `gParamObjClass`;
+`BuildNativeCodeCache` re-renders only those helpers. The ByRef param register is tagged
+`NVRegFieldCls` (pointer-to-object = same two-deref shape as an As-New field address), so the existing
+user-class-method path resolves `arg_X.Method`; the `umRecv` visible-statement gate now fires for
+`arg_` receivers too. Client2: `arg_*.UnkVCall` 405→352 (53 real packet-property names, e.g.
+`arg_8.ImageType`/`.ItemID`/`.Quantity`; modTexture 21→0, modMain 122→90); Dungeon byte-identical.
+Conservative gates (single-class, method-existence, proc_<hex> helpers, cls-prefixed classes) mean a
+polymorphic helper / unresolved arg / struct-base `arg_X` stays untyped (verified 0 polymorphism).
+
+**STILL OPEN (deferred — lower yield, see verification 2026-06-19):**
+- Transitive/fixpoint chains (`arg_X` passed onward to another helper) and untyped-local args
+  (`Set var = Func()`); the no-caller form helpers (`frmNPCTrade.Add_Player_Item` etc., 33 sites) have
+  NO caller in the output so propagation can't help — need form method-link resolution instead.
+- STRING/scalar variant: `FirstChar(s) = LeftN(s, 1)` — propagate a String/Long type across calls (an
+  arg passed as the Nth arg to a proc whose Nth param is typed). Same propagation skeleton, different
+  consumer (param TYPE not object class). Also: positional string args inside `InStr(1, s, needle)`.
 
 ---
 
