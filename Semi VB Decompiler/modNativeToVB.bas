@@ -417,7 +417,9 @@ Public Function DecompileNativeProcToVB(ByVal addr As Long) As String
                 flParams = NativeProcParams("Sub", NVHasMe)    'no hidden-retslot drop (returns via eax)
             End If
             output = "Private Function " & flName & "(" & flParams & ")" & flRetType & "   '" & Hex$(addr) & vbCrLf
-            output = output & Space$(4) & flName & " = " & flExpr & vbCrLf
+            'flExpr is the indented body (possibly a multi-line If/Else guard block) with
+            'the proc name as the "$R$" placeholder.
+            output = output & Replace(flExpr, "$R$", flName) & vbCrLf
             output = output & "End Function" & vbCrLf
             DecompileNativeProcToVB = NativeInsertLocalDims(NativeSubstituteArgNames(output))
             Exit Function
@@ -10098,42 +10100,141 @@ End Function
 ' body and a framed proc is never touched.
 '---------------------------------------------------------------------------
 Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean, ByRef isDoubleRet As Boolean) As String
+    'Returns the indented body statements (with the proc name as the "$R$" placeholder),
+    'or "" to bail.  Recognises a single guard idiom (If <cond> Then <const> Else <expr>),
+    'emitting an If/Else block; otherwise interprets the whole body as one expression.
     On Error GoTo bail
     isFunc = False: isDoubleRet = False
-    Dim regv(7) As String, regPtr(7) As Boolean      '0=eax 1=ecx 2=edx 3=ebx 4=esp 5=ebp 6=esi 7=edi
-    Dim inst As CInstruction, dump As String, n As Long, i As Long, op As Long, op2 As Long
-    'FPU stack model for Double-returning frameless functions (MathAdd = a + b etc.):
-    'fld/fadd.../fstp on qword [esp+N] params, result returned in ST(0).  fpu(ftop-1)
-    'is the top; slotExpr maps a scratch [esp+N] store back to its expression so the
-    'final `fld [esp+N]` reload returns the computed value, not the original parameter.
+    Dim arr() As CInstruction, nI As Long, k As Long, inst As CInstruction
+    nI = col.Count
+    If nI = 0 Then Exit Function
+    ReDim arr(nI - 1)
+    k = 0
+    For Each inst In col: Set arr(k) = inst: k = k + 1: Next
+    'Single guard: fld;fcomp[const];fnstsw;test ah,mask;je/jne <else> ; then..ret ; else..ret
+    Dim cond As String, elseVA As Long, elseIdx As Long
+    Dim thenExpr As String, elseExpr As String, d1 As Boolean, d2 As Boolean
+    If nI >= 7 And NativeFLGuard(arr, 0, cond, elseVA) Then
+        elseIdx = -1
+        For k = 5 To nI - 1
+            If arr(k).va = elseVA Then elseIdx = k: Exit For
+        Next
+        If elseIdx >= 6 Then
+            If NativeFLRun(arr, 5, elseIdx - 1, thenExpr, d1) And NativeFLRun(arr, elseIdx, nI - 1, elseExpr, d2) Then
+                isFunc = True: isDoubleRet = True
+                NativeFramelessBody = "    If " & cond & " Then" & vbCrLf & _
+                    "        $R$ = " & thenExpr & vbCrLf & _
+                    "    Else" & vbCrLf & _
+                    "        $R$ = " & elseExpr & vbCrLf & _
+                    "    End If"
+                Exit Function
+            End If
+        End If
+    End If
+    'Linear whole body -> a single assignment.
+    Dim wholeExpr As String, dblW As Boolean
+    If NativeFLRun(arr, 0, nI - 1, wholeExpr, dblW) Then
+        isFunc = True: isDoubleRet = dblW
+        NativeFramelessBody = "    $R$ = " & wholeExpr
+    End If
+    Exit Function
+bail:
+    NativeFramelessBody = ""
+End Function
+
+Private Function NativeFLGuard(arr() As CInstruction, ByVal lo As Long, ByRef cond As String, ByRef elseVA As Long) As Boolean
+    'Match VB6's Double guard prologue and build the (fall-through) condition:
+    '   fld qword[esp+P] ; fcomp qword[const] ; fnstsw ax ; test ah,mask ; je/jne <else>
+    'The fcomp sets C3(=0x40 equal)/C0(=0x01 less) in AH; mask + je/jne give the relation.
+    On Error GoTo no
+    If lo + 4 > UBound(arr) Then Exit Function
+    Dim regF As Long, rir As Boolean, rmR As Long, rmD As Long, rmDr As Boolean
+    Dim d As String, nn As Long, p As Long, pOff As Long, cVA As Long, mask As Long, jop As Long, rel As String
+    'fld qword[esp+P]
+    d = UCase$(Replace(arr(lo).dump, " ", "")): nn = Len(d) \ 2: p = NativeOpStart(d, nn)
+    If NativeDumpByte(d, p) <> &HDD Then Exit Function
+    If NativeFLOperand(d, p + 1, regF, rir, rmR, rmD, rmDr) = -1 Then Exit Function
+    If regF <> 0 Or rir Or rmR <> 4 Then Exit Function
+    pOff = rmD
+    'fcomp qword[const]
+    d = UCase$(Replace(arr(lo + 1).dump, " ", "")): nn = Len(d) \ 2: p = NativeOpStart(d, nn)
+    If NativeDumpByte(d, p) <> &HDC Then Exit Function
+    If NativeFLOperand(d, p + 1, regF, rir, rmR, rmD, rmDr) = -1 Then Exit Function
+    If regF <> 3 Or rir Or rmR <> -1 Then Exit Function       'must be /3 (fcomp) of an absolute const
+    cVA = rmD
+    'fnstsw ax
+    d = UCase$(Replace(arr(lo + 2).dump, " ", "")): nn = Len(d) \ 2: p = NativeOpStart(d, nn)
+    If NativeDumpByte(d, p) <> &HDF Or NativeDumpByte(d, p + 1) <> &HE0 Then Exit Function
+    'test ah, imm8  (F6 C4 mask)
+    d = UCase$(Replace(arr(lo + 3).dump, " ", "")): nn = Len(d) \ 2: p = NativeOpStart(d, nn)
+    If NativeDumpByte(d, p) <> &HF6 Or NativeDumpByte(d, p + 1) <> &HC4 Then Exit Function
+    mask = NativeDumpByte(d, p + 2)
+    'je / jne
+    d = UCase$(Replace(arr(lo + 4).dump, " ", "")): nn = Len(d) \ 2: p = NativeOpStart(d, nn)
+    jop = NativeDumpByte(d, p)
+    If jop = &H74 Then                                        'je -> fall-through is the flagged relation
+        Select Case mask
+            Case &H40: rel = "="
+            Case &H1: rel = "<"
+            Case &H41: rel = "<="
+            Case Else: Exit Function
+        End Select
+    ElseIf jop = &H75 Then                                    'jne -> fall-through is the complement
+        Select Case mask
+            Case &H40: rel = "<>"
+            Case &H1: rel = ">="
+            Case &H41: rel = ">"
+            Case Else: Exit Function
+        End Select
+    Else
+        Exit Function
+    End If
+    elseVA = arr(lo + 4).jmpConst
+    If elseVA = 0 Then Exit Function
+    cond = "arg_" & Hex$(pOff + 4) & " " & rel & " " & NativeFLImmDouble(NativeFileDword(cVA), NativeFileDword(cVA + 4))
+    NativeFLGuard = True
+no:
+End Function
+
+Private Function NativeFLRun(arr() As CInstruction, ByVal lo As Long, ByVal hi As Long, _
+        ByRef resultExpr As String, ByRef isDbl As Boolean) As Boolean
+    'Linear interpreter over arr(lo..hi): builds the Double/integer value returned at the
+    'first RET.  Follows a forward unconditional jmp (so the dead In-IDE divide-error stub
+    'is skipped).  Models the FPU stack, the x86 argument stack (xsp/xq/xdw/rdw) and a few
+    'integer ops.  Returns False (bail) on any shape it does not fully understand.
+    On Error GoTo bail
+    Dim regv(7) As String, regPtr(7) As Boolean
     Dim fpu(15) As String, ftop As Long, fpPending As Boolean
-    Dim regF As Long, rir As Boolean, rmR As Long, rmD As Long, rmDr As Boolean, fop As String
-    'x86 argument-stack model for binary user-call chains (Square = MathMul(v, v),
-    'ArcCos = MathSub(90, ArcSin(v)), Hypotenuse = Sqr(MathAdd(Square(a), Square(b)))).
-    'xsp tracks esp (0 at entry); xq maps a frame offset -> a parked Double expr (fstp);
-    'xdw maps a frame offset -> a pushed dword token ("L:"/"H:" half of a Double, or
-    '"IMM:n"); rdw is the per-register pending dword token from a marshalling mov.  A
-    'call reads its Double args back from [xsp], [xsp+8], ... (NativeFLRead8) and parks
-    'the result on the FPU stack.  For a no-call body xsp stays 0 and offsets == disp,
-    'so the pure-FPU path (MathAdd...) is unchanged.
+    Dim regF As Long, rir As Boolean, rmR As Long, rmD As Long, rmDr As Boolean
     Dim xsp As Long, xq As Collection, xdw As Collection, rdw(7) As String
     Set xq = New Collection: Set xdw = New Collection
-    Dim mnm As String, vbOp As String, mcat As Long, ffReg As Long, modrm As Long
-    Dim utgt As Long, origOff As Long, argc As Long, ai As Long, aexpr As String, alist As String
-    For Each inst In col
+    Dim inst As CInstruction, dump As String, n As Long, i As Long, op As Long, op2 As Long
+    Dim mnm As String, vbOp As String, mcat As Long, ffReg As Long, modrm As Long, rfld As Long
+    Dim utgt As Long, origOff As Long, argc As Long, alist As String, memOp As String, r8 As String
+    Dim rr As Long, aimm As Long, idx As Long, nextIdx As Long, jt As Long, jk As Long, ji As Long
+    idx = lo
+    Do While idx <= hi
+        Set inst = arr(idx)
         dump = UCase$(Replace(inst.dump, " ", ""))
         n = Len(dump) \ 2
-        If n = 0 Then GoTo nextI
-        i = NativeOpStart(dump, n)                    'past 0x66 etc.
+        nextIdx = idx + 1
+        If n = 0 Then GoTo adv
+        i = NativeOpStart(dump, n)
         op = NativeDumpByte(dump, i)
         Select Case op
             Case &H90, &HCC, &H98, &H99               'nop / int3 / cwde / cdq  -> ignore
-            Case &H70 To &H7F                         'short Jcc (jo/jno overflow guards) -> ignore
-            Case &HEB                                 'short jmp -> ignore (skip over a guard)
+            Case &H70 To &H7F                         'short Jcc (guards / IDE check) -> ignore (fall through)
+            Case &HEB, &HE9                           'unconditional jmp -> follow it forward
+                jt = inst.jmpConst
+                If jt <= inst.va Then GoTo bail       'backward jmp (loop) -> not a simple body
+                jk = -1
+                For ji = idx + 1 To hi
+                    If arr(ji).va = jt Then jk = ji: Exit For
+                Next
+                If jk < 0 Then GoTo bail
+                nextIdx = jk
             Case &H8B                                 'mov reg, r/m
                 If Not NativeFLMov(dump, i + 1, regv, regPtr) Then GoTo bail
-                'Also capture which Double dword this loads (a param/stored-slot half),
-                'so a following `push reg` can re-marshal it as a call argument.
                 If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) <> -1 Then
                     If Not rir And rmR = 4 And regF >= 0 And regF <= 7 Then
                         rdw(regF) = NativeFLDwordTok(xsp + rmD, xq)
@@ -10142,9 +10243,8 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
                     End If
                 End If
             Case &HB8 To &HBF                         'mov reg, imm32
-                Dim rr As Long: rr = op - &HB8
-                regv(rr) = NativeFLNum(NativeDumpInt32(dump, i + 1)): regPtr(rr) = False
-                rdw(rr) = ""                          'not a Double half anymore
+                rr = op - &HB8
+                regv(rr) = NativeFLNum(NativeDumpInt32(dump, i + 1)): regPtr(rr) = False: rdw(rr) = ""
             Case &H3                                  'add reg, r/m
                 If Not NativeFLArith(dump, i + 1, regv, regPtr, " + ") Then GoTo bail
             Case &H2B                                 'sub reg, r/m
@@ -10153,6 +10253,13 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
                 If Not NativeFLImul3(dump, i + 1, regv, regPtr, False) Then GoTo bail
             Case &H6B                                 'imul reg, r/m, imm8
                 If Not NativeFLImul3(dump, i + 1, regv, regPtr, True) Then GoTo bail
+            Case &H33                                 'xor reg, r/m -> reg = 0 (the zero-return idiom)
+                modrm = NativeDumpByte(dump, i + 1)
+                If ((modrm \ &H40) And 3) = 3 And ((modrm \ 8) And 7) = (modrm And 7) Then
+                    rr = (modrm \ 8) And 7: regv(rr) = "0": regPtr(rr) = False: rdw(rr) = ""
+                Else
+                    GoTo bail
+                End If
             Case &HF                                  'two-byte opcode
                 op2 = NativeDumpByte(dump, i + 1)
                 Select Case op2
@@ -10165,12 +10272,14 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
                 End Select
             Case &HDD                                 'fld / fstp  qword [esp+N]
                 If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) = -1 Then GoTo bail
-                If rir Or rmR <> 4 Then GoTo bail     'register form / non-esp memory -> bail (constant compares etc.)
+                If rir Or rmR <> 4 Then GoTo bail
                 origOff = xsp + rmD
-                If regF = 0 Then                      'fld m64 -> push the slot's parked expr (or the param)
+                If regF = 0 Then                      'fld m64 -> parked Double / IMM-pair (0-return) / param
                     If ftop > 15 Then GoTo bail
-                    fpu(ftop) = NativeFLReadSlot(xq, origOff): ftop = ftop + 1
-                ElseIf regF = 3 Then                  'fstp m64 -> pop ST(0) and park it at this frame slot
+                    r8 = NativeFLRead8(origOff, xq, xdw)
+                    If Len(r8) = 0 Then r8 = "arg_" & Hex$(origOff + 4)
+                    fpu(ftop) = r8: ftop = ftop + 1
+                ElseIf regF = 3 Then                  'fstp m64 -> park ST(0) at this frame slot
                     If ftop = 0 Then GoTo bail
                     ftop = ftop - 1
                     NativeColPut xq, CStr(origOff), fpu(ftop)
@@ -10178,19 +10287,21 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
                 Else
                     GoTo bail
                 End If
-            Case &HDC                                 'fadd/fsub/fmul/fdiv  qword [esp+N]
+            Case &HDC                                 'fadd/fsub/fmul/fdiv (+reverse) qword [esp+N]
                 If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) = -1 Then GoTo bail
                 If rir Or rmR <> 4 Then GoTo bail
                 If ftop = 0 Then GoTo bail
+                memOp = NativeFLReadSlot(xq, xsp + rmD)
                 Select Case regF
-                    Case 0: fop = " + "
-                    Case 1: fop = " * "
-                    Case 4: fop = " - "
-                    Case 6: fop = " / "
+                    Case 0: fpu(ftop - 1) = "(" & fpu(ftop - 1) & " + " & memOp & ")"
+                    Case 1: fpu(ftop - 1) = "(" & fpu(ftop - 1) & " * " & memOp & ")"
+                    Case 4: fpu(ftop - 1) = "(" & fpu(ftop - 1) & " - " & memOp & ")"
+                    Case 5: fpu(ftop - 1) = "(" & memOp & " - " & fpu(ftop - 1) & ")"   'fsubr
+                    Case 6: fpu(ftop - 1) = "(" & fpu(ftop - 1) & " / " & memOp & ")"
+                    Case 7: fpu(ftop - 1) = "(" & memOp & " / " & fpu(ftop - 1) & ")"   'fdivr
                     Case Else: GoTo bail
                 End Select
-                fpu(ftop - 1) = "(" & fpu(ftop - 1) & fop & NativeFLReadSlot(xq, xsp + rmD) & ")"
-            Case &HD9                                 'fabs (D9 E1) / fchs (D9 E0) - unary on ST(0)
+            Case &HD9                                 'fabs (D9 E1) / fchs (D9 E0)
                 op2 = NativeDumpByte(dump, i + 1)
                 If ftop = 0 Then GoTo bail
                 If op2 = &HE1 Then
@@ -10200,83 +10311,98 @@ Private Function NativeFramelessBody(col As Collection, ByRef isFunc As Boolean,
                 Else
                     GoTo bail
                 End If
-            Case &HDF                                 'fnstsw ax (DF E0) - FP status for the exception check
+            Case &HDF                                 'fnstsw ax (DF E0)
                 If NativeDumpByte(dump, i + 1) = &HE0 Then fpPending = True Else GoTo bail
-            Case &HA8                                 'test al, imm8 - VB6's post-op FP exception check
+            Case &HA8                                 'test al, imm8 - FP exception check
                 If fpPending Then fpPending = False Else GoTo bail
-            Case &H50 To &H57                         'push reg - marshal the reg's dword onto the arg stack
+            Case &H50 To &H57                         'push reg
                 xsp = xsp - 4
-                NativeColPut xdw, CStr(xsp), rdw(op - &H50)
-                NativeColDel xq, CStr(xsp)
-            Case &H68                                 'push imm32 - an immediate dword (a Double half)
+                NativeColPut xdw, CStr(xsp), rdw(op - &H50): NativeColDel xq, CStr(xsp)
+            Case &H68                                 'push imm32
                 xsp = xsp - 4
-                NativeColPut xdw, CStr(xsp), "IMM:" & NativeDumpInt32(dump, i + 1)
-                NativeColDel xq, CStr(xsp)
-            Case &H6A                                 'push imm8 - an immediate dword (a Double half)
+                NativeColPut xdw, CStr(xsp), "IMM:" & NativeDumpInt32(dump, i + 1): NativeColDel xq, CStr(xsp)
+            Case &H6A                                 'push imm8
                 xsp = xsp - 4
-                NativeColPut xdw, CStr(xsp), "IMM:" & NativeDumpInt8(dump, i + 1)
-                NativeColDel xq, CStr(xsp)
-            Case &H83, &H81                           'add/sub esp, imm - track the stack-pointer delta
+                NativeColPut xdw, CStr(xsp), "IMM:" & NativeDumpInt8(dump, i + 1): NativeColDel xq, CStr(xsp)
+            Case &H89                                 'mov [esp+N], reg -> store a constant dword (0-return)
+                If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) = -1 Then GoTo bail
+                If Not rir And rmR = 4 Then
+                    If Not NativeIsNumLit(regv(regF)) Then GoTo bail
+                    NativeColPut xdw, CStr(xsp + rmD), "IMM:" & regv(regF): NativeColDel xq, CStr(xsp + rmD)
+                Else
+                    GoTo bail
+                End If
+            Case &HC7                                 'mov dword [esp+N], imm32 -> store an immediate dword
+                If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) = -1 Then GoTo bail
+                If Not rir And rmR = 4 Then
+                    NativeColPut xdw, CStr(xsp + rmD), "IMM:" & NativeDumpInt32(dump, n - 4): NativeColDel xq, CStr(xsp + rmD)
+                Else
+                    GoTo bail
+                End If
+            Case &H83, &H81                           'cmp r/m,imm (In-IDE check) or add/sub esp,imm
                 modrm = NativeDumpByte(dump, i + 1)
-                If Not ((modrm And 7) = 4 And ((modrm \ &H40) And 3) = 3) Then GoTo bail
-                Dim aimm As Long
-                If op = &H83 Then aimm = NativeDumpInt8(dump, n - 1) Else aimm = NativeDumpInt32(dump, n - 4)
-                If ((modrm \ 8) And 7) = 5 Then xsp = xsp - aimm Else xsp = xsp + aimm   '/5 = sub, /0 = add
+                rfld = (modrm \ 8) And 7
+                If rfld = 7 Then
+                    'cmp r/m, imm -> the In-IDE global-flag check; ignore
+                ElseIf (modrm And 7) = 4 And ((modrm \ &H40) And 3) = 3 And (rfld = 0 Or rfld = 5) Then
+                    If op = &H83 Then aimm = NativeDumpInt8(dump, n - 1) Else aimm = NativeDumpInt32(dump, n - 4)
+                    If rfld = 5 Then xsp = xsp - aimm Else xsp = xsp + aimm
+                Else
+                    GoTo bail
+                End If
+            Case &H39, &H3B                           'cmp r/m,reg / cmp reg,r/m -> ignore (a guard compare)
             Case &HFF                                 'push [mem] (/6) or call [abs] (/2)
                 modrm = NativeDumpByte(dump, i + 1)
                 ffReg = (modrm \ 8) And 7
-                If ffReg = 6 Then                     'push r/m -> marshal that dword
+                If ffReg = 6 Then
                     If NativeFLOperand(dump, i + 1, regF, rir, rmR, rmD, rmDr) = -1 Then GoTo bail
                     xsp = xsp - 4
                     If Not rir And rmR = 4 Then NativeColPut xdw, CStr(xsp), NativeFLDwordTok(xsp + 4 + rmD, xq) Else NativeColPut xdw, CStr(xsp), ""
                     NativeColDel xq, CStr(xsp)
-                ElseIf ffReg = 2 Then                 'call [abs] -> a runtime math helper
+                ElseIf ffReg = 2 Then
                     mnm = NativeApiName(inst)
                     If Len(mnm) = 0 Then GoTo bail
                     If Not NativeFLMathOp(mnm, vbOp, mcat) Then GoTo bail
-                    If mcat = 1 Then                  'FPU-stack unary (Int/Fix): operand already on ST(0)
+                    If mcat = 1 Then
                         If ftop = 0 Then GoTo bail
                         fpu(ftop - 1) = vbOp & "(" & fpu(ftop - 1) & ")"
-                    ElseIf mcat = 2 Then              'x86-stack unary (Sin/Cos/Exp...): one Double arg
+                    ElseIf mcat = 2 Then
                         If Not NativeFLGatherArgs(xsp, xq, xdw, alist, argc) Or argc <> 1 Then GoTo bail
                         If ftop > 15 Then GoTo bail
-                        fpu(ftop) = vbOp & "(" & alist & ")": ftop = ftop + 1
-                        xsp = 0
-                    ElseIf mcat = 3 Then              'x86-stack binary power: base ^ exponent
+                        fpu(ftop) = vbOp & "(" & alist & ")": ftop = ftop + 1: xsp = 0
+                    ElseIf mcat = 3 Then
                         If Not NativeFLGatherArgs(xsp, xq, xdw, alist, argc) Or argc <> 2 Then GoTo bail
                         If ftop > 15 Then GoTo bail
-                        fpu(ftop) = "(" & Replace(alist, ", ", " ^ ") & ")": ftop = ftop + 1
-                        xsp = 0
+                        fpu(ftop) = "(" & Replace(alist, ", ", " ^ ") & ")": ftop = ftop + 1: xsp = 0
                     End If
                 Else
                     GoTo bail
                 End If
             Case &HE8                                 'call rel32 -> a user Double-returning helper
-                'Gather the marshalled Double args from [xsp, 0) and emit proc_X(a, b...);
-                'the result is parked on the FPU stack.  Recovers BOTH operands of a
-                'binary user call (MathSub(90, ArcSin(x)), MathAdd(Square(a), Square(b))).
                 utgt = NativeCallTarget(inst)
                 If utgt = 0 Then GoTo bail
+                'A call into the runtime stub area (the In-IDE FP/divide error handler, e.g.
+                '0x401214) is dead code on the compiled path - if we reach it the body is
+                'not a clean shape, so bail.  A real user helper resolves to a proc name.
                 If Not NativeFLGatherArgs(xsp, xq, xdw, alist, argc) Or argc < 1 Then GoTo bail
                 If ftop > 15 Then GoTo bail
-                fpu(ftop) = NativeFLProcName(utgt) & "(" & alist & ")": ftop = ftop + 1
-                xsp = 0
+                fpu(ftop) = NativeFLProcName(utgt) & "(" & alist & ")": ftop = ftop + 1: xsp = 0
             Case &HC3, &HC2                           'ret / ret N -> done
-                Exit For
+                Exit Do
             Case Else
-                GoTo bail                             'anything else: not a simple body
+                GoTo bail
         End Select
-nextI:
-    Next
-    'A Double-returning body left its result on the FPU stack (ST(0)).
+adv:
+        idx = nextIdx
+    Loop
+    'Result: the FPU top (a Double) or eax (the integer/pointer path).
     If ftop > 0 And Len(fpu(ftop - 1)) > 0 Then
-        isFunc = True: isDoubleRet = True: NativeFramelessBody = fpu(ftop - 1): Exit Function
+        resultExpr = fpu(ftop - 1): isDbl = True: NativeFLRun = True: Exit Function
     End If
-    'Else the return value lives in eax (reg 0) - the integer/pointer path.
-    If Len(regv(0)) > 0 Then isFunc = True: NativeFramelessBody = regv(0)
+    If Len(regv(0)) > 0 Then resultExpr = regv(0): isDbl = False: NativeFLRun = True
     Exit Function
 bail:
-    NativeFramelessBody = ""
+    NativeFLRun = False
 End Function
 
 Private Function NativeFLReadSlot(xq As Collection, ByVal origOff As Long) As String
