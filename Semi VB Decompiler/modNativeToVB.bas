@@ -1246,6 +1246,20 @@ Private Sub NativeDetectParamWidths(col As Collection)
     Set seen = New Collection
     Dim inst As CInstruction, d As String, n As Long, p As Long, has66 As Boolean
     Dim o As Long, o2 As Long, m As Long, modrm As Long, md As Long, rm As Long, disp As Long, code As String, k As Long
+    'A FRAMELESS procedure (no `push ebp;mov ebp,esp` prologue) addresses its parameters
+    'esp-relative ([esp+disp] via SIB), and esp shifts during the body - so we track a
+    'running esp delta and map [esp+disp] -> the ebp-convention arg offset.  A FRAMED
+    'proc uses [ebp+disp] directly (esp is irrelevant).
+    Dim frameless As Boolean, espDelta As Long, espOK As Boolean, fd As String, sd As String, fi As Long, pendPush As Long
+    fd = "": sd = "": fi = 0: pendPush = 0
+    For Each inst In col
+        If fi = 0 Then fd = UCase$(Replace(inst.dump, " ", "")) Else sd = UCase$(Replace(inst.dump, " ", "")): Exit For
+        fi = fi + 1
+    Next
+    'Framed prologue is `push ebp` (55) then `mov ebp,esp` (8BEC) - two separate
+    'instructions in col.  Anything else (e.g. `sub esp,N`) is a frameless proc.
+    frameless = Not (Left$(fd, 2) = "55" And Left$(sd, 4) = "8BEC")
+    espDelta = 0: espOK = True
     For Each inst In col
         d = UCase$(Replace(inst.dump, " ", "")): n = Len(d) \ 2
         If n < 2 Then GoTo nextInst
@@ -1257,10 +1271,14 @@ Private Sub NativeDetectParamWidths(col As Collection)
         o = NativeDumpByte(d, p)
         code = "": m = -1
         Select Case o
-            Case &HDD                                   'fld qword / fst / fstp (m64)
-                m = p + 1: If NativeFldReg0(d, m) Then code = "Q"
-            Case &HD9                                   'fld dword (m32)
-                m = p + 1: If NativeFldReg0(d, m) Then code = "S"
+            Case &HDD                                   'm64: fld / fst / fstp
+                m = p + 1: If NativeFpuMem(d, m) Then code = "Q"
+            Case &HDC                                   'm64 arith: fadd/fmul/fsub/fdiv/fcom
+                m = p + 1: code = "Q"
+            Case &HD9                                   'm32: fld / fst / fstp
+                m = p + 1: If NativeFpuMem(d, m) Then code = "S"
+            Case &HD8                                   'm32 arith
+                m = p + 1: code = "S"
             Case &HF                                    'two-byte: movzx/movsx
                 o2 = NativeDumpByte(d, p + 1)
                 m = p + 2
@@ -1273,20 +1291,41 @@ Private Sub NativeDetectParamWidths(col As Collection)
             Case &H8A                                   'mov r8, r/m8
                 m = p + 1: code = "B"
         End Select
-        If Len(code) = 0 Or m < 0 Then GoTo nextInst
-        'Operand must be [ebp+disp] with disp a positive parameter offset.
+        If Len(code) = 0 Or m < 0 Then GoTo updateEsp
         modrm = NativeDumpByte(d, m)
         md = (modrm \ &H40) And 3: rm = modrm And 7
-        If rm <> 5 Then GoTo nextInst                   'not [ebp+disp] (rm=5/ebp)
-        If md = 1 Then
-            disp = NativeDumpInt8(d, m + 1)
-        ElseIf md = 2 Then
-            disp = NativeDumpInt32(d, m + 1)
+        If frameless Then
+            'Operand must be [esp+disp]: ModRM rm=4 (SIB) + SIB base=esp(4), no index(4).
+            If Not espOK Then GoTo updateEsp
+            If rm <> 4 Then GoTo updateEsp
+            Dim sib As Long
+            sib = NativeDumpByte(d, m + 1)
+            If (sib And 7) <> 4 Or ((sib \ 8) And 7) <> 4 Then GoTo updateEsp   'not plain [esp+disp]
+            If md = 0 Then
+                disp = 0
+            ElseIf md = 1 Then
+                disp = NativeDumpInt8(d, m + 2)
+            ElseIf md = 2 Then
+                disp = NativeDumpInt32(d, m + 2)
+            Else
+                GoTo updateEsp                          'register operand
+            End If
+            'Entry esp has the return address at [esp+0]; arg1 at [esp+4] = ebp-conv off 8.
+            disp = espDelta + disp + 4
         Else
-            GoTo nextInst                               'md=0 with rm=5 is [disp32], not ebp
+            'Operand must be [ebp+disp] with disp a positive parameter offset.
+            If rm <> 5 Then GoTo updateEsp              'not [ebp+disp] (rm=5/ebp)
+            If md = 1 Then
+                disp = NativeDumpInt8(d, m + 1)
+            ElseIf md = 2 Then
+                disp = NativeDumpInt32(d, m + 1)
+            Else
+                GoTo updateEsp                          'md=0 with rm=5 is [disp32], not ebp
+            End If
         End If
-        If disp < 8 Then GoTo nextInst                  'negative = local, +4 = return addr
-        NativeColAppendCode seen, disp, code
+        If disp >= 8 Then NativeColAppendCode seen, disp, code
+updateEsp:
+        If frameless And espOK Then NativeTrackEsp d, p, espDelta, espOK, pendPush
 nextInst:
     Next
     'Finalize: pick the type from the accumulated access codes for each offset.  `seen`
@@ -1315,13 +1354,69 @@ nextRec:
 done:
 End Sub
 
-Private Function NativeFldReg0(ByVal d As String, ByVal m As Long) As Boolean
-    'True when the ModRM at index m is a memory operand with reg field 0 (an FPU
-    'load `fld` for DD/D9, as opposed to fst/fstp/fcom) - i.e. a READ of the operand.
-    Dim modrm As Long
+Private Function NativeFpuMem(ByVal d As String, ByVal m As Long) As Boolean
+    'True when the ModRM at index m is a MEMORY float load/store (reg field 0/2/3 =
+    'fld/fst/fstp) - the single-float forms of DD (m64) / D9 (m32).  Excludes the
+    'integer fisttp (/1), the environment ops (/4..7), and register forms (md=3).
+    Dim modrm As Long, reg As Long
     modrm = NativeDumpByte(d, m)
-    NativeFldReg0 = (((modrm \ 8) And 7) = 0) And (((modrm \ &H40) And 3) <> 3)
+    If ((modrm \ &H40) And 3) = 3 Then Exit Function
+    reg = (modrm \ 8) And 7
+    NativeFpuMem = (reg = 0 Or reg = 2 Or reg = 3)
 End Function
+
+Private Sub NativeTrackEsp(ByVal d As String, ByVal p As Long, ByRef delta As Long, ByRef ok As Boolean, ByRef pendPush As Long)
+    'Maintain a frameless proc's esp offset relative to entry esp.  Handles the esp
+    'adjustments a frameless body uses (push/pop, push imm, add/sub esp,imm).
+    'A `call` desyncs esp by the bytes a STDCALL callee pops (VB internal procs `ret N`),
+    'which we cannot know here without resolving the callee - so we ABORT esp tracking at
+    'any call that has pending ARGUMENT pushes (pendPush > 0).  A no-argument call (e.g.
+    '`Pi()`) is net-zero and safe to pass through.  Also ABORTS (ok=False) on any direct
+    'write to esp it cannot model.  Either abort just stops further param recording, so a
+    'desynced offset never produces a wrong type/collapse.
+    Dim o As Long, modrm As Long, md As Long, rm As Long, reg As Long, imm As Long
+    o = NativeDumpByte(d, p)
+    Select Case o
+        Case &HE8                                       'call rel32
+            If pendPush > 0 Then ok = False
+        Case &H50 To &H57: delta = delta - 4: pendPush = pendPush + 1   'push reg (arg or save)
+        Case &H58 To &H5F: delta = delta + 4: If pendPush > 0 Then pendPush = pendPush - 1   'pop reg
+        Case &H68: delta = delta - 4: pendPush = pendPush + 1   'push imm32
+        Case &H6A: delta = delta - 4: pendPush = pendPush + 1   'push imm8
+        Case &H83, &H81                                 'grp1 r/m32, imm (add/sub/.. esp)
+            modrm = NativeDumpByte(d, p + 1)
+            md = (modrm \ &H40) And 3: rm = modrm And 7: reg = (modrm \ 8) And 7
+            If md = 3 And rm = 4 Then                    'destination is esp
+                If o = &H83 Then imm = NativeDumpInt8(d, p + 2) Else imm = NativeDumpInt32(d, p + 2)
+                Select Case reg
+                    Case 0: delta = delta + imm          'add esp, imm
+                    Case 5: delta = delta - imm          'sub esp, imm
+                    Case 7                               'cmp esp, imm - no write
+                    Case Else: ok = False                'and/or/xor/adc/sbb esp -> untrackable
+                End Select
+            End If
+        Case &HFF                                       'grp5: call r/m (/2), push r/m (/6), inc/dec
+            modrm = NativeDumpByte(d, p + 1)
+            reg = (modrm \ 8) And 7
+            If reg = 6 Then
+                delta = delta - 4: pendPush = pendPush + 1   'push r/m32
+            ElseIf reg = 2 Then
+                If pendPush > 0 Then ok = False           'call r/m with pending args -> abort
+            ElseIf (reg = 0 Or reg = 1) And ((modrm \ &H40) And 3) = 3 And (modrm And 7) = 4 Then
+                ok = False                               'inc/dec esp
+            End If
+        Case &H8B                                       'mov r32, r/m -> dest = reg field
+            modrm = NativeDumpByte(d, p + 1)
+            If ((modrm \ 8) And 7) = 4 Then ok = False   'mov esp, ...
+        Case &H89                                        'mov r/m, r32 -> dest = r/m
+            modrm = NativeDumpByte(d, p + 1)
+            If ((modrm \ &H40) And 3) = 3 And (modrm And 7) = 4 Then ok = False   'mov esp, reg
+        Case &H8D                                        'lea r32 -> dest = reg field
+            modrm = NativeDumpByte(d, p + 1)
+            If ((modrm \ 8) And 7) = 4 Then ok = False   'lea esp, ...
+        Case &H94: ok = False                            'xchg eax, esp
+    End Select
+End Sub
 
 Private Sub NativeColAppendCode(c As Collection, ByVal off As Long, ByVal code As String)
     'Append a one-letter access code to the per-offset accumulator (deduped per offset).
