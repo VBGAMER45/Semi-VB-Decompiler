@@ -8517,6 +8517,14 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NVRegObjVt(reg) = hadObjType              'deref of a control pointer -> its vtable
                     NVRegObjVtGuid(reg) = hadObjGuid          'the control GUID rides on the vtable (resolves the method)
                     NVRegObjInst(reg) = hadObjInst            'deref of a user-class pointer -> its vtable carries the receiver
+                    'The base register holds the object whose vtable we just derefed.  When it
+                    'is a tracked global OBJECT instance whose name was deliberately NOT put in
+                    'NVReg by the 0xA1 direct-global handler (to preserve a `New frmX` arg),
+                    'name it NOW: the following `push <base>` (the COM `this`) then renders the
+                    'receiver `global_X.UnkVCall_<off>` instead of a leading-dot `.UnkVCall`.
+                    If Left$(hadObjInst, 7) = "global_" And Len(NVRegObjType(bse)) > 0 Then
+                        If Len(NVReg(bse)) = 0 Or Left$(NVReg(bse), 4) = "New " Then NVReg(bse) = hadObjInst
+                    End If
                 ElseIf Not isAbs And disp > 0 And baseObj Then
                     'Reading an `As New` private object field Me.<field> (e.g. a
                     'clsBitmap member): type it from the auto-instantiation map so a
@@ -8657,6 +8665,27 @@ Private Function NativeTrackReg(inst As CInstruction) As String
                     NVRegIsAddr(0) = False: NVRegIsMe(0) = False: NVRegIsFormVt(0) = False
                     NVRegObjType(0) = "": NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = "": NVRegObjInst(0) = ""
                     NVRegFieldCls(0) = a1icls: NVRegFieldRecv(0) = a1icls
+                Else
+                    'A DIRECT object-instance global (a predeclared form like frmClient =
+                    'global_0055D5A0, or an As-New user class).  Tag eax's OBJECT identity so
+                    '`mov eax,[gObj](0xA1); mov vt,[eax]; call [vt+off]` renders
+                    '`gObj.UnkVCall_<off>` instead of the receiver-less `.UnkVCall`
+                    '(modHotkey's frmClient.* calls).  GATED to a global with a RESOLVED class
+                    '(a plain data/array global stays untracked, so the modPlayer SIB array-
+                    'pointer detection in Gap A is unaffected).
+                    'CRUCIAL: do NOT set NVReg(0) here.  The receiver NAME is set later, at the
+                    'vtable deref (`mov vt,[eax]`), which ONLY the receiver path reaches - so a
+                    'global PUSHED AS AN ARGUMENT (Load/Unload <form>, no deref) keeps its
+                    'readable `New frmAppeal` value instead of being clobbered to the raw
+                    'global_0055D67C (which is typed As Long).
+                    Dim a1cls As String
+                    a1cls = FormNameByInstGlobal(a1disp)
+                    If Len(a1cls) = 0 And Not gNativeGlobalClass Is Nothing Then a1cls = NativeColGet(gNativeGlobalClass, "g" & a1disp)
+                    If Len(a1cls) > 0 Then
+                        NVRegObjType(0) = a1cls: NVRegObjInst(0) = a1nm
+                        NVRegObjVt(0) = "": NVRegObjGuid(0) = "": NVRegObjVtGuid(0) = ""
+                        NVRegFieldCls(0) = "": NVRegFieldRecv(0) = ""
+                    End If
                 End If
             End If
         Case &H8D                       'lea r32, [mem]  (address-of / ptr arithmetic)
